@@ -19,11 +19,10 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# add your model's MetaData object here
-# for 'autogenerate' support
-# from tgshelf.db.models import Base  # wired in task A2
-# target_metadata = Base.metadata
-target_metadata = None
+# model MetaData for 'autogenerate' support
+from tgshelf.db.models import Base
+
+target_metadata = Base.metadata
 
 
 def _resolve_db_url() -> str | None:

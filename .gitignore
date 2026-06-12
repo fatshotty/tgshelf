@@ -1,0 +1,26 @@
+# local reference to the legacy codebase (symlink)
+legacy
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# runtime / secrets
+config.yaml
+data/
+*.session
+*.session-journal
+.env
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+docs/

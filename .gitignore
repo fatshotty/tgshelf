@@ -18,6 +18,9 @@ data/
 *.session-journal
 .env
 
+# tests: kept local-only for now, will be committed when the suite is ready
+tests/
+
 # OS / editor
 .DS_Store
 .vscode/

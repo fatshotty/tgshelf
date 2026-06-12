@@ -36,9 +36,11 @@ telegram:
 download:
   multi_bot_download: 3         # parallel bots per stream (1 = sequential)
   allow_user_fallback: false    # use user accounts when the bot pool is exhausted
-  max_concurrent_streams: 20    # streams beyond this limit wait in an admission queue
-  chunk_timeout: 6              # seconds before a chunk is retried on a replacement bot
-  prefetch_window: 8388608      # per-stream prefetch buffer (bytes)
+  chunk_timeout: 6              # seconds without a chunk reply before the bot is replaced
+  # Optional safety valve: estimated total buffer bytes above which NEW streams
+  # start sequential (K=1) instead of multi-bot. Streams are NEVER refused or
+  # queued; per-stream RAM is bounded at multi_bot_download x 1MiB. 0 = disabled.
+  memory_soft_limit: 0
 
 operations:             # throttling for massive Telegram operations (move/copy/delete)
   concurrent: 3

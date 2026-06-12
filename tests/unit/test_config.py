@@ -27,8 +27,10 @@ def test_minimal_config_applies_defaults(tmp_path):
     assert cfg.telegram.users == ()
     assert cfg.session_storage == "db"
     assert cfg.logger == "info"
-    assert cfg.download.multi_bot_download == 3
+    assert cfg.download.multi_bot_download == 1
     assert cfg.download.allow_user_fallback is False
+    assert cfg.download.chunk_timeout == 6.0
+    assert cfg.download.memory_soft_limit == 0
     assert cfg.operations.batch == 10
     assert cfg.http.port == 3000
     assert cfg.strm.template == "http://127.0.0.1:3000/files/{file_id}"
@@ -140,6 +142,15 @@ download:
   multi_bot_download: 0
 """
     with pytest.raises(ConfigError, match="multi_bot_download"):
+        load_config(write_config(tmp_path, yaml_text), env={})
+
+
+def test_negative_memory_soft_limit_raises(tmp_path):
+    yaml_text = MINIMAL_YAML + """
+download:
+  memory_soft_limit: -1
+"""
+    with pytest.raises(ConfigError, match="memory_soft_limit"):
         load_config(write_config(tmp_path, yaml_text), env={})
 
 

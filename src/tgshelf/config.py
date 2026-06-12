@@ -61,9 +61,10 @@ class TelegramConfig:
 class DownloadConfig:
     multi_bot_download: int = 1
     allow_user_fallback: bool = False
-    max_concurrent_streams: int = 20
     chunk_timeout: float = 6.0
-    prefetch_window: int = 8 * 1024 * 1024
+    # Soft RAM threshold (bytes) above which NEW streams start sequential (K=1)
+    # instead of multi-bot. 0 = disabled. Streams are never refused or queued.
+    memory_soft_limit: int = 0
 
 
 @dataclass(frozen=True)
@@ -213,18 +214,17 @@ def _parse_download(raw: Mapping[str, Any]) -> DownloadConfig:
         allow_user_fallback=_bool(
             section, "allow_user_fallback", DownloadConfig.allow_user_fallback, path="download"
         ),
-        max_concurrent_streams=_int(
-            section, "max_concurrent_streams", DownloadConfig.max_concurrent_streams, path="download"
-        ),
         chunk_timeout=_float(section, "chunk_timeout", DownloadConfig.chunk_timeout, path="download"),
-        prefetch_window=_int(
-            section, "prefetch_window", DownloadConfig.prefetch_window, path="download"
+        memory_soft_limit=_int(
+            section, "memory_soft_limit", DownloadConfig.memory_soft_limit, path="download"
         ),
     )
     if cfg.multi_bot_download < 1:
         raise ConfigError("'download.multi_bot_download' must be >= 1")
-    if cfg.max_concurrent_streams < 1:
-        raise ConfigError("'download.max_concurrent_streams' must be >= 1")
+    if cfg.chunk_timeout <= 0:
+        raise ConfigError("'download.chunk_timeout' must be > 0")
+    if cfg.memory_soft_limit < 0:
+        raise ConfigError("'download.memory_soft_limit' must be >= 0 (0 = disabled)")
     return cfg
 
 

@@ -69,6 +69,7 @@ class Uploader:
         min_size: int,
         on_part: Hook | None = None,
         on_reset: Callable[[], Any] | None = None,
+        resume_parts: tuple[PartRecord, ...] = (),
     ) -> UploadResult:
         member = self._pool.lease_one()
         if member is None:
@@ -82,6 +83,7 @@ class Uploader:
                 return await self._attempt(
                     member, source_factory, filename, mime, channel_id,
                     min_size, on_part, is_premium=member.is_premium,
+                    resume_parts=resume_parts,
                 )
             except UploadLimitExceeded as exc:
                 # premium expired at runtime: downgrade, warn, reset, retry free
@@ -92,13 +94,14 @@ class Uploader:
                     await _maybe_await(on_reset())
                 return await self._attempt(
                     member, source_factory, filename, mime, channel_id,
-                    min_size, on_part, is_premium=False,
+                    min_size, on_part, is_premium=False, resume_parts=resume_parts,
                 )
         finally:
             self._pool.release(member)
 
     async def _attempt(
-        self, member, source_factory, filename, mime, channel_id, min_size, on_part, *, is_premium
+        self, member, source_factory, filename, mime, channel_id, min_size, on_part,
+        *, is_premium, resume_parts: tuple[PartRecord, ...],
     ) -> UploadResult:
         boundary = self._premium_max if is_premium else self._free_max
         engine = UploadEngine(
@@ -107,6 +110,7 @@ class Uploader:
             max_in_flight=self._max_in_flight,
             file_id_factory=self._file_id_factory,
         )
+        # newly finalized portions (resume_parts are already on Telegram/DB)
         sent: list[PartRecord] = []
 
         async def track(rec: PartRecord) -> None:
@@ -114,8 +118,9 @@ class Uploader:
             if on_part is not None:
                 await _maybe_await(on_part(rec))
 
+        skip_bytes = sum(p.size for p in resume_parts)
         try:
-            return await engine.upload(
+            fresh = await engine.upload(
                 source_factory(),
                 filename=filename,
                 mime=mime,
@@ -123,9 +128,26 @@ class Uploader:
                 min_size=min_size,
                 max_upload_parts=boundary,
                 on_part=track,
+                skip_bytes=skip_bytes,
+                start_portion_idx=len(resume_parts),
             )
-        except UploadLimitExceeded:
-            # delete any portions already finalized into the channel
+        except BaseException:
+            # any failure: delete the portions finalized in THIS attempt so they
+            # are not orphaned on Telegram (already-done resume_parts are kept).
+            # The TEMP node itself is dropped by the caller (fs facade).
             for rec in sent:
-                await member.client.delete_message(rec.channel_id, rec.message_id)
+                try:
+                    await member.client.delete_message(rec.channel_id, rec.message_id)
+                except Exception:  # noqa: BLE001 - best-effort cleanup
+                    pass
             raise
+
+        # small file stored inline (only possible without resume)
+        if fresh.inline_content is not None:
+            return fresh
+
+        all_parts = tuple(resume_parts) + fresh.parts
+        return UploadResult(
+            size=sum(p.size for p in all_parts),
+            parts=all_parts,
+        )

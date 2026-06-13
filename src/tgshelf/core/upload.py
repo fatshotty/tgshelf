@@ -72,8 +72,18 @@ class UploadEngine:
         min_size: int,
         max_upload_parts: int,
         on_part: Callable[[PartRecord], Awaitable[None] | None] | None = None,
+        skip_bytes: int = 0,
+        start_portion_idx: int = 0,
     ) -> UploadResult:
         stream = aiter(source)
+
+        # resume: skip the already-uploaded prefix, go straight to portions
+        if skip_bytes or start_portion_idx:
+            leftover = await self._skip(stream, skip_bytes)
+            return await self._upload_portions(
+                leftover, stream, filename, mime, channel_id, max_upload_parts,
+                on_part, start_portion_idx=start_portion_idx,
+            )
 
         # buffer until we exceed min_size or hit EOF
         buf = bytearray()
@@ -91,8 +101,23 @@ class UploadEngine:
             buf, stream, filename, mime, channel_id, max_upload_parts, on_part
         )
 
+    async def _skip(self, stream, n: int) -> bytearray:
+        """Discard the first n bytes; return any over-read remainder."""
+        remaining = n
+        while remaining > 0:
+            try:
+                chunk = await anext(stream)
+            except StopAsyncIteration:
+                break
+            if len(chunk) <= remaining:
+                remaining -= len(chunk)
+            else:
+                return bytearray(chunk[remaining:])
+        return bytearray()
+
     async def _upload_portions(
-        self, buf, stream, filename, mime, channel_id, max_upload_parts, on_part
+        self, buf, stream, filename, mime, channel_id, max_upload_parts, on_part,
+        *, start_portion_idx: int = 0,
     ) -> UploadResult:
         records: list[PartRecord] = []
         sem = asyncio.Semaphore(self._max_in_flight)
@@ -100,7 +125,7 @@ class UploadEngine:
 
         file_id = self._new_file_id()
         part_idx = 0          # SaveBigFilePart index within the current portion
-        portion_idx = 0
+        portion_idx = start_portion_idx
         portion_size = 0
 
         pieces = self._pieces(buf, stream)

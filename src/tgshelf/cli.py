@@ -8,10 +8,11 @@ corresponding task lands. Unimplemented commands exit with code 2.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 
 from tgshelf import __version__
-from tgshelf.config import ConfigError, load_config
+from tgshelf.config import Config, ConfigError, load_config
 from tgshelf.log import setup_logging
 
 # command -> (help, implementing task)
@@ -44,8 +45,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     for name, (help_text, _task) in COMMANDS.items():
-        subparsers.add_parser(name, help=help_text)
+        cmd = subparsers.add_parser(name, help=help_text)
+        if name == "accounts":
+            _add_accounts_subparsers(cmd)
     return parser
+
+
+def _add_accounts_subparsers(cmd: argparse.ArgumentParser) -> None:
+    sub = cmd.add_subparsers(dest="accounts_cmd", required=True)
+    sub.add_parser("list", help="list configured accounts and session status")
+    login = sub.add_parser("login", help="interactive user login")
+    login.add_argument("name", help="account name from config")
+    add_bot = sub.add_parser("add-bot", help="register a bot from its config token")
+    add_bot.add_argument("name", help="bot account name from config")
+    imp = sub.add_parser("import", help="import a legacy Telethon .session file")
+    imp.add_argument("name", help="account name from config")
+    imp.add_argument("--session", required=True, help="path to the .session file")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -58,6 +73,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     setup_logging(config.logger)
+
+    return _dispatch(config, args)
+
+
+def _dispatch(config: Config, args: argparse.Namespace) -> int:
+    if args.command == "accounts":
+        from tgshelf.commands import accounts
+
+        return asyncio.run(accounts.run(config, args))
 
     _help_text, task = COMMANDS[args.command]
     print(

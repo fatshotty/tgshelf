@@ -39,7 +39,11 @@ def effective_channel(
 
 
 async def forward_parts(
-    gateway: Any, parts: Sequence[PartRecord], dest_channel: int
+    gateway: Any,
+    parts: Sequence[PartRecord],
+    dest_channel: int,
+    *,
+    always_copy: bool = False,
 ) -> list[PartRecord]:
     """Copy each part to `dest_channel`, returning the new part records.
 
@@ -49,11 +53,13 @@ async def forward_parts(
     parts to the DB first, then deletes the originals (delete_originals), so an
     interruption can only leak duplicate copies, never lose data.
 
-    A part already in `dest_channel` is kept as-is (no copy, no duplicate).
+    For a MOVE, a part already in `dest_channel` is kept as-is (same file, no
+    duplicate). For a COPY (`always_copy=True`) every part is duplicated so the
+    new node owns its own messages (no shared-message footgun).
     """
     new_parts: list[PartRecord] = []
     for part in parts:
-        if part.channel_id == dest_channel:
+        if part.channel_id == dest_channel and not always_copy:
             new_parts.append(part)
             continue
 

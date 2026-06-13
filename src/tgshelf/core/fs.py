@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 
 from tgshelf.constants import ROOT_ID
 from tgshelf.core import channels
+from tgshelf.core.batch import Throttle
 from tgshelf.core.download import RangeNotSatisfiable, StreamPlan
 from tgshelf.core.upload import PartRecord
 from tgshelf.db.models import Node
@@ -38,6 +39,7 @@ class FileSystem:
         streamer: Any = None,
         gateway: Any = None,
         min_size: int = 0,
+        throttle: Throttle | None = None,
     ):
         self.repo = repo
         self._master_channel = master_channel
@@ -45,6 +47,9 @@ class FileSystem:
         self._streamer = streamer
         self._gateway = gateway  # user client for management ops (delete/forward)
         self._min_size = min_size
+        # concurrent=1: subtree re-routes share one DB session (sequential),
+        # the batch sleep still throttles the Telegram forwards
+        self._throttle = throttle or Throttle(concurrent=1)
 
     # -- reads / navigation -------------------------------------------------
 
@@ -146,6 +151,60 @@ class FileSystem:
             raise DuplicateNameError(
                 f"cannot restore {node_id}: an active sibling has the same name"
             ) from exc
+
+    # -- move ---------------------------------------------------------------
+
+    async def move(self, node_id: str, new_parent_id: str) -> Node:
+        """Move a node to a new parent. A file (or a folder's descendant files)
+        whose effective channel changes has its parts physically forwarded to
+        the new channel; a same-channel move is just a reparent."""
+        node = await self.repo.get(node_id)
+        if node is None:
+            raise NotAReadableFile(f"node {node_id} not found")
+        name, is_folder = node.name, node.is_folder  # before any rollback expires node
+
+        try:
+            await self.repo.set_fields(node_id, parent_id=new_parent_id)
+            await self.repo.session.commit()
+        except IntegrityError as exc:
+            await self.repo.session.rollback()
+            raise DuplicateNameError(
+                f"a node named '{name}' already exists in the destination"
+            ) from exc
+
+        if is_folder:
+            files = [n for n in await self.repo.subtree(node_id, state="ACTIVE") if not n.is_folder]
+            await self._throttle.run(files, self._reroute_file)
+        else:
+            await self._reroute_file(node)
+        return await self.repo.get(node_id)
+
+    async def _reroute_file(self, file: Node) -> None:
+        """Physically relocate a file's parts if its effective channel changed."""
+        source = file.channel_id
+        dest = await self.effective_channel(file.id, skip_current=True)
+        if dest == source:
+            return
+
+        parts = await self.repo.parts_of(file.id)
+        if not parts:  # inline file: just move the channel pointer
+            await self.repo.set_fields(file.id, channel_id=dest)
+            await self.repo.session.commit()
+            return
+
+        new_parts = await channels.forward_parts(self._gateway, parts, dest)
+        await self.repo.clear_parts(file.id)
+        for np in new_parts:
+            await self.repo.add_part(
+                file.id, idx=np.idx, channel_id=np.channel_id, message_id=np.message_id,
+                doc_id=np.doc_id, size=np.size, original_filename=np.original_filename,
+            )
+        await self.repo.set_fields(file.id, channel_id=dest)
+        await self.repo.session.commit()  # commit BEFORE deleting originals (crash-safe)
+
+        await channels.delete_originals(
+            self._gateway, [p for p in parts if p.channel_id != dest]
+        )
 
     # -- write --------------------------------------------------------------
 

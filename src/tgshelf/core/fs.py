@@ -206,6 +206,94 @@ class FileSystem:
             self._gateway, [p for p in parts if p.channel_id != dest]
         )
 
+    # -- copy ---------------------------------------------------------------
+
+    async def copy(self, node_id: str, new_parent_id: str) -> Node:
+        """Copy a node under `new_parent_id`, leaving the source untouched.
+        Telegram messages are duplicated so the copy owns its own messages."""
+        node = await self.repo.get(node_id)
+        if node is None:
+            raise NotAReadableFile(f"node {node_id} not found")
+        if node.is_folder:
+            return await self._copy_folder(node, new_parent_id)
+        return await self._copy_file(node, new_parent_id)
+
+    async def _dedup_name(self, parent_id: str, name: str, *, is_folder: bool) -> str:
+        children = await self.repo.children(parent_id)
+        taken = {c.name.lower() for c in children}
+        if name.lower() not in taken:
+            return name
+        if is_folder:
+            stem, suffix = name, ""
+        else:
+            dot = name.rfind(".")
+            stem, suffix = (name, "") if dot <= 0 else (name[:dot], name[dot:])
+        i = 1
+        while f"{stem} - {i}{suffix}".lower() in taken:
+            i += 1
+        return f"{stem} - {i}{suffix}"
+
+    async def _copy_file(self, src: Node, dst_parent_id: str) -> Node:
+        dest_channel = await self.effective_channel(dst_parent_id)
+        name = await self._dedup_name(dst_parent_id, src.name, is_folder=False)
+
+        content = await self.repo.content_of(src.id)
+        if content is not None:
+            new = await self.repo.create(
+                name=name, parent_id=dst_parent_id, is_folder=False, mime=src.mime,
+                channel_id=dest_channel, state="ACTIVE", size=len(content), content=content,
+            )
+            await self.repo.session.commit()
+            return await self.repo.get(new.id)
+
+        src_parts = await self.repo.parts_of(src.id)
+        new = await self.repo.create(
+            name=name, parent_id=dst_parent_id, is_folder=False, mime=src.mime,
+            channel_id=dest_channel, state="TEMP",
+        )
+        await self.repo.session.commit()
+        new_parts = await channels.forward_parts(
+            self._gateway, src_parts, dest_channel, always_copy=True
+        )
+        for np in new_parts:
+            await self.repo.add_part(
+                new.id, idx=np.idx, channel_id=np.channel_id, message_id=np.message_id,
+                doc_id=np.doc_id, size=np.size, original_filename=np.original_filename,
+            )
+        await self.repo.set_fields(
+            new.id, state="ACTIVE", size=sum(p.size for p in new_parts)
+        )
+        await self.repo.session.commit()
+        return await self.repo.get(new.id)
+
+    async def _ensure_folder(self, parent_id: str, name: str) -> str:
+        """Reuse a same-name folder under parent (merge) or create it; return id."""
+        existing = await self.repo.children(parent_id, folders_only=True)
+        match = next((c for c in existing if c.name.lower() == name.lower()), None)
+        if match is not None:
+            return match.id
+        created = await self.repo.create(
+            name=name, parent_id=parent_id, is_folder=True, state="ACTIVE"
+        )
+        await self.repo.session.commit()
+        return created.id
+
+    async def _copy_folder(self, src: Node, dst_parent_id: str) -> Node:
+        mapping = {src.id: await self._ensure_folder(dst_parent_id, src.name)}
+        descendants = await self.repo.subtree(src.id, state="ACTIVE")  # shallow-first
+
+        # pass 1: recreate the folder structure (parents before children)
+        for node in descendants:
+            if node.is_folder:
+                mapping[node.id] = await self._ensure_folder(mapping[node.parent_id], node.name)
+
+        # pass 2: copy the files into their mapped folders (throttled)
+        files = [n for n in descendants if not n.is_folder]
+        await self._throttle.run(
+            files, lambda f: self._copy_file(f, mapping[f.parent_id])
+        )
+        return await self.repo.get(mapping[src.id])
+
     # -- write --------------------------------------------------------------
 
     async def write(

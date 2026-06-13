@@ -9,9 +9,18 @@ fetched window before handing bytes to the client.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, field
+from typing import Any, AsyncIterator, Sequence
 
 from tgshelf.constants import CHUNK_SIZE
+from tgshelf.telegram.errors import (
+    ChannelUnavailable,
+    FileRefExpired,
+    FloodCooldown,
+    PartMissing,
+)
+from tgshelf.telegram.pool import BotPool, ClientPool, PoolMember
 
 
 class RangeNotSatisfiable(Exception):
@@ -88,3 +97,173 @@ class StreamPlan:
             range_end=end,
             total_size=total,
         )
+
+
+@dataclass
+class _StreamState:
+    cond: asyncio.Condition
+    n: int
+    next_dispatch: int = 0
+    next_emit: int = 0
+    results: dict = field(default_factory=dict)  # seq -> trimmed bytes
+    error: BaseException | None = None
+
+
+class ParallelStreamer:
+    """Streams a file's range over K bots with a FIFO window and transparent
+    failover. Workers pull chunks in order (window bounds claimed-but-not-emitted
+    to K, so RAM ≈ K chunks); the emitter yields strictly in seq order. A worker
+    whose bot floods/times-out/loses the channel swaps to a replacement and
+    requeues the chunk; FileRefExpired re-resolves the part once. The client sees
+    only ordered bytes, never the reshuffling underneath.
+    """
+
+    def __init__(
+        self,
+        bot_pool: BotPool,
+        *,
+        k: int,
+        chunk_size: int = CHUNK_SIZE,
+        chunk_timeout: float = 6.0,
+        max_retries: int = 3,
+        user_pool: ClientPool | None = None,
+        allow_user_fallback: bool = False,
+        sleep=asyncio.sleep,
+    ):
+        self._bot_pool = bot_pool
+        self._k = k
+        self._chunk_size = chunk_size
+        self._chunk_timeout = chunk_timeout
+        self._max_retries = max_retries
+        self._user_pool = user_pool
+        self._allow_user_fallback = allow_user_fallback
+        self._sleep = sleep
+
+    async def stream(
+        self, parts: Sequence[Any], plan: StreamPlan, channel_id: int
+    ) -> AsyncIterator[bytes]:
+        chunks = plan.chunks
+        state = _StreamState(cond=asyncio.Condition(), n=len(chunks))
+        part_refs: dict[int, Any] = {}
+
+        bots = self._bot_pool.lease_bots(channel_id, self._k)
+        if not bots:
+            bots = [await self._replace(channel_id, failed=None)]
+
+        workers = [
+            asyncio.create_task(self._worker(state, chunks, parts, channel_id, part_refs, bot))
+            for bot in bots
+        ]
+        try:
+            for seq in range(state.n):
+                async with state.cond:
+                    while seq not in state.results and state.error is None:
+                        await state.cond.wait()
+                    if state.error is not None:
+                        raise state.error
+                    data = state.results.pop(seq)
+                    state.next_emit = seq + 1
+                    state.cond.notify_all()
+                yield data
+        finally:
+            for w in workers:
+                w.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+
+    async def _worker(self, state, chunks, parts, channel_id, part_refs, bot):
+        while True:
+            async with state.cond:
+                while True:
+                    if state.error is not None or state.next_dispatch >= state.n:
+                        return
+                    if state.next_dispatch < state.next_emit + self._k:
+                        idx = state.next_dispatch
+                        state.next_dispatch += 1
+                        break
+                    await state.cond.wait()
+            chunk = chunks[idx]
+            try:
+                data, bot = await self._fetch(chunk, parts, channel_id, part_refs, bot)
+            except BaseException as exc:  # noqa: BLE001 - propagated to the emitter
+                async with state.cond:
+                    if state.error is None:
+                        state.error = exc
+                    state.cond.notify_all()
+                return
+            async with state.cond:
+                state.results[chunk.seq] = data
+                state.cond.notify_all()
+
+    async def _fetch(self, chunk, parts, channel_id, part_refs, bot):
+        p = parts[chunk.part_idx]
+        retries = 0
+        last_exc: BaseException | None = None
+        while True:
+            ref = part_refs.get(chunk.part_idx)
+            if ref is None:
+                ref = await bot.client.get_document(p.channel_id, p.message_id)
+                if ref is None:
+                    raise PartMissing(file_path=str(p.message_id), part_idx=chunk.part_idx)
+                part_refs[chunk.part_idx] = ref
+
+            self._bot_pool.acquire(bot)
+            need_replacement = False
+            try:
+                raw = await asyncio.wait_for(
+                    bot.client.get_file_chunk(ref, chunk.offset, chunk.limit),
+                    timeout=self._chunk_timeout,
+                )
+                self._bot_pool.mark_success(bot)
+                return raw[chunk.trim_start : chunk.trim_end], bot
+            except FloodCooldown as exc:
+                self._bot_pool.mark_flood(bot, exc.seconds)
+                last_exc, need_replacement = exc, True
+            except FileRefExpired as exc:
+                part_refs[chunk.part_idx] = None  # re-resolve, same bot
+                last_exc = exc
+            except ChannelUnavailable as exc:
+                self._bot_pool.mark_ineligible(bot, channel_id)
+                last_exc, need_replacement = exc, True
+            except asyncio.TimeoutError as exc:
+                self._bot_pool.mark_error(bot)
+                last_exc, need_replacement = exc, True
+            finally:
+                self._bot_pool.release(bot)
+
+            retries += 1
+            if retries > self._max_retries:
+                raise last_exc
+            if need_replacement:
+                bot = await self._replace(channel_id, failed=bot)
+
+    async def _replace(self, channel_id: int, failed: PoolMember | None) -> PoolMember:
+        exclude = [failed] if failed is not None else []
+        repl = self._bot_pool.replace(channel_id=channel_id, exclude=exclude)
+        if repl is not None:
+            return repl
+
+        if self._allow_user_fallback and self._user_pool is not None:
+            user = self._user_pool.lease_one()
+            if user is not None:
+                return user
+
+        # wait for the earliest cooldown to expire, then re-pick anyone
+        while True:
+            wait = self._earliest_cooldown_wait(channel_id)
+            if wait is None:
+                raise ChannelUnavailable(f"no client can reach channel {channel_id}")
+            await self._sleep(max(wait, 0))
+            repl = self._bot_pool.replace(channel_id=channel_id)
+            if repl is not None:
+                return repl
+
+    def _earliest_cooldown_wait(self, channel_id: int) -> float | None:
+        now = self._bot_pool.now()
+        waits = [
+            m.cooldown_until - now
+            for m in self._bot_pool.members
+            if not m.quarantined
+            and channel_id not in m.ineligible_channels
+            and m.cooldown_until > now
+        ]
+        return min(waits) if waits else None

@@ -53,6 +53,9 @@ class Pool:
     def members(self) -> list[PoolMember]:
         return list(self._members)
 
+    def now(self) -> float:
+        return self._clock()
+
     # -- availability ------------------------------------------------------
 
     def _is_available(self, m: PoolMember, channel_id: int | None, now: float) -> bool:

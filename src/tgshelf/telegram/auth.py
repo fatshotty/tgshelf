@@ -100,7 +100,16 @@ async def login_user(
     """Interactive user login; persists the StringSession via the store."""
     existing = await store.load(name)
     client = TelegramClient(StringSession(existing), api_id, api_hash)
-    await client.start(phone=phone, code_callback=code_callback, password=password)
+    # only override Telethon's interactive prompts (phone/password lambdas) when
+    # a value is actually supplied; passing None would disable the prompt
+    start_kwargs: dict = {}
+    if phone is not None:
+        start_kwargs["phone"] = phone
+    if password is not None:
+        start_kwargs["password"] = password
+    if code_callback is not None:
+        start_kwargs["code_callback"] = code_callback
+    await client.start(**start_kwargs)
     try:
         caps = await fetch_caps(client)
         await store.save(

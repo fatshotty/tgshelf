@@ -12,11 +12,14 @@ from __future__ import annotations
 import mimetypes
 from typing import Any, AsyncIterator, Callable, Sequence
 
+from sqlalchemy.exc import IntegrityError
+
+from tgshelf.constants import ROOT_ID
 from tgshelf.core import channels
 from tgshelf.core.download import RangeNotSatisfiable, StreamPlan
 from tgshelf.core.upload import PartRecord
 from tgshelf.db.models import Node
-from tgshelf.db.repo import NodeRepo
+from tgshelf.db.repo import DuplicateNameError, NodeRepo
 
 DEFAULT_MIME = "application/octet-stream"
 
@@ -33,12 +36,14 @@ class FileSystem:
         master_channel: int,
         uploader: Any = None,
         streamer: Any = None,
+        gateway: Any = None,
         min_size: int = 0,
     ):
         self.repo = repo
         self._master_channel = master_channel
         self._uploader = uploader
         self._streamer = streamer
+        self._gateway = gateway  # user client for management ops (delete/forward)
         self._min_size = min_size
 
     # -- reads / navigation -------------------------------------------------
@@ -80,6 +85,67 @@ class FileSystem:
         return channels.effective_channel(
             node, ancestors, self._master_channel, skip_current=skip_current
         )
+
+    # -- tree ops -----------------------------------------------------------
+
+    async def mkdir(self, parent_id: str, name: str) -> Node:
+        node = await self.repo.create(
+            name=name, parent_id=parent_id, is_folder=True, state="ACTIVE"
+        )
+        await self.repo.session.commit()
+        return await self.repo.get(node.id)
+
+    async def mkdirs(self, path: str) -> Node:
+        """mkdir -p: create missing folders along `path`, reusing existing ones."""
+        current = ROOT_ID
+        for segment in (s for s in path.split("/") if s):
+            existing = await self.repo.children(current, folders_only=True)
+            match = next((n for n in existing if n.name.lower() == segment.lower()), None)
+            if match is None:
+                created = await self.repo.create(
+                    name=segment, parent_id=current, is_folder=True, state="ACTIVE"
+                )
+                await self.repo.session.commit()
+                current = created.id
+            else:
+                current = match.id
+        return await self.repo.get(current)
+
+    async def rename(self, node_id: str, new_name: str) -> Node:
+        try:
+            await self.repo.set_fields(node_id, name=new_name)
+            await self.repo.session.commit()
+        except IntegrityError as exc:
+            await self.repo.session.rollback()
+            raise DuplicateNameError(f"name '{new_name}' already exists") from exc
+        return await self.repo.get(node_id)
+
+    async def set_channel(self, node_id: str, channel_id: int | None) -> Node:
+        await self.repo.set_fields(node_id, channel_id=channel_id)
+        await self.repo.session.commit()
+        return await self.repo.get(node_id)
+
+    async def delete(self, node_id: str, *, purge: bool = False) -> None:
+        if not purge:
+            await self.repo.set_state_subtree(node_id, "DELETED", from_states=("ACTIVE", "TEMP"))
+            await self.repo.session.commit()
+            return
+        # purge: remove the Telegram messages of every file in the subtree first
+        parts = await self.repo.parts_in_subtree(node_id)
+        if parts and self._gateway is not None:
+            await channels.delete_originals(self._gateway, parts)
+        await self.repo.purge_subtree(node_id)
+        await self.repo.session.commit()
+
+    async def restore(self, node_id: str) -> None:
+        try:
+            await self.repo.set_state_subtree(node_id, "ACTIVE", from_states=("DELETED",))
+            await self.repo.session.commit()
+        except IntegrityError as exc:
+            await self.repo.session.rollback()
+            raise DuplicateNameError(
+                f"cannot restore {node_id}: an active sibling has the same name"
+            ) from exc
 
     # -- write --------------------------------------------------------------
 

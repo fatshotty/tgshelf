@@ -49,7 +49,13 @@ class NodeRepo:
     # -- primitives --------------------------------------------------------
 
     async def get(self, node_id: str, *, state: str | None = None) -> Node | None:
-        stmt = select(Node).where(Node.id == node_id)
+        # populate_existing: refresh the identity-map instance from this query, so
+        # a prior bulk UPDATE (which bypasses the ORM) doesn't return stale state
+        stmt = (
+            select(Node)
+            .where(Node.id == node_id)
+            .execution_options(populate_existing=True)
+        )
         if state is not None:
             stmt = stmt.where(Node.state == state)
         return (await self.session.execute(stmt)).scalar_one_or_none()
@@ -155,6 +161,58 @@ class NodeRepo:
             select(Part).where(Part.file_id == file_id).order_by(Part.idx)
         )
         return result.scalars().all()
+
+    async def parts_in_subtree(self, root_id: str) -> Sequence[Part]:
+        """All parts of every file in the subtree (for purge → Telegram delete)."""
+        result = await self.session.execute(
+            text(
+                """
+                WITH RECURSIVE sub AS (
+                  SELECT id FROM nodes WHERE id = :root
+                  UNION ALL
+                  SELECT n.id FROM nodes n JOIN sub ON n.parent_id = sub.id
+                )
+                SELECT * FROM parts WHERE file_id IN (SELECT id FROM sub)
+                """
+            ).columns(*Part.__table__.columns),
+            {"root": root_id},
+        )
+        return [Part(**row._mapping) for row in result]
+
+    # -- recursive subtree state changes -----------------------------------
+
+    async def set_state_subtree(
+        self, root_id: str, new_state: str, *, from_states: Sequence[str]
+    ) -> None:
+        await self.session.execute(
+            text(
+                """
+                WITH RECURSIVE sub AS (
+                  SELECT id FROM nodes WHERE id = :root
+                  UNION ALL
+                  SELECT n.id FROM nodes n JOIN sub ON n.parent_id = sub.id
+                )
+                UPDATE nodes SET state = :state, mtime = now()
+                WHERE id IN (SELECT id FROM sub) AND state = ANY(:from_states)
+                """
+            ),
+            {"root": root_id, "state": new_state, "from_states": list(from_states)},
+        )
+
+    async def purge_subtree(self, root_id: str) -> None:
+        await self.session.execute(
+            text(
+                """
+                WITH RECURSIVE sub AS (
+                  SELECT id FROM nodes WHERE id = :root
+                  UNION ALL
+                  SELECT n.id FROM nodes n JOIN sub ON n.parent_id = sub.id
+                )
+                DELETE FROM nodes WHERE id IN (SELECT id FROM sub)
+                """
+            ),
+            {"root": root_id},
+        )
 
     # -- hierarchy reads ----------------------------------------------------
 

@@ -81,6 +81,19 @@ class PartMissing(TgError):
         )
 
 
+class UploadLimitExceeded(TgError):
+    """Telegram refused parts beyond the account's real size limit — the account
+    was treated as premium but is actually free (premium expired at runtime)."""
+
+    severity = Severity.ERROR
+
+    def __init__(self, detail: str = ""):
+        super().__init__(
+            f"upload limit exceeded{f' ({detail})' if detail else ''}: account is "
+            "not premium; marked free, upload retried automatically with the free boundary"
+        )
+
+
 class DocIdMismatch(TgError):
     """The live message does not hold the expected document: DB/channel drift."""
 
@@ -105,6 +118,12 @@ _CHANNEL_UNAVAILABLE = (
     tg_errors.ChatForbiddenError,
 )
 
+_UPLOAD_LIMIT = (
+    tg_errors.FilePartsInvalidError,
+    tg_errors.FilePartTooBigError,
+    tg_errors.FilePartInvalidError,
+)
+
 
 def translate_telethon_error(exc: BaseException) -> TgError | None:
     """Map a raw Telethon exception to a domain error; None = not ours."""
@@ -116,4 +135,6 @@ def translate_telethon_error(exc: BaseException) -> TgError | None:
         return SessionDead(type(exc).__name__)
     if isinstance(exc, _CHANNEL_UNAVAILABLE):
         return ChannelUnavailable(type(exc).__name__)
+    if isinstance(exc, _UPLOAD_LIMIT):
+        return UploadLimitExceeded(type(exc).__name__)
     return None

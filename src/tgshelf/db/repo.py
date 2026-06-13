@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-from sqlalchemy import Select, bindparam, func, literal, select, text
+from sqlalchemy import Select, bindparam, delete, func, literal, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,7 +18,7 @@ from sqlalchemy.orm import aliased
 
 from tgshelf.constants import ROOT_ID, ROOT_NAME
 from tgshelf.db.ids import generate_node_id
-from tgshelf.db.models import Node
+from tgshelf.db.models import Node, Part
 
 _ID_RETRIES = 3
 
@@ -106,6 +106,55 @@ class NodeRepo:
                     continue  # id collision: regenerate and retry
                 raise
         raise last_error  # type: ignore[misc]  # only reachable after retries
+
+    async def set_fields(self, node_id: str, **fields: Any) -> None:
+        await self.session.execute(
+            update(Node).where(Node.id == node_id).values(**fields)
+        )
+
+    async def purge(self, node_id: str) -> None:
+        """Hard-delete a node (parts cascade)."""
+        await self.session.execute(delete(Node).where(Node.id == node_id))
+
+    async def content_of(self, node_id: str) -> bytes | None:
+        result = await self.session.execute(
+            select(Node.content).where(Node.id == node_id)
+        )
+        return result.scalar_one_or_none()
+
+    # -- parts -------------------------------------------------------------
+
+    async def add_part(
+        self,
+        file_id: str,
+        *,
+        idx: int,
+        channel_id: int,
+        message_id: int,
+        doc_id: int | None,
+        size: int,
+        original_filename: str | None,
+    ) -> None:
+        await self.session.execute(
+            pg_insert(Part).values(
+                file_id=file_id,
+                idx=idx,
+                channel_id=channel_id,
+                message_id=message_id,
+                doc_id=doc_id,
+                size=size,
+                original_filename=original_filename,
+            )
+        )
+
+    async def clear_parts(self, file_id: str) -> None:
+        await self.session.execute(delete(Part).where(Part.file_id == file_id))
+
+    async def parts_of(self, file_id: str) -> Sequence[Part]:
+        result = await self.session.execute(
+            select(Part).where(Part.file_id == file_id).order_by(Part.idx)
+        )
+        return result.scalars().all()
 
     # -- hierarchy reads ----------------------------------------------------
 

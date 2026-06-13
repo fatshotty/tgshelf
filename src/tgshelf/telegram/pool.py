@@ -30,6 +30,7 @@ class PoolMember:
         self.cooldown_until = 0.0
         self.last_lease_seq = 0
         self.ineligible_channels: set[int] = set()
+        self.is_premium = False  # account tier (user accounts; set at login/recheck)
 
     @property
     def load(self) -> float:

@@ -99,7 +99,10 @@ async def login_user(
 ) -> AccountCaps:
     """Interactive user login; persists the StringSession via the store."""
     existing = await store.load(name)
-    client = TelegramClient(StringSession(existing), api_id, api_hash)
+    # receive_updates=False: pool clients (user/bot) only make stateless API
+    # calls — not subscribing to updates lets the same account/session be shared
+    # across instances (no AUTH_KEY_DUPLICATED). The watcher bot is separate (C5).
+    client = TelegramClient(StringSession(existing), api_id, api_hash, receive_updates=False)
     # only override Telethon's interactive prompts (phone/password lambdas) when
     # a value is actually supplied; passing None would disable the prompt
     start_kwargs: dict = {}
@@ -131,7 +134,10 @@ async def login_bot(
 ) -> AccountCaps:
     """Bot login via token; persists the StringSession via the store."""
     existing = await store.load(name)
-    client = TelegramClient(StringSession(existing), api_id, api_hash)
+    # receive_updates=False: pool clients (user/bot) only make stateless API
+    # calls — not subscribing to updates lets the same account/session be shared
+    # across instances (no AUTH_KEY_DUPLICATED). The watcher bot is separate (C5).
+    client = TelegramClient(StringSession(existing), api_id, api_hash, receive_updates=False)
     await client.start(bot_token=bot_token)
     try:
         me = await client.get_me()

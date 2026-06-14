@@ -40,6 +40,7 @@ class FileSystem:
         gateway: Any = None,
         min_size: int = 0,
         throttle: Throttle | None = None,
+        executor: Any = None,
     ):
         self.repo = repo
         self._master_channel = master_channel
@@ -47,8 +48,10 @@ class FileSystem:
         self._streamer = streamer
         self._gateway = gateway  # user client for management ops (delete/forward)
         self._min_size = min_size
-        # concurrent=1: subtree re-routes share one DB session (sequential),
-        # the batch sleep still throttles the Telegram forwards
+        # FsExecutor: when set, folder move/copy fan out per-file (each on its own
+        # session + leased account). Without it, the fallback runs sequentially on
+        # this instance's session/gateway.
+        self._executor = executor
         self._throttle = throttle or Throttle(concurrent=1)
 
     # -- reads / navigation -------------------------------------------------
@@ -174,10 +177,19 @@ class FileSystem:
 
         if is_folder:
             files = [n for n in await self.repo.subtree(node_id, state="ACTIVE") if not n.is_folder]
-            await self._throttle.run(files, self._reroute_file)
+            await self._fan_out([f.id for f in files], _reroute_op)
         else:
             await self._reroute_file(node)
         return await self.repo.get(node_id)
+
+    async def _fan_out(self, items, op) -> None:
+        """Run a per-file op across `items`: parallel via the executor (each on
+        its own session + leased account) when present, else sequentially here."""
+        if self._executor is not None:
+            await self._executor.run(items, op)
+        else:
+            for item in items:
+                await op(self, item)
 
     async def _reroute_file(self, file: Node) -> None:
         """Physically relocate a file's parts if its effective channel changed."""
@@ -287,11 +299,9 @@ class FileSystem:
             if node.is_folder:
                 mapping[node.id] = await self._ensure_folder(mapping[node.parent_id], node.name)
 
-        # pass 2: copy the files into their mapped folders (throttled)
-        files = [n for n in descendants if not n.is_folder]
-        await self._throttle.run(
-            files, lambda f: self._copy_file(f, mapping[f.parent_id])
-        )
+        # pass 2: copy the files into their mapped folders (fanned out)
+        pairs = [(n.id, mapping[n.parent_id]) for n in descendants if not n.is_folder]
+        await self._fan_out(pairs, _copy_op)
         return await self.repo.get(mapping[src.id])
 
     # -- write --------------------------------------------------------------
@@ -463,3 +473,18 @@ class FileSystem:
         plan = StreamPlan.build([p.size for p in parts], start, end)
         async for chunk in self._streamer.stream(parts, plan, node.channel_id):
             yield chunk
+
+
+# -- per-file ops for the executor fan-out (run on the worker's fs) ---------
+
+async def _reroute_op(fs: FileSystem, node_id: str) -> None:
+    file = await fs.get(node_id)
+    if file is not None and not file.is_folder:
+        await fs._reroute_file(file)
+
+
+async def _copy_op(fs: FileSystem, pair: tuple[str, str]) -> None:
+    src_id, dst_parent_id = pair
+    src = await fs.get(src_id)
+    if src is not None and not src.is_folder:
+        await fs._copy_file(src, dst_parent_id)

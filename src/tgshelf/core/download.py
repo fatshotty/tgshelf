@@ -242,28 +242,16 @@ class ParallelStreamer:
         if repl is not None:
             return repl
 
+        # bot pool exhausted: optional user fallback before waiting
         if self._allow_user_fallback and self._user_pool is not None:
             user = self._user_pool.lease_one()
             if user is not None:
                 return user
 
-        # wait for the earliest cooldown to expire, then re-pick anyone
-        while True:
-            wait = self._earliest_cooldown_wait(channel_id)
-            if wait is None:
-                raise ChannelUnavailable(f"no client can reach channel {channel_id}")
-            await self._sleep(max(wait, 0))
-            repl = self._bot_pool.replace(channel_id=channel_id)
-            if repl is not None:
-                return repl
-
-    def _earliest_cooldown_wait(self, channel_id: int) -> float | None:
-        now = self._bot_pool.now()
-        waits = [
-            m.cooldown_until - now
-            for m in self._bot_pool.members
-            if not m.quarantined
-            and channel_id not in m.ineligible_channels
-            and m.cooldown_until > now
-        ]
-        return min(waits) if waits else None
+        # otherwise wait for a bot to free up (shared lease+wait logic)
+        repl = await self._bot_pool.lease_or_wait(
+            channel_id=channel_id, exclude=exclude, sleep=self._sleep
+        )
+        if repl is None:
+            raise ChannelUnavailable(f"no client can reach channel {channel_id}")
+        return repl

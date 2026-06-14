@@ -98,6 +98,43 @@ class Pool:
                 return m
         return None
 
+    async def lease_or_wait(
+        self,
+        *,
+        channel_id: int | None = None,
+        exclude: Sequence[PoolMember] = (),
+        sleep=time.sleep,
+    ) -> PoolMember | None:
+        """Lease the least-loaded eligible member; if all eligible ones are on
+        cooldown, wait for the earliest to free and retry. Returns None when no
+        member can ever become available (all quarantined/ineligible).
+
+        `exclude` is honored only for the immediate attempt — after waiting, an
+        excluded member whose cooldown has expired is fair game again. Reused by
+        the streamer (bots) and the operation executor (user accounts)."""
+        member = self.replace(channel_id=channel_id, exclude=exclude)
+        if member is not None:
+            return member
+        while True:
+            wait = self._earliest_cooldown_wait(channel_id)
+            if wait is None:
+                return None  # nothing will free up on its own
+            await sleep(max(wait, 0))
+            member = self.replace(channel_id=channel_id)
+            if member is not None:
+                return member
+
+    def _earliest_cooldown_wait(self, channel_id: int | None) -> float | None:
+        now = self._clock()
+        waits = [
+            m.cooldown_until - now
+            for m in self._members
+            if not m.quarantined
+            and (channel_id is None or channel_id not in m.ineligible_channels)
+            and m.cooldown_until > now
+        ]
+        return min(waits) if waits else None
+
     # -- in-flight bookkeeping (for load balancing, not concurrency: the
     #    real GetFile concurrency cap lives in TgClient's semaphore) --------
 

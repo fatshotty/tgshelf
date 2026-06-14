@@ -32,6 +32,13 @@ telegram:
   notify:
     # Alert channel for CRITICAL/ERROR notifications (sent via a user account).
     channel: -1001234567891
+  # Proactive per-account rate limit: bench an account after `calls` Telegram API
+  # calls within `window` seconds (reuses the FloodWait cooldown path). 0 = off.
+  # coordination: memory (per-instance) | redis (cross-instance, not yet implemented).
+  rate_limit:
+    calls: 0
+    window: 1.0
+    coordination: memory
 
 download:
   multi_bot_download: 3         # parallel bots per stream (1 = sequential)

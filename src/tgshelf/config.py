@@ -51,10 +51,20 @@ class NotifyConfig:
 
 
 @dataclass(frozen=True)
+class RateLimitConfig:
+    # proactive per-account limit: max API calls per window (0 = disabled).
+    # cross-instance coordination backend; only "memory" is implemented.
+    calls: int = 0
+    window: float = 1.0
+    coordination: str = "memory"
+
+
+@dataclass(frozen=True)
 class TelegramConfig:
     upload: UploadConfig
     notify: NotifyConfig = NotifyConfig()
     users: tuple[AccountConfig, ...] = ()
+    rate_limit: RateLimitConfig = RateLimitConfig()
 
 
 @dataclass(frozen=True)
@@ -198,10 +208,27 @@ def _parse_telegram(raw: Mapping[str, Any]) -> TelegramConfig:
         _int(notify, "channel", 0, path="telegram.notify") if "channel" in notify else None
     )
 
+    rl = _section(section, "rate_limit")
+    coordination = _str(rl, "coordination", RateLimitConfig.coordination, path="telegram.rate_limit")
+    if coordination not in ("memory", "redis"):
+        raise ConfigError(
+            f"'telegram.rate_limit.coordination' must be 'memory' or 'redis', got {coordination!r}"
+        )
+    rate_limit = RateLimitConfig(
+        calls=_int(rl, "calls", RateLimitConfig.calls, path="telegram.rate_limit"),
+        window=_float(rl, "window", RateLimitConfig.window, path="telegram.rate_limit"),
+        coordination=coordination,
+    )
+    if rate_limit.calls < 0:
+        raise ConfigError("'telegram.rate_limit.calls' must be >= 0 (0 = disabled)")
+    if rate_limit.window <= 0:
+        raise ConfigError("'telegram.rate_limit.window' must be > 0")
+
     return TelegramConfig(
         upload=UploadConfig(channel=channel, min_size=min_size),
         notify=NotifyConfig(channel=notify_channel),
         users=_parse_accounts(section.get("users")),
+        rate_limit=rate_limit,
     )
 
 

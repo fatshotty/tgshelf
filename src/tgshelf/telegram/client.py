@@ -11,6 +11,7 @@ touch telethon — they are exercised by manual smoke tests (real Telegram).
 from __future__ import annotations
 
 import asyncio
+import math
 from typing import Any, Awaitable, Callable
 
 from telethon import errors as tg_errors
@@ -47,6 +48,7 @@ class TgClient:
         max_retries: int = 3,
         max_flood_retries: int = 3,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        rate_limiter: Any = None,
     ):
         self._client = client
         self.name = name
@@ -55,6 +57,7 @@ class TgClient:
         self._max_retries = max_retries
         self._max_flood_retries = max_flood_retries
         self._sleep = sleep
+        self._rate_limiter = rate_limiter
 
     # -- middleware --------------------------------------------------------
 
@@ -66,6 +69,12 @@ class TgClient:
             transient = 0
             floods = 0
             while True:
+                # proactive per-account rate limit: bench the account before
+                # Telegram floods it (reuses the FloodCooldown failover path)
+                if self._rate_limiter is not None:
+                    wait = self._rate_limiter.acquire(self.name)
+                    if wait > 0:
+                        raise FloodCooldown(math.ceil(wait))
                 try:
                     return await do_call()
                 except tg_errors.FloodWaitError as exc:

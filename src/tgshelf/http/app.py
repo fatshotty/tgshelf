@@ -21,6 +21,10 @@ log = logging.getLogger("tgshelf.http")
 
 AUTH_EXEMPT_PATHS = frozenset({"/ping"})
 
+# runtime components (session_factory, master_channel, executor, …) live under
+# one typed AppKey — avoids aiohttp's deprecated str-keyed app storage
+RUNTIME: "web.AppKey[dict]" = web.AppKey("tgshelf_runtime", dict)
+
 
 def _client_ip(request: web.Request) -> ipaddress._BaseAddress | None:
     remote = request.remote
@@ -68,14 +72,35 @@ def make_auth_middleware(config: HttpConfig):
     return auth_middleware
 
 
+def _domain_status(exc: Exception) -> int | None:
+    """Map a domain exception to an HTTP status (None = unhandled → 500)."""
+    from tgshelf.core.download import RangeNotSatisfiable
+    from tgshelf.core.fs import NotAReadableFile
+    from tgshelf.db.repo import DuplicateNameError
+
+    if isinstance(exc, DuplicateNameError):
+        return 409
+    if isinstance(exc, NotAReadableFile):
+        return 404
+    if isinstance(exc, RangeNotSatisfiable):
+        return 416
+    if isinstance(exc, ValueError):
+        return 400
+    return None
+
+
 @web.middleware
 async def error_middleware(request: web.Request, handler):
-    """Turn unhandled exceptions into JSON; pass HTTP responses through."""
+    """Pass HTTP responses through; map domain exceptions to status codes;
+    anything else becomes a JSON 500."""
     try:
         return await handler(request)
     except web.HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
+        status = _domain_status(exc)
+        if status is not None:
+            return web.json_response({"error": str(exc)}, status=status)
         log.exception("unhandled error serving %s %s", request.method, request.path)
         return web.json_response({"error": str(exc)}, status=500)
 
@@ -90,6 +115,5 @@ def make_app(config: HttpConfig, **extra: Any) -> web.Application:
         client_max_size=0,  # uploads stream; no in-memory body cap
     )
     app.router.add_get("/ping", _ping)
-    for key, value in extra.items():
-        app[key] = value
+    app[RUNTIME] = dict(extra)
     return app

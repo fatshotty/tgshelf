@@ -154,8 +154,20 @@ async def run_server(config: Config) -> None:
     clients = await start_clients(config, rate_limiter)
     runtime = build_runtime(config, session_factory, clients)
 
-    app = make_app(config.http, **{k: runtime[k] for k in ("executor", "streamer", "client_pool", "bot_pool")})
-    # JSON + streaming routes are registered in B2/B3.
+    from tgshelf.http.api import register_routes
+
+    app = make_app(
+        config.http,
+        session_factory=session_factory,
+        master_channel=config.telegram.upload.channel,
+        min_size=config.telegram.upload.min_size,
+        executor=runtime["executor"],
+        uploader=runtime["uploader"],
+        streamer=runtime["streamer"],
+        client_pool=runtime["client_pool"],
+        bot_pool=runtime["bot_pool"],
+    )
+    register_routes(app)  # JSON metadata + tree (B2); streaming/upload in B3.
 
     runner = web.AppRunner(app)
     await runner.setup()

@@ -1,0 +1,182 @@
+"""`serve` composition root: build the runtime from config and run the HTTP app.
+
+The pure wiring (account classification, rate limiter, engine assembly) is unit
+tested. Starting the real Telegram clients and running the server are the
+Telegram/IO boundary, exercised by manual smoke tests.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import signal
+from pathlib import Path
+from typing import Any, Sequence
+
+from aiohttp import web
+
+from tgshelf.config import Config, RateLimitConfig
+from tgshelf.constants import PART_SIZE
+from tgshelf.core.executor import FsExecutor
+from tgshelf.core.uploader import Uploader
+from tgshelf.db.engine import create_engine, create_session_factory
+from tgshelf.http.app import make_app
+from tgshelf.telegram.pool import BotPool, ClientPool, PoolMember
+from tgshelf.telegram.ratelimit import InMemoryRateLimiter
+
+log = logging.getLogger("tgshelf.serve")
+
+
+class ServeError(Exception):
+    """The runtime cannot be assembled (e.g. no usable account)."""
+
+
+# -- pure composition (unit tested) ----------------------------------------
+
+
+def build_pools(
+    clients: Sequence[tuple[Any, Any]], *, capacity: int = 4
+) -> tuple[ClientPool, BotPool]:
+    """Split (account_config, started_client) pairs into the user pool (upload /
+    management) and the bot pool (download / streaming)."""
+    users: list[PoolMember] = []
+    bots: list[PoolMember] = []
+    for account, client in clients:
+        member = PoolMember(client=client, name=account.name, capacity=capacity)
+        (bots if account.is_bot else users).append(member)
+    if not users:
+        raise ServeError("at least one user account is required (upload/management)")
+    return ClientPool(users), BotPool(bots)
+
+
+def make_rate_limiter(rate_limit: RateLimitConfig):
+    if rate_limit.calls <= 0:
+        return None
+    if rate_limit.coordination == "redis":
+        raise NotImplementedError(
+            "redis rate-limit coordination is not implemented yet (memory only)"
+        )
+    return InMemoryRateLimiter(max_calls=rate_limit.calls, window=rate_limit.window)
+
+
+def build_runtime(config: Config, session_factory, clients) -> dict[str, Any]:
+    """Assemble pools + engines + executor from started clients. Returns the
+    components the HTTP routes will use."""
+    client_pool, bot_pool = build_pools(clients)
+    uploader = Uploader(client_pool, part_size=PART_SIZE)
+    streamer_pool = bot_pool if bot_pool.members else client_pool
+    from tgshelf.core.download import ParallelStreamer
+
+    streamer = ParallelStreamer(
+        streamer_pool,
+        k=config.download.multi_bot_download,
+        chunk_timeout=config.download.chunk_timeout,
+        user_pool=client_pool,
+        allow_user_fallback=config.download.allow_user_fallback,
+    )
+    executor = FsExecutor(
+        session_factory,
+        client_pool,
+        master_channel=config.telegram.upload.channel,
+        concurrent=config.operations.concurrent,
+        min_size=config.telegram.upload.min_size,
+        uploader=uploader,
+        streamer=streamer,
+    )
+    return {
+        "config": config,
+        "session_factory": session_factory,
+        "client_pool": client_pool,
+        "bot_pool": bot_pool,
+        "uploader": uploader,
+        "streamer": streamer,
+        "executor": executor,
+    }
+
+
+# -- Telegram / IO boundary (smoke tested) ---------------------------------
+
+
+async def start_clients(config: Config, rate_limiter) -> list[tuple[Any, Any]]:
+    """Connect each configured account from its stored session. Accounts without
+    a usable session are skipped with a warning (run `accounts login`)."""
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+
+    from tgshelf.telegram.client import TgClient
+    from tgshelf.telegram.session_store import build_session_store
+
+    store_session = None
+    engine = None
+    if config.session_storage == "db":
+        engine = create_engine(config.db)
+        store_session = await create_session_factory(engine)().__aenter__()
+    store = build_session_store(
+        config.session_storage, data_dir=Path(config.data), session=store_session
+    )
+
+    clients: list[tuple[Any, Any]] = []
+    try:
+        for account in config.telegram.users:
+            session_str = await store.load(account.name)
+            if not session_str:
+                log.warning(
+                    "account '%s' has no session; run `tgshelf accounts login %s`",
+                    account.name, account.name,
+                )
+                continue
+            tele = TelegramClient(
+                StringSession(session_str), account.api_id, account.api_hash,
+                receive_updates=False,
+            )
+            await tele.connect()
+            if not await tele.is_user_authorized():
+                log.warning("session for '%s' is not authorized; re-login", account.name)
+                await tele.disconnect()
+                continue
+            clients.append((account, TgClient(tele, name=account.name, rate_limiter=rate_limiter)))
+    finally:
+        if store_session is not None:
+            await store_session.close()
+        if engine is not None:
+            await engine.dispose()
+    return clients
+
+
+async def run_server(config: Config) -> None:
+    if not config.http.enabled:
+        raise ServeError("http.enabled is false; nothing to serve")
+
+    engine = create_engine(config.db)
+    session_factory = create_session_factory(engine)
+    rate_limiter = make_rate_limiter(config.telegram.rate_limit)
+
+    clients = await start_clients(config, rate_limiter)
+    runtime = build_runtime(config, session_factory, clients)
+
+    app = make_app(config.http, **{k: runtime[k] for k in ("executor", "streamer", "client_pool", "bot_pool")})
+    # JSON + streaming routes are registered in B2/B3.
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    for host in (h.strip() for h in config.http.host.split(",") if h.strip()):
+        await web.TCPSite(runner, host, config.http.port).start()
+        log.info("serving on %s:%s", host, config.http.port)
+
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except NotImplementedError:  # pragma: no cover - non-unix
+            pass
+    try:
+        await stop.wait()
+    finally:
+        await runner.cleanup()
+        for _account, client in clients:
+            disconnect = getattr(getattr(client, "_client", None), "disconnect", None)
+            if disconnect is not None:
+                await disconnect()
+        await engine.dispose()
+        log.info("stopped")

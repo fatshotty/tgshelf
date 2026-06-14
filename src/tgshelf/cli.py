@@ -83,6 +83,16 @@ def _dispatch(config: Config, args: argparse.Namespace) -> int:
 
         return asyncio.run(accounts.run(config, args))
 
+    if args.command == "serve":
+        from tgshelf.http.serve import ServeError, run_server
+
+        try:
+            asyncio.run(run_server(config))
+        except ServeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        return 0
+
     _help_text, task = COMMANDS[args.command]
     print(
         f"tgshelf {args.command}: not implemented yet (scheduled for task {task})",

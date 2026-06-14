@@ -204,8 +204,11 @@ def _parse_telegram(raw: Mapping[str, Any]) -> TelegramConfig:
         )
 
     notify = _section(section, "notify")
+    # optional: absent OR empty -> no alert channel (notifications stay log-only)
     notify_channel = (
-        _int(notify, "channel", 0, path="telegram.notify") if "channel" in notify else None
+        _int(notify, "channel", 0, path="telegram.notify")
+        if notify.get("channel") not in (None, "")
+        else None
     )
 
     rl = _section(section, "rate_limit")

@@ -15,8 +15,11 @@ Health, all driven by the engines reacting to TgClient errors:
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, Callable, Iterable, Sequence
+
+log = logging.getLogger("tgshelf.pool")
 
 
 class PoolMember:
@@ -118,10 +121,13 @@ class Pool:
         while True:
             wait = self._earliest_cooldown_wait(channel_id)
             if wait is None:
+                log.warning("[exhausted] no client can serve channel %s right now", channel_id)
                 return None  # nothing will free up on its own
+            log.info("[wait] all clients busy/cooled; waiting %.1fs for the next free", wait)
             await sleep(max(wait, 0))
             member = self.replace(channel_id=channel_id)
             if member is not None:
+                log.debug("[wait] '%s' became available", member.name)
                 return member
 
     def _earliest_cooldown_wait(self, channel_id: int | None) -> float | None:
@@ -148,21 +154,34 @@ class Pool:
 
     def mark_flood(self, m: PoolMember, seconds: float) -> None:
         m.cooldown_until = self._clock() + seconds
+        log.warning("[flood] '%s' PAUSED for %.0fs (cooldown)", m.name, seconds)
 
     def mark_error(self, m: PoolMember) -> None:
         m.consecutive_errors += 1
         if m.consecutive_errors >= self._max_errors:
             m.quarantined = True
+            log.warning(
+                "[quarantine] '%s' QUARANTINED after %d consecutive errors",
+                m.name, m.consecutive_errors,
+            )
+        else:
+            log.debug("'%s' error %d/%d", m.name, m.consecutive_errors, self._max_errors)
 
     def mark_success(self, m: PoolMember) -> None:
+        if m.consecutive_errors:
+            log.debug("'%s' recovered after %d error(s)", m.name, m.consecutive_errors)
         m.consecutive_errors = 0
 
     def mark_ineligible(self, m: PoolMember, channel_id: int) -> None:
         m.ineligible_channels.add(channel_id)
+        log.warning("[eligibility] '%s' cannot reach channel %s (excluded for it)", m.name, channel_id)
 
     def recover(self, m: PoolMember) -> None:
+        was = m.quarantined
         m.quarantined = False
         m.consecutive_errors = 0
+        if was:
+            log.info("[recover] '%s' quarantine lifted", m.name)
 
 
 class ClientPool(Pool):

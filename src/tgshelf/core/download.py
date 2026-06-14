@@ -10,10 +10,13 @@ fetched window before handing bytes to the client.
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Sequence
 
 from tgshelf.constants import CHUNK_SIZE
+
+log = logging.getLogger("tgshelf.download")
 from tgshelf.telegram.errors import (
     ChannelUnavailable,
     FileRefExpired,
@@ -146,9 +149,15 @@ class ParallelStreamer:
         state = _StreamState(cond=asyncio.Condition(), n=len(chunks))
         part_refs: dict[int, Any] = {}
 
-        bots = self._bot_pool.lease_bots(channel_id, self._k)
+        # generic lease (works whether the pool is a BotPool or, when no bots
+        # are configured, the user ClientPool)
+        bots = self._bot_pool.lease(self._k, channel_id=channel_id)
         if not bots:
             bots = [await self._replace(channel_id, failed=None)]
+        log.debug(
+            "stream: channel %s, %d chunk(s), bots %s",
+            channel_id, len(chunks), [b.name for b in bots],
+        )
 
         workers = [
             asyncio.create_task(self._worker(state, chunks, parts, channel_id, part_refs, bot))
@@ -217,15 +226,22 @@ class ParallelStreamer:
                 return raw[chunk.trim_start : chunk.trim_end], bot
             except FloodCooldown as exc:
                 self._bot_pool.mark_flood(bot, exc.seconds)
+                log.info("[failover] chunk %d: '%s' flooded; replacing bot", chunk.seq, bot.name)
                 last_exc, need_replacement = exc, True
             except FileRefExpired as exc:
+                log.debug("chunk %d: file_reference expired; re-resolving part %d",
+                          chunk.seq, chunk.part_idx)
                 part_refs[chunk.part_idx] = None  # re-resolve, same bot
                 last_exc = exc
             except ChannelUnavailable as exc:
                 self._bot_pool.mark_ineligible(bot, channel_id)
+                log.warning("[failover] chunk %d: '%s' cannot reach channel %s; replacing",
+                            chunk.seq, bot.name, channel_id)
                 last_exc, need_replacement = exc, True
             except asyncio.TimeoutError as exc:
                 self._bot_pool.mark_error(bot)
+                log.warning("[failover] chunk %d: '%s' timed out (>%.0fs); replacing",
+                            chunk.seq, bot.name, self._chunk_timeout)
                 last_exc, need_replacement = exc, True
             finally:
                 self._bot_pool.release(bot)

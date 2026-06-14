@@ -11,14 +11,18 @@ touch telethon — they are exercised by manual smoke tests (real Telegram).
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 from typing import Any, Awaitable, Callable
+
+log = logging.getLogger("tgshelf.client")
 
 from telethon import errors as tg_errors
 from telethon.tl.functions.messages import SendMediaRequest
 from telethon.tl.functions.upload import GetFileRequest, SaveBigFilePartRequest
 from telethon.tl.types import (
     DocumentAttributeFilename,
+    InputDocument,
     InputDocumentFileLocation,
     InputFileBig,
     InputMediaDocument,
@@ -74,19 +78,31 @@ class TgClient:
                 if self._rate_limiter is not None:
                     wait = self._rate_limiter.acquire(self.name)
                     if wait > 0:
+                        log.debug("[ratelimit] '%s' window full; backing off %.1fs", self.name, wait)
                         raise FloodCooldown(math.ceil(wait))
                 try:
                     return await do_call()
                 except tg_errors.FloodWaitError as exc:
                     if exc.seconds <= self._flood_threshold and floods < self._max_flood_retries:
                         floods += 1
+                        log.debug(
+                            "[flood] '%s' FloodWait %ds (<= %ds); sleeping and retrying inline",
+                            self.name, exc.seconds, self._flood_threshold,
+                        )
                         await self._sleep(exc.seconds)
                         continue
+                    log.warning(
+                        "[flood] '%s' FloodWait %ds (> %ds); surfacing as cooldown",
+                        self.name, exc.seconds, self._flood_threshold,
+                    )
                     raise FloodCooldown(exc.seconds) from exc
-                except _TRANSIENT:
+                except _TRANSIENT as exc:
                     transient += 1
                     if transient >= self._max_retries:
+                        log.warning("'%s' transient error, giving up after %d tries: %s",
+                                    self.name, transient, exc)
                         raise
+                    log.debug("'%s' transient error, retry %d/%d", self.name, transient, self._max_retries)
                     await self._sleep(min(_BACKOFF_BASE * 2 ** (transient - 1), _BACKOFF_CAP))
                     continue
                 except Exception as exc:  # noqa: BLE001 - re-raised below
@@ -123,15 +139,20 @@ class TgClient:
         return None
 
     async def get_file_chunk(self, ref: DocRef, offset: int, limit: int = CHUNK_SIZE) -> bytes:
+        request = GetFileRequest(
+            location=ref.location, offset=offset, limit=limit, precise=False
+        )
+        # same DC as the client -> use the main connection directly. Exporting an
+        # authorization for the home DC raises DcIdInvalidError (legacy did the
+        # same check). Only foreign-DC files need a borrowed media sender.
+        home_dc = getattr(self._client.session, "dc_id", None)
+        if ref.dc_id is None or ref.dc_id == home_dc:
+            result = await self._with_middleware(lambda: self._client(request))
+            return result.bytes
+
         sender = await self._client._borrow_exported_sender(ref.dc_id)
         try:
-            result = await self._with_middleware(
-                lambda: sender.send(
-                    GetFileRequest(
-                        location=ref.location, offset=offset, limit=limit, precise=False
-                    )
-                )
-            )
+            result = await self._with_middleware(lambda: sender.send(request))
             return result.bytes
         finally:
             await self._client._return_exported_sender(sender)
@@ -178,12 +199,24 @@ class TgClient:
     async def copy_message(
         self, from_channel_id: int, message_id: int, to_channel_id: int
     ) -> tuple[int, int]:
-        ref = await self.get_document(from_channel_id, message_id)
-        if ref is None:
-            raise ValueError(f"no media on message {message_id} of {from_channel_id}")
+        # fetch the source message once: we need both its document (to re-send
+        # server-side, no byte transfer) and its caption (the "fileName: …" set
+        # at upload), which must be preserved across the move/copy.
+        message = await self._with_middleware(
+            lambda: self._client.get_messages(from_channel_id, ids=message_id)
+        )
+        if message is None or getattr(message, "empty", False):
+            raise ValueError(f"no message {message_id} in {from_channel_id}")
+        doc = getattr(message, "document", None)
+        if doc is None:
+            raise ValueError(f"message {message_id} of {from_channel_id} has no document")
+
         peer = await self._client.get_input_entity(to_channel_id)
         media = InputMediaDocument(
-            id=_input_document(ref), spoiler=False
+            id=InputDocument(
+                id=doc.id, access_hash=doc.access_hash, file_reference=doc.file_reference
+            ),
+            spoiler=False,
         )
         result = await self.invoke(
             SendMediaRequest(
@@ -191,7 +224,7 @@ class TgClient:
                 media=media,
                 random_id=_random_id(),
                 silent=True,
-                message="",
+                message=message.message or "",  # preserve the original caption
             )
         )
         return _extract_sent(result)
@@ -211,15 +244,6 @@ def _filename_of(doc: Any) -> str | None:
         if isinstance(attr, DocumentAttributeFilename):
             return attr.file_name
     return None
-
-
-def _input_document(ref: DocRef):
-    from telethon.tl.types import InputDocument
-
-    loc = ref.location
-    return InputDocument(
-        id=loc.id, access_hash=loc.access_hash, file_reference=loc.file_reference
-    )
 
 
 def _random_id() -> int:

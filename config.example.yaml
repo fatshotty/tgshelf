@@ -30,8 +30,9 @@ telegram:
     # Master channel, mapped 1:1 to the root folder "/".
     channel: -1001234567890
   notify:
-    # Alert channel for CRITICAL/ERROR notifications (sent via a user account).
-    channel: -1001234567891
+    # Optional alert channel for CRITICAL/ERROR notifications (sent via a user
+    # account). Leave empty or omit to keep notifications log-only.
+    channel:
   # Proactive per-account rate limit: bench an account after `calls` Telegram API
   # calls within `window` seconds (reuses the FloodWait cooldown path). 0 = off.
   # coordination: memory (per-instance) | redis (cross-instance, not yet implemented).

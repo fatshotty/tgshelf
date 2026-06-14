@@ -17,12 +17,15 @@ The source is a FACTORY (re-openable): the premium retry re-reads from the start
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 from tgshelf.constants import PART_SIZE
 from tgshelf.core.upload import PartRecord, UploadEngine, UploadResult, _default_file_id
 from tgshelf.telegram.errors import UploadLimitExceeded
 from tgshelf.telegram.pool import ClientPool, PoolMember
+
+log = logging.getLogger("tgshelf.upload")
 
 SourceFactory = Callable[[], AsyncIterator[bytes]]
 Hook = Callable[..., Awaitable[None] | None]
@@ -79,6 +82,10 @@ class Uploader:
         try:
             if self._premium_check is not None:
                 member.is_premium = await self._premium_check(member.client)
+            log.info(
+                "upload '%s' on account '%s' (premium=%s)",
+                filename, member.name, member.is_premium,
+            )
             try:
                 return await self._attempt(
                     member, source_factory, filename, mime, channel_id,
@@ -87,6 +94,10 @@ class Uploader:
                 )
             except UploadLimitExceeded as exc:
                 # premium expired at runtime: downgrade, warn, reset, retry free
+                log.warning(
+                    "[premium] '%s' is not premium after all; retrying '%s' at the free boundary",
+                    member.name, filename,
+                )
                 member.is_premium = False
                 if self._notifier is not None:
                     self._notifier(exc)

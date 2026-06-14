@@ -357,6 +357,88 @@ class FileSystem:
         await self.repo.session.commit()
         return await self.repo.get(node.id)
 
+    # -- import / merge -----------------------------------------------------
+
+    async def import_message(
+        self,
+        channel_id: int,
+        message_id: int,
+        *,
+        parent_id: str = ROOT_ID,
+        name: str | None = None,
+        mime: str | None = None,
+    ) -> Node | None:
+        """Catalog a file posted directly to a channel (bot listener / watcher).
+
+        Idempotent: a message already cataloged is skipped (dedupe by
+        channel+message). A same-name ACTIVE node is left as-is; a DELETED one is
+        resurrected in place (SAME node id, so old .strm URLs keep working).
+        Returns None if the message carries no media.
+        """
+        already = await self.repo.get_file_by_message(channel_id, message_id)
+        if already is not None:
+            return already
+
+        ref = await self._gateway.get_document(channel_id, message_id)
+        if ref is None:
+            return None  # not a file
+
+        name = name or ref.filename or f"file_{message_id}"
+        mime = mime or ref.mime or DEFAULT_MIME
+
+        sibling = await self.repo.get_child_by_name(parent_id, name)
+        if sibling is not None and sibling.state == "ACTIVE":
+            return sibling
+        if sibling is not None and sibling.state == "DELETED":
+            await self.repo.clear_parts(sibling.id)
+            await self.repo.add_part(
+                sibling.id, idx=0, channel_id=channel_id, message_id=message_id,
+                doc_id=ref.doc_id, size=ref.size, original_filename=name,
+            )
+            await self.repo.set_fields(
+                sibling.id, state="ACTIVE", channel_id=channel_id, mime=mime, size=ref.size
+            )
+            await self.repo.session.commit()
+            return await self.repo.get(sibling.id)
+
+        node = await self.repo.create(
+            name=name, parent_id=parent_id, is_folder=False, mime=mime,
+            channel_id=channel_id, state="ACTIVE", size=ref.size,
+        )
+        await self.repo.add_part(
+            node.id, idx=0, channel_id=channel_id, message_id=message_id,
+            doc_id=ref.doc_id, size=ref.size, original_filename=name,
+        )
+        await self.repo.session.commit()
+        return await self.repo.get(node.id)
+
+    async def merge_parts(self, target_id: str, donor_ids: Sequence[str]) -> Node:
+        """Stitch chunked-upload files into one: append the donors' parts to the
+        target, re-index 0..n (critical for streaming offsets), hard-delete the
+        donor nodes (their messages are reassigned, not deleted). One transaction.
+        """
+        all_ids = [target_id, *donor_ids]
+        for nid in all_ids:
+            if await self.repo.content_of(nid) is not None:
+                raise ValueError(f"cannot merge inline (DB-stored) file {nid}")
+
+        gathered: list[Any] = []
+        for nid in all_ids:
+            gathered.extend(await self.repo.parts_of(nid))
+
+        for nid in all_ids:
+            await self.repo.clear_parts(nid)
+        for i, p in enumerate(gathered):
+            await self.repo.add_part(
+                target_id, idx=i, channel_id=p.channel_id, message_id=p.message_id,
+                doc_id=p.doc_id, size=p.size, original_filename=p.original_filename,
+            )
+        for donor_id in donor_ids:
+            await self.repo.purge(donor_id)
+        await self.repo.set_fields(target_id, size=sum(p.size for p in gathered))
+        await self.repo.session.commit()
+        return await self.repo.get(target_id)
+
     # -- read ---------------------------------------------------------------
 
     async def open_read(

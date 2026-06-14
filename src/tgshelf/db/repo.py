@@ -162,6 +162,26 @@ class NodeRepo:
         )
         return result.scalars().all()
 
+    async def get_file_by_message(self, channel_id: int, message_id: int) -> Node | None:
+        """The file that owns a given Telegram message (dedupe for imports)."""
+        result = await self.session.execute(
+            select(Node)
+            .join(Part, Part.file_id == Node.id)
+            .where(Part.channel_id == channel_id, Part.message_id == message_id)
+            .limit(1)
+        )
+        return result.scalars().first()
+
+    async def get_child_by_name(
+        self, parent_id: str, name: str, *, state: str | None = None
+    ) -> Node | None:
+        stmt = select(Node).where(
+            Node.parent_id == parent_id, func.lower(Node.name) == name.lower()
+        )
+        if state is not None:
+            stmt = stmt.where(Node.state == state)
+        return (await self.session.execute(stmt.limit(1))).scalars().first()
+
     async def parts_in_subtree(self, root_id: str) -> Sequence[Part]:
         """All parts of every file in the subtree (for purge → Telegram delete)."""
         result = await self.session.execute(

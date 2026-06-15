@@ -57,6 +57,10 @@ def build_parser() -> argparse.ArgumentParser:
             cmd.add_argument("--source", help="drive folder to mirror (default: config strm.source)")
             cmd.add_argument("--destination", help="local output folder (default: config strm.destination)")
             cmd.add_argument("--clear", action="store_true", help="wipe destination first (full regen)")
+        elif name == "sync":
+            cmd.add_argument("local_dir", help="local directory to upload")
+            cmd.add_argument("--dest", help="drive destination folder (default: /)")
+            cmd.add_argument("--concurrent", type=int, help="parallel uploads (default: config operations.concurrent)")
     return parser
 
 
@@ -101,6 +105,11 @@ def _dispatch(config: Config, args: argparse.Namespace) -> int:
         from tgshelf.commands import strm
 
         return asyncio.run(strm.run(config, args))
+
+    if args.command == "sync":
+        from tgshelf.commands import sync
+
+        return asyncio.run(sync.run(config, args))
 
     if args.command == "serve":
         from tgshelf.http.serve import ServeError, run_server

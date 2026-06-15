@@ -248,6 +248,43 @@ async def merge_node(request: web.Request) -> web.Response:
         return web.json_response(node_to_dict(merged))
 
 
+async def strm_node(request: web.Request) -> web.Response:
+    """Generate .strm for one folder/file into the global strm.destination tree
+    at its correct relative position (partial in-place regen — no reprocessing of
+    the parent). Synchronous (strm is local-only). Body: {clear?: bool}."""
+    from tgshelf.commands import strm as strm_cmd
+
+    node_id = request.match_info["id"]
+    body = await _json_body(request)
+    clear = bool(body.get("clear", False))
+    cfg = request.app[RUNTIME].get("strm")
+    if cfg is None:
+        return _bad_request("strm is not configured")
+    async with open_fs(request) as fs:
+        node = await fs.get(node_id)
+        if node is None:
+            return _not_found(f"node {node_id} not found")
+        node_path = await fs.path_of(node_id)
+        base = strm_cmd.strm_base(cfg.destination, cfg.source, node_path, node.is_folder)
+        if base is None:
+            return _bad_request(f"node is not under strm.source ({cfg.source})")
+        # clear only makes sense for a folder; for a file it would wipe siblings
+        stats = await strm_cmd.generate(
+            fs.repo, node, base, cfg.template, clear=clear and node.is_folder
+        )
+        log.info("strm generated for %s -> %s (%s)", node_id, base, stats)
+        return web.json_response(
+            {
+                "destination": str(base),
+                "created": stats.created,
+                "updated": stats.updated,
+                "skipped": stats.skipped,
+                "removed": stats.removed,
+                "inline": stats.inline,
+            }
+        )
+
+
 def register_routes(app: web.Application) -> None:
     app.router.add_get("/api/v1/nodes/{id}", get_node)
     app.router.add_get("/api/v1/nodes/{id}/children", list_children)
@@ -260,3 +297,4 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/api/v1/nodes/{id}/move", move_node)
     app.router.add_post("/api/v1/nodes/{id}/copy", copy_node)
     app.router.add_post("/api/v1/nodes/{id}/merge", merge_node)
+    app.router.add_post("/api/v1/nodes/{id}/strm", strm_node)

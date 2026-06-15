@@ -61,6 +61,25 @@ def strm_name(node) -> str:
     return f"{Path(node.name).stem}.strm"
 
 
+def strm_base(destination, source_path: str, node_path: str, is_folder: bool) -> Path | None:
+    """Where a partial regen of `node_path` writes inside the global destination
+    tree, so the output matches a full regen but only that subtree is touched.
+
+    Folder → destination / <node path relative to source> (generate writes its
+    contents under it). File → destination / <parent path relative to source>
+    (generate writes the single file under it). Returns None if the node is not
+    under `source_path`.
+    """
+    src = [s for s in source_path.split("/") if s]
+    segs = [s for s in node_path.split("/") if s]
+    if segs[: len(src)] != src:
+        return None
+    rel = segs[len(src):]
+    if not is_folder and rel:
+        rel = rel[:-1]  # a file's outputs live in its parent directory
+    return Path(destination, *rel)
+
+
 def _write(path: Path, data: bytes, stats: Stats) -> None:
     """Create the file, or MODIFY it in place when its content changed (never
     delete+recreate); skip when identical."""
@@ -103,7 +122,12 @@ async def generate(repo: NodeRepo, source, destination, template: str, *, clear:
         shutil.rmtree(destination)
     destination.mkdir(parents=True, exist_ok=True)
 
-    nodes = await repo.subtree(source.id, state=None)  # all states (for paths + cleanup)
+    # a folder regenerates its whole subtree; a single file regenerates itself
+    # (subtree() returns only descendants, so a file would yield nothing)
+    if source.is_folder:
+        nodes = await repo.subtree(source.id, state=None)  # all states (paths + cleanup)
+    else:
+        nodes = [source]
     by_id = {n.id: n for n in nodes}
     stats = Stats()
 

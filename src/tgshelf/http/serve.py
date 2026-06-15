@@ -170,6 +170,7 @@ async def run_server(config: Config) -> None:
         streamer=runtime["streamer"],
         client_pool=runtime["client_pool"],
         bot_pool=runtime["bot_pool"],
+        strm=config.strm,
     )
     register_routes(app)  # JSON metadata + tree (B2)
     register_download_routes(app)  # streaming download (B3)

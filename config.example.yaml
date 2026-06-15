@@ -66,10 +66,15 @@ http:
 strm:
   destination: ./strm
   source: /
-  # Arbitrary template for the .strm file content. Placeholders:
-  #   {file_id} {filename} {channel_id} {parts} {size} {mime}
-  # e.g. "http://127.0.0.1:3000/files/{file_id}?{channel_id}|{parts}"
-  template: "http://127.0.0.1:3000/files/{file_id}"
+  # Arbitrary template for the .strm file content. The ONLY fixed requirement is
+  # that the path starts with "<baseurl>/download/{file_id}" (file_id = first
+  # segment after /download). Anything after — extra path segments and the whole
+  # query string — is free and ignored by the server (decoration for clients/
+  # players). Every placeholder you use is resolved from the node by the strm
+  # generator: {file_id}=id, {filename}=name, {channel_id}=channel, {parts}=part
+  # message_ids (by idx, comma-separated), {size}=bytes, {mime}=mime.
+  # e.g. "http://127.0.0.1:3000/download/{file_id}/{filename}?{channel_id}|{parts}"
+  template: "http://127.0.0.1:3000/download/{file_id}/{filename}"
   clear_folder: false
 
 changes_feed:

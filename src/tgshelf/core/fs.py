@@ -10,6 +10,7 @@ import/merge.
 from __future__ import annotations
 
 import mimetypes
+import re
 from typing import Any, AsyncIterator, Callable, Sequence
 
 from sqlalchemy.exc import IntegrityError
@@ -23,6 +24,15 @@ from tgshelf.db.models import Node
 from tgshelf.db.repo import DuplicateNameError, NodeRepo
 
 DEFAULT_MIME = "application/octet-stream"
+
+# structural mime validation: type/subtype as RFC tokens, optional ";params".
+# Not a closed registry (new types appear); just rejects garbage (no slash,
+# empty side, spaces, multiple slashes).
+_MIME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9!#$&^_+.-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_+.-]*(\s*;.*)?$")
+
+
+def is_valid_mime(mime: str) -> bool:
+    return bool(_MIME_RE.match(mime))
 
 
 class NotAReadableFile(Exception):
@@ -129,7 +139,32 @@ class FileSystem:
         return await self.repo.get(node_id)
 
     async def set_channel(self, node_id: str, channel_id: int | None) -> Node:
+        node = await self.repo.get(node_id)
+        if node is None:
+            raise NotAReadableFile(f"node {node_id} not found")
+        # set_channel applies to FOLDERS only (set an override, or NULL = inherit).
+        # A file's channel is where its parts physically live: it can ONLY change
+        # via move(), which forwards the parts. Changing it here would desync the
+        # node from its messages.
+        if not node.is_folder:
+            raise ValueError("a file's channel can only be changed by moving it")
         await self.repo.set_fields(node_id, channel_id=channel_id)
+        await self.repo.session.commit()
+        return await self.repo.get(node_id)
+
+    async def set_mime(self, node_id: str, mime: str | None) -> Node:
+        """Set a file's mime; an empty/None mime is deduced from its filename.
+        A non-empty user mime must be structurally valid (type/subtype)."""
+        node = await self.repo.get(node_id)
+        if node is None:
+            raise NotAReadableFile(f"node {node_id} not found")
+        if mime:
+            if not is_valid_mime(mime):
+                raise ValueError(f"invalid mime type: {mime!r}")
+            resolved = mime
+        else:
+            resolved = mimetypes.guess_type(node.name)[0] or DEFAULT_MIME
+        await self.repo.set_fields(node_id, mime=resolved)
         await self.repo.session.commit()
         return await self.repo.get(node_id)
 

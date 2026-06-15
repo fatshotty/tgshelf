@@ -155,6 +155,7 @@ async def run_server(config: Config) -> None:
     runtime = build_runtime(config, session_factory, clients)
 
     from tgshelf.http.api import register_routes
+    from tgshelf.http.download import register_download_routes
 
     app = make_app(
         config.http,
@@ -167,7 +168,8 @@ async def run_server(config: Config) -> None:
         client_pool=runtime["client_pool"],
         bot_pool=runtime["bot_pool"],
     )
-    register_routes(app)  # JSON metadata + tree (B2); streaming/upload in B3.
+    register_routes(app)  # JSON metadata + tree (B2)
+    register_download_routes(app)  # streaming download (B3)
 
     runner = web.AppRunner(app)
     await runner.setup()

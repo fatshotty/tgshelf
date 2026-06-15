@@ -68,6 +68,11 @@ def build_parser() -> argparse.ArgumentParser:
             cmd.add_argument("--delay", type=int, default=5, help="seconds between creations (default: 5)")
         elif name == "bots":
             _add_bots_subparsers(cmd)
+        elif name == "import-channel":
+            cmd.add_argument(
+                "--limit", type=int, default=0,
+                help="scan only the last N messages (0 = whole history, default)",
+            )
     return parser
 
 
@@ -135,6 +140,11 @@ def _dispatch(config: Config, args: argparse.Namespace) -> int:
             return asyncio.run(bots.run_check(config, args))
         print(f"error: unknown bots subcommand {args.bots_cmd!r}", file=sys.stderr)
         return 2
+
+    if args.command == "import-channel":
+        from tgshelf.commands import import_channel
+
+        return asyncio.run(import_channel.run(config, args))
 
     if args.command == "serve":
         from tgshelf.http.serve import ServeError, run_server

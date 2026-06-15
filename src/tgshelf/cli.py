@@ -61,7 +61,19 @@ def build_parser() -> argparse.ArgumentParser:
             cmd.add_argument("local_dir", help="local directory to upload")
             cmd.add_argument("--dest", help="drive destination folder (default: /)")
             cmd.add_argument("--concurrent", type=int, help="parallel uploads (default: config operations.concurrent)")
+        elif name == "create-bots":
+            cmd.add_argument("--prefix", required=True, help="bot username prefix (e.g. 'redstream' -> redstream_01_bot)")
+            cmd.add_argument("--count", type=int, required=True, help="how many bots to create")
+            cmd.add_argument("--start", type=int, default=1, help="first index (default: 1)")
+            cmd.add_argument("--delay", type=int, default=5, help="seconds between creations (default: 5)")
+        elif name == "bots":
+            _add_bots_subparsers(cmd)
     return parser
+
+
+def _add_bots_subparsers(cmd: argparse.ArgumentParser) -> None:
+    sub = cmd.add_subparsers(dest="bots_cmd", required=True)
+    sub.add_parser("check", help="verify/repair bot membership on all channels in use")
 
 
 def _add_accounts_subparsers(cmd: argparse.ArgumentParser) -> None:
@@ -110,6 +122,11 @@ def _dispatch(config: Config, args: argparse.Namespace) -> int:
         from tgshelf.commands import sync
 
         return asyncio.run(sync.run(config, args))
+
+    if args.command == "create-bots":
+        from tgshelf.commands import bots
+
+        return asyncio.run(bots.run_create(config, args))
 
     if args.command == "serve":
         from tgshelf.http.serve import ServeError, run_server

@@ -7,6 +7,8 @@ Handlers raise domain exceptions; the error middleware maps them to status codes
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from aiohttp import web
@@ -16,20 +18,51 @@ from tgshelf.db.repo import NodeRepo
 from tgshelf.http.app import RUNTIME
 from tgshelf.http.schemas import node_to_dict
 
+log = logging.getLogger("tgshelf.http.api")
+
+
+def _runtime_fs(rt: dict, session) -> FileSystem:
+    return FileSystem(
+        NodeRepo(session),
+        master_channel=rt["master_channel"],
+        executor=rt.get("executor"),
+        uploader=rt.get("uploader"),
+        streamer=rt.get("streamer"),
+        gateway=rt.get("gateway"),
+        min_size=rt.get("min_size", 0),
+    )
+
 
 @asynccontextmanager
 async def open_fs(request: web.Request):
     rt = request.app[RUNTIME]
     async with rt["session_factory"]() as session:
-        yield FileSystem(
-            NodeRepo(session),
-            master_channel=rt["master_channel"],
-            executor=rt.get("executor"),
-            uploader=rt.get("uploader"),
-            streamer=rt.get("streamer"),
-            gateway=rt.get("gateway"),
-            min_size=rt.get("min_size", 0),
-        )
+        yield _runtime_fs(rt, session)
+
+
+def _spawn_background(app: web.Application, coro) -> None:
+    """Fire-and-forget a background task, keeping a reference so it is not GC'd.
+    No job tracking (decisione utente): a crash/restart loses pending work, but
+    everything committed so far is durable (per-file commits are crash-safe)."""
+    rt = app[RUNTIME]
+    tasks = rt.setdefault("_bg_tasks", set())
+    task = asyncio.create_task(coro)
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
+
+
+async def _run_op_background(rt: dict, op: str, node_id: str, parent_id: str) -> None:
+    log.info("[bg] starting %s of folder %s -> %s", op, node_id, parent_id)
+    try:
+        async with rt["session_factory"]() as session:
+            fs = _runtime_fs(rt, session)
+            if op == "move":
+                await fs.move(node_id, parent_id)
+            else:
+                await fs.copy(node_id, parent_id)
+        log.info("[bg] %s of folder %s -> %s completed", op, node_id, parent_id)
+    except Exception:  # noqa: BLE001 - fire-and-forget: log, never crash the loop
+        log.exception("[bg] %s of folder %s -> %s FAILED", op, node_id, parent_id)
 
 
 def _not_found(detail: str) -> web.Response:
@@ -99,6 +132,7 @@ async def create_folder(request: web.Request) -> web.Response:
             node = await fs.mkdir(body["parent_id"], body["name"])
         else:
             return _bad_request("provide 'path', or 'parent_id' and 'name'")
+        log.info("created folder %s (%s)", node.id, node.name)
         return web.json_response(node_to_dict(node), status=201)
 
 
@@ -120,6 +154,7 @@ async def update_node(request: web.Request) -> web.Response:
             await fs.set_channel(node_id, body["channel_id"])
         if not node.is_folder and "mime" in body:  # empty -> deduced from the name
             await fs.set_mime(node_id, body["mime"])
+        log.info("updated node %s %s", node_id, sorted(body))
         return web.json_response(node_to_dict(await fs.get(node_id)))
 
 
@@ -130,6 +165,7 @@ async def delete_node(request: web.Request) -> web.Response:
         if await fs.get(node_id) is None:
             return _not_found(f"node {node_id} not found")
         await fs.delete(node_id, purge=purge)
+        log.info("deleted node %s (purge=%s)", node_id, purge)
         return web.json_response({"ok": True, "purged": purge})
 
 
@@ -140,6 +176,7 @@ async def restore_node(request: web.Request) -> web.Response:
         node = await fs.get(node_id)
         if node is None:
             return _not_found(f"node {node_id} not found")
+        log.info("restored node %s", node_id)
         return web.json_response(node_to_dict(node))
 
 
@@ -150,10 +187,17 @@ async def move_node(request: web.Request) -> web.Response:
     if not parent_id:
         return _bad_request("'parent_id' is required")
     async with open_fs(request) as fs:
-        if await fs.get(node_id) is None:
+        node = await fs.get(node_id)
+        if node is None:
             return _not_found(f"node {node_id} not found")
-        moved = await fs.move(node_id, parent_id)
-        return web.json_response(node_to_dict(moved))
+        if node.is_folder:  # may take hours -> fire-and-forget, respond now
+            log.info("move folder %s -> %s: accepted (background)", node_id, parent_id)
+            _spawn_background(request.app, _run_op_background(request.app[RUNTIME], "move", node_id, parent_id))
+            return web.json_response(
+                {"status": "accepted", "operation": "move", "node_id": node_id}, status=202
+            )
+        log.info("move file %s -> %s", node_id, parent_id)
+        return web.json_response(node_to_dict(await fs.move(node_id, parent_id)))
 
 
 async def copy_node(request: web.Request) -> web.Response:
@@ -163,10 +207,17 @@ async def copy_node(request: web.Request) -> web.Response:
     if not parent_id:
         return _bad_request("'parent_id' is required")
     async with open_fs(request) as fs:
-        if await fs.get(node_id) is None:
+        node = await fs.get(node_id)
+        if node is None:
             return _not_found(f"node {node_id} not found")
-        new = await fs.copy(node_id, parent_id)
-        return web.json_response(node_to_dict(new), status=201)
+        if node.is_folder:  # may take hours -> fire-and-forget, respond now
+            log.info("copy folder %s -> %s: accepted (background)", node_id, parent_id)
+            _spawn_background(request.app, _run_op_background(request.app[RUNTIME], "copy", node_id, parent_id))
+            return web.json_response(
+                {"status": "accepted", "operation": "copy", "node_id": node_id}, status=202
+            )
+        log.info("copy file %s -> %s", node_id, parent_id)
+        return web.json_response(node_to_dict(await fs.copy(node_id, parent_id)), status=201)
 
 
 def register_routes(app: web.Application) -> None:

@@ -169,6 +169,17 @@ class NodeRepo:
         )
         return int(result.scalar_one())
 
+    async def distinct_channels(self) -> set[int]:
+        """Every channel currently in use: the channel_id of any node (folder
+        override or a file's own channel) or of any part. The master channel is
+        NOT included here (it lives in config, root carries no channel_id) — the
+        caller adds it. Used by create-bots / `bots check` to know which channels
+        every bot must be a member of."""
+        nodes = select(Node.channel_id).where(Node.channel_id.isnot(None)).distinct()
+        parts = select(Part.channel_id).where(Part.channel_id.isnot(None)).distinct()
+        result = await self.session.execute(nodes.union(parts))
+        return {int(c) for (c,) in result.all() if c is not None}
+
     async def get_file_by_message(self, channel_id: int, message_id: int) -> Node | None:
         """The file that owns a given Telegram message (dedupe for imports)."""
         result = await self.session.execute(

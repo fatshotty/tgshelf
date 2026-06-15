@@ -162,6 +162,13 @@ class NodeRepo:
         )
         return result.scalars().all()
 
+    async def parts_size(self, file_id: str) -> int:
+        """Effective size = sum of the part sizes (0 if none)."""
+        result = await self.session.execute(
+            select(func.coalesce(func.sum(Part.size), 0)).where(Part.file_id == file_id)
+        )
+        return int(result.scalar_one())
+
     async def get_file_by_message(self, channel_id: int, message_id: int) -> Node | None:
         """The file that owns a given Telegram message (dedupe for imports)."""
         result = await self.session.execute(

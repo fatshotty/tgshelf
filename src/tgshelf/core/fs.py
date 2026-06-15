@@ -42,6 +42,13 @@ class NotAReadableFile(Exception):
     """The node is missing, a folder, or not ACTIVE."""
 
 
+class IntegrityViolation(Exception):
+    """A file's expected size (node.size, frozen when the content is defined)
+    disagrees with its effective size (inline = len(content); parts =
+    sum(parts.size)). Signals a lost/corrupted part row or a denormalisation
+    bug — surfaced by check_size, never raised on the read path."""
+
+
 class FileSystem:
     def __init__(
         self,
@@ -416,7 +423,41 @@ class FileSystem:
         else:
             await self.repo.set_fields(node.id, size=result.size, state="ACTIVE")
         await self.repo.session.commit()
+        # post-write sanity: the persisted parts must sum back to the expected
+        # size (catches a part row that failed to persist). Always holds for a
+        # correct write; a guard, not a recovery path.
+        await self.check_size(node.id)
         return await self.repo.get(node.id)
+
+    # -- integrity ----------------------------------------------------------
+
+    async def check_size(self, node_id: str) -> bool:
+        """Verify a file's expected size equals its effective size.
+
+        expected = node.size (frozen at upload/merge); effective = len(content)
+        for inline files, sum(parts.size) for Telegram-backed ones. Folders have
+        no size and always pass. Mismatch (or a missing node) ⇒ IntegrityViolation.
+
+        Cheap and DB-only (no Telegram round-trips): meant for an on-demand fsck,
+        NOT the read path. It does NOT detect a deleted Telegram message — the
+        part row (and its size) survives that — which needs the separate, heavier
+        Telegram-level verify.
+        """
+        node = await self.repo.get(node_id)
+        if node is None:
+            raise IntegrityViolation(f"node {node_id} not found")
+        if node.is_folder:
+            return True
+        content = await self.repo.content_of(node_id)
+        if content is not None:
+            effective = len(content)
+        else:
+            effective = await self.repo.parts_size(node_id)
+        if node.size != effective:
+            raise IntegrityViolation(
+                f"size mismatch for {node_id}: expected {node.size}, effective {effective}"
+            )
+        return True
 
     # -- import / merge -----------------------------------------------------
 

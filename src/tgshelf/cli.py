@@ -48,6 +48,11 @@ def build_parser() -> argparse.ArgumentParser:
         cmd = subparsers.add_parser(name, help=help_text)
         if name == "accounts":
             _add_accounts_subparsers(cmd)
+        elif name in ("ls", "rm", "purge"):
+            cmd.add_argument("path", help="path of a folder or file")
+        elif name in ("cp", "mv"):
+            cmd.add_argument("src", help="source path (file or folder)")
+            cmd.add_argument("dst", help="destination folder path")
     return parser
 
 
@@ -82,6 +87,11 @@ def _dispatch(config: Config, args: argparse.Namespace) -> int:
         from tgshelf.commands import accounts
 
         return asyncio.run(accounts.run(config, args))
+
+    if args.command in ("ls", "cp", "mv", "rm", "purge"):
+        from tgshelf.commands import fsops
+
+        return asyncio.run(fsops.run(config, args))
 
     if args.command == "serve":
         from tgshelf.http.serve import ServeError, run_server

@@ -58,5 +58,60 @@ async def status(request: web.Request) -> web.Response:
     )
 
 
+# -- /metrics (Prometheus text exposition, no extra dependency) --------------
+
+_PROM_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
+
+
+def _metrics_text(rt: dict) -> str:
+    clients = _pool_status(rt.get("client_pool"))
+    bots = _pool_status(rt.get("bot_pool"))
+    lines: list[str] = []
+
+    def gauge(name: str, help_: str, samples: list[tuple[str, float]]) -> None:
+        lines.append(f"# HELP {name} {help_}")
+        lines.append(f"# TYPE {name} gauge")
+        for labels, value in samples:
+            suffix = f"{{{labels}}}" if labels else ""
+            lines.append(f"{name}{suffix} {value}")
+
+    def counter(name: str, help_: str, value: float) -> None:
+        lines.append(f"# HELP {name} {help_}")
+        lines.append(f"# TYPE {name} counter")
+        lines.append(f"{name} {value}")
+
+    for field, help_ in (
+        ("total", "Configured pool members."),
+        ("available", "Healthy members (not quarantined, not in cooldown)."),
+        ("in_flight", "In-flight operations across the pool."),
+    ):
+        gauge(
+            f"tgshelf_pool_{'members' if field == 'total' else field}",
+            help_,
+            [('pool="clients"', clients[field]), ('pool="bots"', bots[field])],
+        )
+
+    s = rt.get("streamer")
+    m = s.metrics() if s is not None else {}
+    gauge("tgshelf_stream_active", "Currently active download streams.",
+          [("", m.get("active_streams", 0))])
+    gauge("tgshelf_stream_buffered_bytes", "Estimated buffered bytes across active streams.",
+          [("", m.get("buffered_bytes", 0))])
+    gauge("tgshelf_stream_memory_soft_limit_bytes", "Soft buffer limit (0 = disabled).",
+          [("", m.get("memory_soft_limit", 0))])
+    counter("tgshelf_streams_total", "Download streams started.", m.get("streams_total", 0))
+    counter("tgshelf_stream_bytes_total", "Bytes emitted to clients.", m.get("bytes_total", 0))
+    counter("tgshelf_stream_degraded_total",
+            "Streams started at K=1 by the soft limit.", m.get("degraded_total", 0))
+
+    return "\n".join(lines) + "\n"
+
+
+async def metrics(request: web.Request) -> web.Response:
+    body = _metrics_text(request.app[RUNTIME]).encode("utf-8")
+    return web.Response(body=body, headers={"Content-Type": _PROM_CONTENT_TYPE})
+
+
 def register_ops_routes(app: web.Application) -> None:
     app.router.add_get("/status", status)
+    app.router.add_get("/metrics", metrics)

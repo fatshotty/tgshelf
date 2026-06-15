@@ -106,6 +106,7 @@ class StreamPlan:
 class _StreamState:
     cond: asyncio.Condition
     n: int
+    k: int = 1  # per-stream window width (FIFO chunks in flight)
     next_dispatch: int = 0
     next_emit: int = 0
     results: dict = field(default_factory=dict)  # seq -> trimmed bytes
@@ -131,6 +132,7 @@ class ParallelStreamer:
         max_retries: int = 3,
         user_pool: ClientPool | None = None,
         allow_user_fallback: bool = False,
+        memory_soft_limit: int = 0,
         sleep=asyncio.sleep,
     ):
         self._bot_pool = bot_pool
@@ -140,44 +142,88 @@ class ParallelStreamer:
         self._max_retries = max_retries
         self._user_pool = user_pool
         self._allow_user_fallback = allow_user_fallback
+        self._memory_soft_limit = memory_soft_limit
         self._sleep = sleep
+        # observability (surfaced at /metrics)
+        self._active_streams = 0
+        self._buffered_bytes = 0  # estimated: sum of K×chunk over active streams
+        self._streams_total = 0
+        self._bytes_total = 0
+        self._degraded_total = 0
+
+    def metrics(self) -> dict:
+        return {
+            "configured_k": self._k,
+            "memory_soft_limit": self._memory_soft_limit,
+            "active_streams": self._active_streams,
+            "buffered_bytes": self._buffered_bytes,
+            "streams_total": self._streams_total,
+            "bytes_total": self._bytes_total,
+            "degraded_total": self._degraded_total,
+        }
 
     async def stream(
         self, parts: Sequence[Any], plan: StreamPlan, channel_id: int
     ) -> AsyncIterator[bytes]:
         chunks = plan.chunks
-        state = _StreamState(cond=asyncio.Condition(), n=len(chunks))
-        part_refs: dict[int, Any] = {}
 
-        # generic lease (works whether the pool is a BotPool or, when no bots
-        # are configured, the user ClientPool)
-        bots = self._bot_pool.lease(self._k, channel_id=channel_id)
-        if not bots:
-            bots = [await self._replace(channel_id, failed=None)]
-        log.debug(
-            "stream: channel %s, %d chunk(s), bots %s",
-            channel_id, len(chunks), [b.name for b in bots],
-        )
-
-        workers = [
-            asyncio.create_task(self._worker(state, chunks, parts, channel_id, part_refs, bot))
-            for bot in bots
-        ]
+        # per-stream K, with optional soft-limit degradation: when the estimated
+        # buffers would blow past memory_soft_limit, a NEW stream starts at K=1
+        # (sequential) — degraded, never refused. Decision + reservation are
+        # synchronous (no await between), so concurrent starts don't race.
+        k = self._k
+        if (
+            self._memory_soft_limit > 0
+            and self._buffered_bytes + k * self._chunk_size > self._memory_soft_limit
+        ):
+            k = 1
+            self._degraded_total += 1
+            log.warning(
+                "[degraded] buffered %d B; a new K=%d stream would exceed soft "
+                "limit %d B -> starting at K=1",
+                self._buffered_bytes, self._k, self._memory_soft_limit,
+            )
+        reserve = k * self._chunk_size
+        self._buffered_bytes += reserve
+        self._active_streams += 1
+        self._streams_total += 1
         try:
-            for seq in range(state.n):
-                async with state.cond:
-                    while seq not in state.results and state.error is None:
-                        await state.cond.wait()
-                    if state.error is not None:
-                        raise state.error
-                    data = state.results.pop(seq)
-                    state.next_emit = seq + 1
-                    state.cond.notify_all()
-                yield data
+            state = _StreamState(cond=asyncio.Condition(), n=len(chunks), k=k)
+            part_refs: dict[int, Any] = {}
+
+            # generic lease (works whether the pool is a BotPool or, when no bots
+            # are configured, the user ClientPool)
+            bots = self._bot_pool.lease(k, channel_id=channel_id)
+            if not bots:
+                bots = [await self._replace(channel_id, failed=None)]
+            log.debug(
+                "stream: channel %s, %d chunk(s), K=%d, bots %s",
+                channel_id, len(chunks), k, [b.name for b in bots],
+            )
+
+            workers = [
+                asyncio.create_task(self._worker(state, chunks, parts, channel_id, part_refs, bot))
+                for bot in bots
+            ]
+            try:
+                for seq in range(state.n):
+                    async with state.cond:
+                        while seq not in state.results and state.error is None:
+                            await state.cond.wait()
+                        if state.error is not None:
+                            raise state.error
+                        data = state.results.pop(seq)
+                        state.next_emit = seq + 1
+                        state.cond.notify_all()
+                    self._bytes_total += len(data)
+                    yield data
+            finally:
+                for w in workers:
+                    w.cancel()
+                await asyncio.gather(*workers, return_exceptions=True)
         finally:
-            for w in workers:
-                w.cancel()
-            await asyncio.gather(*workers, return_exceptions=True)
+            self._buffered_bytes -= reserve
+            self._active_streams -= 1
 
     async def _worker(self, state, chunks, parts, channel_id, part_refs, bot):
         while True:
@@ -185,7 +231,7 @@ class ParallelStreamer:
                 while True:
                     if state.error is not None or state.next_dispatch >= state.n:
                         return
-                    if state.next_dispatch < state.next_emit + self._k:
+                    if state.next_dispatch < state.next_emit + state.k:
                         idx = state.next_dispatch
                         state.next_dispatch += 1
                         break

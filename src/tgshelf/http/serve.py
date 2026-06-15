@@ -73,6 +73,7 @@ def build_runtime(config: Config, session_factory, clients) -> dict[str, Any]:
         chunk_timeout=config.download.chunk_timeout,
         user_pool=client_pool,
         allow_user_fallback=config.download.allow_user_fallback,
+        memory_soft_limit=config.download.memory_soft_limit,
     )
     executor = FsExecutor(
         session_factory,

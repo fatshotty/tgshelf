@@ -128,6 +128,14 @@ def _dispatch(config: Config, args: argparse.Namespace) -> int:
 
         return asyncio.run(bots.run_create(config, args))
 
+    if args.command == "bots":
+        from tgshelf.commands import bots
+
+        if args.bots_cmd == "check":
+            return asyncio.run(bots.run_check(config, args))
+        print(f"error: unknown bots subcommand {args.bots_cmd!r}", file=sys.stderr)
+        return 2
+
     if args.command == "serve":
         from tgshelf.http.serve import ServeError, run_server
 

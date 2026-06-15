@@ -28,7 +28,7 @@ from telethon import TelegramClient, utils
 from telethon import errors as tg_errors
 from telethon.sessions import StringSession
 from telethon.tl.functions.channels import EditAdminRequest
-from telethon.tl.types import ChatAdminRights
+from telethon.tl.types import ChannelParticipantsAdmins, ChatAdminRights
 
 from tgshelf.commands.accounts import _open_store
 from tgshelf.config import AccountConfig, Config
@@ -58,6 +58,16 @@ def extract_bot_token(text: str | None) -> str | None:
     """Pull a bot token out of a BotFather reply, or None if absent."""
     match = _TOKEN_RE.search(text or "")
     return match.group(1) if match else None
+
+
+def bot_id_from_token(token: str | None) -> int | None:
+    """A bot's Telegram user id is the integer before ':' in its token
+    (`<bot_id>:<hash>`); lets `bots check` match membership without connecting
+    the bot. None if the token is missing/malformed."""
+    if not token or ":" not in token:
+        return None
+    head = token.split(":", 1)[0]
+    return int(head) if head.isdigit() else None
 
 
 def classify_botfather_reply(text: str | None) -> str:
@@ -334,3 +344,59 @@ async def run_create(config: Config, args) -> int:
 
     log.info("create-bots done (%d failed)", failures)
     return 1 if failures else 0
+
+
+async def _channel_admins(client: TelegramClient, channel_id: int) -> tuple[set[str], set[int]]:
+    """The (lowercased usernames, ids) of a channel's admins. Bots in our pool
+    are added as admins (promote = join), so the admins filter is the cheap,
+    sufficient membership source."""
+    admins = await client.get_participants(channel_id, filter=ChannelParticipantsAdmins())
+    usernames = {u.username.lower() for u in admins if getattr(u, "username", None)}
+    ids = {u.id for u in admins}
+    return usernames, ids
+
+
+async def run_check(config: Config, args) -> int:
+    """Verify every configured bot is an admin of every channel in use and repair
+    the gaps. Membership is matched by the bot's token id (account-independent) or
+    its @username (= config name); repair re-promotes via the user account."""
+    bots = [u for u in config.telegram.users if u.is_bot]
+    if not bots:
+        print("error: no bots configured (telegram.users entries with a bot_token)", file=sys.stderr)
+        return 1
+
+    try:
+        account = _select_user_account(config)
+        channels = await channels_in_use(config)
+    except BotCommandError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if not channels:
+        log.info("no channels in use; nothing to check")
+        return 0
+
+    repaired = failed = 0
+    async with _connect_user(config, account) as client:
+        for channel_id in channels:
+            try:
+                usernames, ids = await _channel_admins(client, channel_id)
+            except Exception as exc:  # noqa: BLE001 - one unreadable channel never aborts
+                log.error("[eligibility] cannot read admins of %s: %s", channel_id, exc)
+                failed += len(bots)
+                continue
+            for bot in bots:
+                bid = bot_id_from_token(bot.bot_token)
+                present = bot.name.lower() in usernames or (bid is not None and bid in ids)
+                if present:
+                    log.info("ok: @%s is admin of %s", bot.name, channel_id)
+                    continue
+                log.warning("[repair] @%s missing from %s; promoting", bot.name, channel_id)
+                try:
+                    await promote_bot(client, channel_id, f"@{bot.name}")
+                    repaired += 1
+                except Exception as exc:  # noqa: BLE001 - report and keep going
+                    log.error("FAILED to add @%s to %s: %s", bot.name, channel_id, exc)
+                    failed += 1
+
+    log.info("bots check done: %d repaired, %d failed", repaired, failed)
+    return 1 if failed else 0

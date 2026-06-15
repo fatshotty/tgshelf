@@ -28,3 +28,4 @@ tests/
 
 docs/
 .claude/
+scripts/migrate_mongo.py

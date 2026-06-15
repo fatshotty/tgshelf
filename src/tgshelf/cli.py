@@ -53,6 +53,10 @@ def build_parser() -> argparse.ArgumentParser:
         elif name in ("cp", "mv"):
             cmd.add_argument("src", help="source path (file or folder)")
             cmd.add_argument("dst", help="destination folder path")
+        elif name == "strm":
+            cmd.add_argument("--source", help="drive folder to mirror (default: config strm.source)")
+            cmd.add_argument("--destination", help="local output folder (default: config strm.destination)")
+            cmd.add_argument("--clear", action="store_true", help="wipe destination first (full regen)")
     return parser
 
 
@@ -92,6 +96,11 @@ def _dispatch(config: Config, args: argparse.Namespace) -> int:
         from tgshelf.commands import fsops
 
         return asyncio.run(fsops.run(config, args))
+
+    if args.command == "strm":
+        from tgshelf.commands import strm
+
+        return asyncio.run(strm.run(config, args))
 
     if args.command == "serve":
         from tgshelf.http.serve import ServeError, run_server

@@ -9,6 +9,7 @@ import/merge.
 
 from __future__ import annotations
 
+import logging
 import mimetypes
 import re
 from typing import Any, AsyncIterator, Callable, Sequence
@@ -22,6 +23,8 @@ from tgshelf.core.download import RangeNotSatisfiable, StreamPlan
 from tgshelf.core.upload import PartRecord
 from tgshelf.db.models import Node
 from tgshelf.db.repo import DuplicateNameError, NodeRepo
+
+log = logging.getLogger("tgshelf.fs")
 
 DEFAULT_MIME = "application/octet-stream"
 
@@ -211,20 +214,30 @@ class FileSystem:
             ) from exc
 
         if is_folder:
-            files = [n for n in await self.repo.subtree(node_id, state="ACTIVE") if not n.is_folder]
-            await self._fan_out([f.id for f in files], _reroute_op)
+            items = [n.id for n in await self.repo.subtree(node_id, state="ACTIVE") if not n.is_folder]
         else:
-            await self._reroute_file(node)
+            items = [node_id]
+        results = await self._fan_out(items, _reroute_op)
+        if is_folder:
+            _log_failures(results, "move")
+        else:
+            _raise_first_error(results)  # single file: surface the error
         return await self.repo.get(node_id)
 
-    async def _fan_out(self, items, op) -> None:
+    async def _fan_out(self, items, op) -> list:
         """Run a per-file op across `items`: parallel via the executor (each on
-        its own session + leased account) when present, else sequentially here."""
+        its own session + leased account) when present, else sequentially here.
+        Returns one result (or captured exception) per item — even a single file
+        runs through the executor when present, so it is always account-leased."""
         if self._executor is not None:
-            await self._executor.run(items, op)
-        else:
-            for item in items:
-                await op(self, item)
+            return await self._executor.run(items, op)
+        results: list = []
+        for item in items:
+            try:
+                results.append(await op(self, item))
+            except Exception as exc:  # noqa: BLE001 - per-item isolation
+                results.append(exc)
+        return results
 
     async def _reroute_file(self, file: Node) -> None:
         """Physically relocate a file's parts if its effective channel changed."""
@@ -263,7 +276,10 @@ class FileSystem:
             raise NotAReadableFile(f"node {node_id} not found")
         if node.is_folder:
             return await self._copy_folder(node, new_parent_id)
-        return await self._copy_file(node, new_parent_id)
+        # single file: also via the executor (solution B) -> account-leased
+        results = await self._fan_out([(node_id, new_parent_id)], _copy_op)
+        new_id = _first_result(results)
+        return await self.repo.get(new_id)
 
     async def _dedup_name(self, parent_id: str, name: str, *, is_folder: bool) -> str:
         children = await self.repo.children(parent_id)
@@ -336,7 +352,7 @@ class FileSystem:
 
         # pass 2: copy the files into their mapped folders (fanned out)
         pairs = [(n.id, mapping[n.parent_id]) for n in descendants if not n.is_folder]
-        await self._fan_out(pairs, _copy_op)
+        _log_failures(await self._fan_out(pairs, _copy_op), "copy")
         return await self.repo.get(mapping[src.id])
 
     # -- write --------------------------------------------------------------
@@ -518,8 +534,32 @@ async def _reroute_op(fs: FileSystem, node_id: str) -> None:
         await fs._reroute_file(file)
 
 
-async def _copy_op(fs: FileSystem, pair: tuple[str, str]) -> None:
+async def _copy_op(fs: FileSystem, pair: tuple[str, str]) -> str | None:
     src_id, dst_parent_id = pair
     src = await fs.get(src_id)
-    if src is not None and not src.is_folder:
-        await fs._copy_file(src, dst_parent_id)
+    if src is None or src.is_folder:
+        return None
+    new = await fs._copy_file(src, dst_parent_id)
+    return new.id
+
+
+def _raise_first_error(results: list) -> None:
+    for r in results:
+        if isinstance(r, BaseException):
+            raise r
+
+
+def _first_result(results: list) -> Any:
+    r = results[0]
+    if isinstance(r, BaseException):
+        raise r
+    return r
+
+
+def _log_failures(results: list, operation: str) -> None:
+    errors = [r for r in results if isinstance(r, BaseException)]
+    if errors:
+        log.warning(
+            "[%s] %d of %d item(s) failed (best-effort): %s",
+            operation, len(errors), len(results), errors[0],
+        )

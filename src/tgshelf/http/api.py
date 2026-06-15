@@ -143,6 +143,32 @@ async def restore_node(request: web.Request) -> web.Response:
         return web.json_response(node_to_dict(node))
 
 
+async def move_node(request: web.Request) -> web.Response:
+    node_id = request.match_info["id"]
+    body = await _json_body(request)
+    parent_id = body.get("parent_id")
+    if not parent_id:
+        return _bad_request("'parent_id' is required")
+    async with open_fs(request) as fs:
+        if await fs.get(node_id) is None:
+            return _not_found(f"node {node_id} not found")
+        moved = await fs.move(node_id, parent_id)
+        return web.json_response(node_to_dict(moved))
+
+
+async def copy_node(request: web.Request) -> web.Response:
+    node_id = request.match_info["id"]
+    body = await _json_body(request)
+    parent_id = body.get("parent_id")
+    if not parent_id:
+        return _bad_request("'parent_id' is required")
+    async with open_fs(request) as fs:
+        if await fs.get(node_id) is None:
+            return _not_found(f"node {node_id} not found")
+        new = await fs.copy(node_id, parent_id)
+        return web.json_response(node_to_dict(new), status=201)
+
+
 def register_routes(app: web.Application) -> None:
     app.router.add_get("/api/v1/nodes/{id}", get_node)
     app.router.add_get("/api/v1/nodes/{id}/children", list_children)
@@ -152,3 +178,5 @@ def register_routes(app: web.Application) -> None:
     app.router.add_put("/api/v1/nodes/{id}", update_node)
     app.router.add_delete("/api/v1/nodes/{id}", delete_node)
     app.router.add_post("/api/v1/nodes/{id}/restore", restore_node)
+    app.router.add_post("/api/v1/nodes/{id}/move", move_node)
+    app.router.add_post("/api/v1/nodes/{id}/copy", copy_node)

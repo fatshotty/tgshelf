@@ -220,6 +220,34 @@ async def copy_node(request: web.Request) -> web.Response:
         return web.json_response(node_to_dict(await fs.copy(node_id, parent_id)), status=201)
 
 
+async def merge_node(request: web.Request) -> web.Response:
+    """Stitch donor files' parts into the target file (re-indexed), hard-deleting
+    the donors. Target + donors must be non-folder, non-inline files (inline →
+    fs.merge_parts raises ValueError → 400)."""
+    node_id = request.match_info["id"]
+    body = await _json_body(request)
+    donor_ids = body.get("donor_ids")
+    if not isinstance(donor_ids, list) or not donor_ids:
+        return _bad_request("'donor_ids' must be a non-empty list")
+    if node_id in donor_ids:
+        return _bad_request("a node cannot be a donor of itself")
+    async with open_fs(request) as fs:
+        target = await fs.get(node_id)
+        if target is None:
+            return _not_found(f"node {node_id} not found")
+        if target.is_folder:
+            return _bad_request("cannot merge into a folder")
+        for did in donor_ids:
+            donor = await fs.get(did)
+            if donor is None:
+                return _bad_request(f"donor {did} not found")
+            if donor.is_folder:
+                return _bad_request(f"donor {did} is a folder")
+        merged = await fs.merge_parts(node_id, donor_ids)
+        log.info("merged %d donor(s) into %s", len(donor_ids), node_id)
+        return web.json_response(node_to_dict(merged))
+
+
 def register_routes(app: web.Application) -> None:
     app.router.add_get("/api/v1/nodes/{id}", get_node)
     app.router.add_get("/api/v1/nodes/{id}/children", list_children)
@@ -231,3 +259,4 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/api/v1/nodes/{id}/restore", restore_node)
     app.router.add_post("/api/v1/nodes/{id}/move", move_node)
     app.router.add_post("/api/v1/nodes/{id}/copy", copy_node)
+    app.router.add_post("/api/v1/nodes/{id}/merge", merge_node)

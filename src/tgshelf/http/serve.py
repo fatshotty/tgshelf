@@ -143,7 +143,14 @@ async def start_clients(config: Config, rate_limiter) -> list[tuple[Any, Any]]:
                 log.warning("session for '%s' is not authorized; re-login", account.name)
                 await tele.disconnect()
                 continue
-            clients.append((account, TgClient(tele, name=account.name, rate_limiter=rate_limiter)))
+            # Bots are leased only by the streamer, which fails over on cooldown.
+            # Surface their FloodWaits immediately (threshold 0) so a throttled bot
+            # is swapped mid-stream instead of sleeping ~1s inline. User accounts
+            # (upload, no failover) keep the default inline-sleep behaviour.
+            tg_kwargs = {"flood_threshold": 0} if account.is_bot else {}
+            clients.append((account, TgClient(
+                tele, name=account.name, rate_limiter=rate_limiter, **tg_kwargs,
+            )))
     finally:
         if store_session is not None:
             await store_session.close()

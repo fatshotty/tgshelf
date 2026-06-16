@@ -227,14 +227,17 @@ async def run(config: Config, args) -> int:
 
         header = (f"download {args.path}  —  boost multi_bot_download="
                   f"{config.download.multi_bot_download}, {concurrent} concurrent")
-        # On a TTY the render loop owns the whole block (header included); print it
-        # once only when there is no live block to draw it.
-        if not sys.stdout.isatty():
+        # At debug the per-chunk logs ARE the live view; the ANSI block would fight
+        # them on the same stream, so suppress it. On a TTY the render loop owns the
+        # whole block (header included), so print the header only when there is no
+        # block to draw it (non-TTY, or debug).
+        debug = log.isEnabledFor(logging.DEBUG)
+        if debug or not sys.stdout.isatty():
             print(header)
         state = ProgressState(len(files), sum(f.size for f in files))
 
         stop = asyncio.Event()
-        renderer = asyncio.create_task(_render_loop(state, header, stop))
+        renderer = None if debug else asyncio.create_task(_render_loop(state, header, stop))
         try:
             async with session_factory() as read_session:
                 result = await download_tree(
@@ -244,7 +247,8 @@ async def run(config: Config, args) -> int:
                 )
         finally:
             stop.set()
-            await renderer
+            if renderer is not None:
+                await renderer
 
         print(format_recap(state.snapshot()))
         if result.errors:

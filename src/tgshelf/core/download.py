@@ -197,7 +197,7 @@ class ParallelStreamer:
             if not bots:
                 bots = [await self._replace(channel_id, failed=None)]
             log.debug(
-                "stream: channel %s, %d chunk(s), K=%d, bots %s",
+                "[stream] channel %s, %d chunk(s), K=%d, clients %s",
                 channel_id, len(chunks), k, [b.name for b in bots],
             )
 
@@ -256,6 +256,8 @@ class ParallelStreamer:
         while True:
             ref = part_refs.get(chunk.part_idx)
             if ref is None:
+                log.debug("[fetch] resolving part %d (msg %s @ channel %s) via '%s'",
+                          chunk.part_idx, p.message_id, p.channel_id, bot.name)
                 ref = await bot.client.get_document(p.channel_id, p.message_id)
                 if ref is None:
                     raise PartMissing(file_path=str(p.message_id), part_idx=chunk.part_idx)
@@ -269,6 +271,11 @@ class ParallelStreamer:
                     timeout=self._chunk_timeout,
                 )
                 self._bot_pool.mark_success(bot)
+                log.debug(
+                    "[fetch] chunk %d part %d (msg %s @ channel %s) <- '%s' (%d B)",
+                    chunk.seq, chunk.part_idx, p.message_id, p.channel_id,
+                    bot.name, len(raw),
+                )
                 return raw[chunk.trim_start : chunk.trim_end], bot
             except FloodCooldown as exc:
                 self._bot_pool.mark_flood(bot, exc.seconds)

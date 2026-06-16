@@ -13,6 +13,7 @@ the generator is closed in a `finally` so the streamer releases its bots.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from urllib.parse import quote
 
@@ -21,6 +22,11 @@ from aiohttp import web
 from tgshelf.http.api import open_fs
 
 log = logging.getLogger("tgshelf.http.download")
+
+# A streaming client closing mid-transfer surfaces here as one of these while
+# writing to the socket. It is not a server fault: swallow it where it happens
+# so nothing escapes to be logged with a stacktrace (by us OR by aiohttp.server).
+_CLIENT_GONE = (ConnectionResetError, ConnectionError, asyncio.CancelledError)
 
 
 class _BadRange(Exception):
@@ -115,9 +121,17 @@ async def download(request: web.Request) -> web.StreamResponse:
         try:
             async for chunk in stream:
                 await resp.write(chunk)
+            await resp.write_eof()
+        except _CLIENT_GONE as exc:
+            # client went away mid-stream: quiet log, return the started response
+            # so nothing propagates (CancelledError is re-raised to honour
+            # cooperative cancellation).
+            log.debug("download %s: client disconnected (%s)",
+                      node.id, exc.__class__.__name__)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
         finally:
             await stream.aclose()  # release the streamer's bots on disconnect too
-        await resp.write_eof()
         return resp
 
 

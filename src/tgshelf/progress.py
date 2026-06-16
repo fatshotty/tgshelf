@@ -137,3 +137,47 @@ class ProgressState:
             self.remaining, self.bytes_done, self._rate(self._samples), files,
             now - self._start,
         )
+
+
+_NAME_MAX = 40  # truncate long file names in the live block to keep one line
+
+
+def _pct(done: int, total: int) -> int:
+    return 100 if total <= 0 else min(100, int(done * 100 / total))
+
+
+def build_block(snap: Snapshot, *, header: str) -> list[str]:
+    """The live block as a list of lines: header, counters, overall Progress, then
+    one line per active file. ANSI painting is the caller's job."""
+    lines = [
+        header,
+        f"total {snap.total_files}   ok {snap.ok}   skip {snap.skipped}   "
+        f"err {snap.failed}   remaining {snap.remaining}",
+        f"Progress: {_pct(snap.bytes_done, snap.total_bytes)}% "
+        f"({human_rate(snap.overall_rate)})",
+    ]
+    for f in snap.files:
+        name = f.name if len(f.name) <= _NAME_MAX else f.name[: _NAME_MAX - 1] + "…"
+        lines.append(f"{name}  {_pct(f.done, f.size):>3}% ({human_rate(f.rate)})")
+    return lines
+
+
+def format_recap(snap: Snapshot) -> str:
+    avg = snap.bytes_done / snap.elapsed if snap.elapsed > 0 else 0.0
+    return (
+        f"done: {snap.ok} ok, {snap.skipped} skipped, {snap.failed} failed  —  "
+        f"{human_bytes(snap.bytes_done)} in {human_time(snap.elapsed)}, "
+        f"avg {human_rate(avg)}"
+    )
+
+
+def error_header(ts: str, path: str, total: int) -> str:
+    return f"=== run {ts} — download {path} — total {total} ==="
+
+
+def error_line(ts: str, file_path: str, reason: str) -> str:
+    return f"{ts}  {file_path}  {reason}"
+
+
+def error_footer(ok: int, skipped: int, failed: int) -> str:
+    return f"--- end run: {ok} ok, {skipped} skipped, {failed} failed ---"

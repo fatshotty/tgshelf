@@ -180,6 +180,20 @@ class NodeRepo:
         result = await self.session.execute(nodes.union(parts))
         return {int(c) for (c,) in result.all() if c is not None}
 
+    async def folders_with_channel(self, channel_id: int) -> Sequence[Node]:
+        """ACTIVE folders that carry this channel_id as an override — used to label
+        a channel by the path(s) of the folder(s) mapped to it (create-bots UX)."""
+        result = await self.session.execute(
+            select(Node)
+            .where(
+                Node.channel_id == channel_id,
+                Node.is_folder.is_(True),
+                Node.state == "ACTIVE",
+            )
+            .order_by(Node.name)
+        )
+        return result.scalars().all()
+
     async def get_file_by_message(self, channel_id: int, message_id: int) -> Node | None:
         """The file that owns a given Telegram message (dedupe for imports)."""
         result = await self.session.execute(

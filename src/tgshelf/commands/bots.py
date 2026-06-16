@@ -243,13 +243,38 @@ async def channels_in_use(config: Config) -> list[int]:
     return [master] + sorted(c for c in used if c != master)
 
 
+async def channels_in_use_labeled(config: Config) -> list[tuple[int, str]]:
+    """Same channels as channels_in_use, each paired with a human label: the full
+    path(s) of the ACTIVE folder(s) mapped to it, so the interactive picker shows
+    WHERE a channel lives (a bare id is unrecognisable). Master is tagged; a
+    channel with no folder override (only files/parts) shows an empty label."""
+    master = config.telegram.upload.channel
+    engine = create_engine(config.db)
+    try:
+        async with create_session_factory(engine)() as session:
+            repo = NodeRepo(session)
+            used = await repo.distinct_channels()
+            ordered = [master] + sorted(c for c in used if c != master)
+            out: list[tuple[int, str]] = []
+            for cid in ordered:
+                folders = await repo.folders_with_channel(cid)
+                paths: list[str] = []
+                for folder in folders[:3]:
+                    path = await repo.path_of(folder.id)
+                    if path:
+                        paths.append(path)
+                label = ", ".join(paths)
+                if len(folders) > 3:
+                    label += f" (+{len(folders) - 3} more)"
+                if cid == master:
+                    label = ("(master) " + label).strip()
+                out.append((cid, label))
+            return out
+    finally:
+        await engine.dispose()
+
+
 # -- interactive selection --------------------------------------------------
-
-def _channel_label(config: Config, channel_id: int) -> str:
-    if channel_id == config.telegram.upload.channel:
-        return f"{channel_id} (master)"
-    return str(channel_id)
-
 
 def _select_user_account(config: Config, prompt=input) -> AccountConfig:
     users = [u for u in config.telegram.users if not u.is_bot]
@@ -267,16 +292,17 @@ def _select_user_account(config: Config, prompt=input) -> AccountConfig:
         print(f"  invalid choice, enter a number between 1 and {len(users)}")
 
 
-def _select_channels(config: Config, channels: list[int], prompt=input) -> list[int]:
+def _select_channels(channels: list[tuple[int, str]], prompt=input) -> list[int]:
     if not channels:
         return []
     print("\nAvailable channels:")
-    for i, channel_id in enumerate(channels, 1):
-        print(f"  [{i}] {_channel_label(config, channel_id)}")
+    for i, (channel_id, label) in enumerate(channels, 1):
+        suffix = f"  —  {label}" if label else ""
+        print(f"  [{i}] {channel_id}{suffix}")
     selection = prompt(
         "Channels to add the bots to (comma-separated, 'all', or ENTER to skip) > "
     )
-    return parse_channel_selection(selection, channels)
+    return parse_channel_selection(selection, [cid for cid, _ in channels])
 
 
 def _print_config_entry(account: AccountConfig, bot_name: str, token: str) -> None:
@@ -308,8 +334,8 @@ async def run_create(config: Config, args) -> int:
 
     try:
         account = _select_user_account(config)
-        channels = await channels_in_use(config)
-        selected = _select_channels(config, channels)
+        channels = await channels_in_use_labeled(config)
+        selected = _select_channels(channels)
         if not selected:
             log.warning("no channels selected — bots will be created but not joined")
     except BotCommandError as exc:

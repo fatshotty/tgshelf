@@ -9,12 +9,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
+import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import AsyncContextManager, Callable
 
+from tgshelf.config import Config
 from tgshelf.core.fs import FileSystem
-from tgshelf.progress import ProgressState
+from tgshelf.db.engine import create_engine, create_session_factory
+from tgshelf.db.repo import NodeRepo
+from tgshelf.progress import (
+    ProgressState, build_block, format_recap, error_header, error_line, error_footer,
+)
 
 log = logging.getLogger("tgshelf.download")
 
@@ -135,3 +144,116 @@ async def download_tree(
 
     await asyncio.gather(*(worker(i, pf) for i, pf in enumerate(files)))
     return result
+
+
+async def _render_loop(state: ProgressState, header: str, stop: asyncio.Event,
+                       *, interval: float = 0.2) -> None:
+    """Repaint the live block in place (TTY) until `stop`. Non-TTY: a periodic
+    plain status line. Never raises."""
+    tty = sys.stdout.isatty()
+    prev_lines = 0
+    last_plain = 0.0
+    try:
+        while not stop.is_set():
+            snap = state.snapshot()
+            if tty:
+                lines = build_block(snap, header=header)
+                out = ""
+                if prev_lines:
+                    out += f"\033[{prev_lines}F"      # cursor up to block start
+                for ln in lines:
+                    out += "\033[2K" + ln + "\n"      # clear line + content
+                sys.stdout.write(out)
+                sys.stdout.flush()
+                prev_lines = len(lines)
+            else:
+                now = time.monotonic()
+                if now - last_plain >= 3.0:
+                    last_plain = now
+                    log.info("[download] %s | ok %d skip %d err %d remaining %d",
+                             build_block(snap, header="")[2], snap.ok, snap.skipped,
+                             snap.failed, snap.remaining)
+            await asyncio.sleep(interval)
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 - rendering must never crash the download
+        log.debug("[download] renderer error", exc_info=True)
+
+
+def _ts() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _write_error_log(path: Path, drive_path: str, total: int,
+                     result: DownloadResult) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as fh:
+        fh.write(error_header(_ts(), drive_path, total) + "\n")
+        for rel, reason in result.errors:
+            fh.write(error_line(_ts(), rel, reason) + "\n")
+        fh.write(error_footer(result.ok, result.skipped, result.failed) + "\n")
+
+
+async def run(config: Config, args) -> int:
+    from tgshelf.http.serve import build_runtime, make_rate_limiter, start_clients
+
+    dest = Path(getattr(args, "dest", None) or ".")
+    concurrent = getattr(args, "concurrent", None) or config.operations.concurrent
+    overwrite = bool(getattr(args, "overwrite", False))
+
+    rate_limiter = make_rate_limiter(config.telegram.rate_limit)
+    pairs = await start_clients(config, rate_limiter)
+    engine = create_engine(config.db)
+    try:
+        session_factory = create_session_factory(engine)
+        runtime = build_runtime(config, session_factory, pairs)
+
+        def make_fs(session) -> FileSystem:
+            return FileSystem(
+                NodeRepo(session), master_channel=config.telegram.upload.channel,
+                streamer=runtime["streamer"], min_size=config.telegram.upload.min_size,
+            )
+
+        # one fresh DB session per worker (sessions are not concurrent-safe), same
+        # pattern as sync.process; the streamer (bot pool) is shared.
+        @asynccontextmanager
+        async def worker_fs():
+            async with session_factory() as session:
+                yield make_fs(session)
+
+        # plan with a dedicated read session (to size the progress + header)
+        async with session_factory() as session:
+            files = await plan_download(make_fs(session), args.path)
+
+        header = (f"download {args.path}  —  boost multi_bot_download="
+                  f"{config.download.multi_bot_download}, {concurrent} concurrent")
+        print(header)
+        state = ProgressState(len(files), sum(f.size for f in files))
+
+        stop = asyncio.Event()
+        renderer = asyncio.create_task(_render_loop(state, header, stop))
+        try:
+            async with session_factory() as read_session:
+                result = await download_tree(
+                    make_fs(read_session), args.path, dest,
+                    concurrent=concurrent, overwrite=overwrite,
+                    fs_factory=worker_fs, state=state,
+                )
+        finally:
+            stop.set()
+            await renderer
+
+        print(format_recap(state.snapshot()))
+        if result.errors:
+            log_path = Path(getattr(args, "log_file", None)
+                            or (dest / "tgshelf-download-errors.log"))
+            _write_error_log(log_path, args.path, len(files), result)
+            print(f"{result.failed} errors logged to {log_path}")
+    finally:
+        await engine.dispose()
+        for _account, client in pairs:
+            disconnect = getattr(getattr(client, "_client", None), "disconnect", None)
+            if disconnect is not None:
+                await disconnect()
+
+    return 1 if result.failed else 0

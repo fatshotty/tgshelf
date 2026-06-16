@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import time
 from typing import Any, Awaitable, Callable
 
 log = logging.getLogger("tgshelf.client")
@@ -147,15 +148,35 @@ class TgClient:
         # same check). Only foreign-DC files need a borrowed media sender.
         home_dc = getattr(self._client.session, "dc_id", None)
         if ref.dc_id is None or ref.dc_id == home_dc:
+            t_send = time.monotonic()
             result = await self._with_middleware(lambda: self._client(request))
+            self._log_slow_fetch(ref.dc_id, "home", borrow=0.0, send=time.monotonic() - t_send, ret=0.0)
             return result.bytes
 
+        t_borrow = time.monotonic()
         sender = await self._client._borrow_exported_sender(ref.dc_id)
+        borrow = time.monotonic() - t_borrow
+        send = ret = 0.0
         try:
+            t_send = time.monotonic()
             result = await self._with_middleware(lambda: sender.send(request))
+            send = time.monotonic() - t_send
             return result.bytes
         finally:
+            t_ret = time.monotonic()
             await self._client._return_exported_sender(sender)
+            ret = time.monotonic() - t_ret
+            self._log_slow_fetch(ref.dc_id, "borrowed", borrow=borrow, send=send, ret=ret)
+
+    def _log_slow_fetch(self, dc_id, path, *, borrow, send, ret, threshold=0.5) -> None:
+        """Break down a chunk fetch into borrow/send/return when it was slow, to
+        pinpoint which step stalls (the event loop is NOT blocked — see [looplag])."""
+        total = borrow + send + ret
+        if total > threshold:
+            log.warning(
+                "[fetch-slow] '%s' dc %s (%s) total=%.2fs borrow=%.2fs send=%.2fs return=%.2fs",
+                self.name, dc_id, path, total, borrow, send, ret,
+            )
 
     # -- gateway: writes ---------------------------------------------------
 

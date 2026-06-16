@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Sequence
 
@@ -278,8 +279,9 @@ class ParallelStreamer:
             cache_key = (bot.name, chunk.part_idx)
             ref = part_refs.get(cache_key)
             if ref is None:
-                log.debug("[fetch] resolving part %d (msg %s @ channel %s) via '%s'",
-                          chunk.part_idx, p.message_id, p.channel_id, bot.name)
+                log.debug("[fetch] resolving part %d (msg %s @ channel %s, dc %s) via '%s'",
+                          chunk.part_idx, p.message_id, p.channel_id,
+                          getattr(ref, "dc_id", None), bot.name)
                 ref = await bot.client.get_document(p.channel_id, p.message_id)
                 if ref is None:
                     raise PartMissing(file_path=str(p.message_id), part_idx=chunk.part_idx)
@@ -288,15 +290,17 @@ class ParallelStreamer:
             self._bot_pool.acquire(bot)
             need_replacement = False
             try:
+                t0 = time.monotonic()
                 raw = await asyncio.wait_for(
                     bot.client.get_file_chunk(ref, chunk.offset, chunk.limit),
                     timeout=self._chunk_timeout,
                 )
+                dt = time.monotonic() - t0
                 self._bot_pool.mark_success(bot)
                 log.debug(
-                    "[fetch] chunk %d part %d (msg %s @ channel %s) <- '%s' (%d B)",
-                    chunk.seq, chunk.part_idx, p.message_id, p.channel_id,
-                    bot.name, len(raw),
+                    "[fetch] chunk %d part %d (msg %s, dc %s) <- '%s' (%d B) in %.2fs",
+                    chunk.seq, chunk.part_idx, p.message_id,
+                    getattr(ref, "dc_id", None), bot.name, len(raw), dt,
                 )
                 return raw[chunk.trim_start : chunk.trim_end], bot
             except FloodCooldown as exc:

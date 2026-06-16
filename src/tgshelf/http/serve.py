@@ -132,6 +132,11 @@ async def start_clients(config: Config, rate_limiter) -> list[tuple[Any, Any]]:
             tele = TelegramClient(
                 StringSession(session_str), account.api_id, account.api_hash,
                 receive_updates=False,
+                # don't let Telethon silently sleep on FloodWaits behind our back
+                # (default 60s): surface them to our middleware so they are logged
+                # ([flood]) and the streamer can fail over to another bot instead
+                # of stalling this connection ~1s mid-stream.
+                flood_sleep_threshold=0,
             )
             await tele.connect()
             if not await tele.is_user_authorized():

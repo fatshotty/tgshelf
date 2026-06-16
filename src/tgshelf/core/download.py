@@ -231,9 +231,10 @@ class ParallelStreamer:
                         # bots are normal); ≈ 0 -> starving = bots can't keep up.
                         occupancy = state.next_dispatch - state.next_emit
                         state.cond.notify_all()
-                    if seq % 50 == 0:
-                        log.debug("[buf] seq %d buffer %d/%d (ready %d)",
-                                  seq, occupancy, state.capacity, len(state.results))
+                    if seq % 16 == 0 or occupancy == 0:
+                        log.debug("[buf] seq %d buffer %d/%d (ready %d)%s",
+                                  seq, occupancy, state.capacity, len(state.results),
+                                  "  STARVED" if occupancy == 0 else "")
                     self._bytes_total += len(data)
                     yield data
             finally:

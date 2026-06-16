@@ -189,7 +189,7 @@ class ParallelStreamer:
         self._streams_total += 1
         try:
             state = _StreamState(cond=asyncio.Condition(), n=len(chunks), k=k)
-            part_refs: dict[int, Any] = {}
+            part_refs: dict[tuple[str, int], Any] = {}  # (bot name, part idx) -> DocRef
 
             # generic lease (works whether the pool is a BotPool or, when no bots
             # are configured, the user ClientPool)
@@ -254,14 +254,21 @@ class ParallelStreamer:
         retries = 0
         last_exc: BaseException | None = None
         while True:
-            ref = part_refs.get(chunk.part_idx)
+            # file_reference (and the document access_hash) are bound to the
+            # ACCOUNT that resolved them, so the cache is per-client: keying by
+            # (bot, part) stops one bot from reusing another bot's reference,
+            # which Telegram rejects as FILE_REFERENCE_EXPIRED (the churn that
+            # collapsed throughput on seek). `bot` may change on replacement, so
+            # the key is recomputed each iteration.
+            cache_key = (bot.name, chunk.part_idx)
+            ref = part_refs.get(cache_key)
             if ref is None:
                 log.debug("[fetch] resolving part %d (msg %s @ channel %s) via '%s'",
                           chunk.part_idx, p.message_id, p.channel_id, bot.name)
                 ref = await bot.client.get_document(p.channel_id, p.message_id)
                 if ref is None:
                     raise PartMissing(file_path=str(p.message_id), part_idx=chunk.part_idx)
-                part_refs[chunk.part_idx] = ref
+                part_refs[cache_key] = ref
 
             self._bot_pool.acquire(bot)
             need_replacement = False
@@ -282,9 +289,9 @@ class ParallelStreamer:
                 log.info("[failover] chunk %d: '%s' flooded; replacing bot", chunk.seq, bot.name)
                 last_exc, need_replacement = exc, True
             except FileRefExpired as exc:
-                log.debug("chunk %d: file_reference expired; re-resolving part %d",
-                          chunk.seq, chunk.part_idx)
-                part_refs[chunk.part_idx] = None  # re-resolve, same bot
+                log.debug("chunk %d: file_reference expired; re-resolving part %d via '%s'",
+                          chunk.seq, chunk.part_idx, bot.name)
+                part_refs.pop(cache_key, None)  # re-resolve for THIS bot only
                 last_exc = exc
             except ChannelUnavailable as exc:
                 self._bot_pool.mark_ineligible(bot, channel_id)

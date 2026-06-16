@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -157,12 +158,17 @@ async def _render_loop(state: ProgressState, header: str, stop: asyncio.Event,
         while not stop.is_set():
             snap = state.snapshot()
             if tty:
-                lines = build_block(snap, header=header)
+                # Truncate every line to the terminal width: a wrapped line would
+                # occupy >1 physical row, desyncing the cursor-up count below and
+                # making the block "stair-step" / duplicate the header.
+                width = max(1, shutil.get_terminal_size((80, 24)).columns)
+                lines = [ln[:width] for ln in build_block(snap, header=header)]
                 out = ""
                 if prev_lines:
                     out += f"\033[{prev_lines}F"      # cursor up to block start
+                out += "\033[J"                       # clear from cursor to end of screen
                 for ln in lines:
-                    out += "\033[2K" + ln + "\n"      # clear line + content
+                    out += ln + "\n"
                 sys.stdout.write(out)
                 sys.stdout.flush()
                 prev_lines = len(lines)

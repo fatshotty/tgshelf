@@ -106,7 +106,10 @@ class StreamPlan:
 class _StreamState:
     cond: asyncio.Condition
     n: int
-    k: int = 1  # per-stream window width (FIFO chunks in flight)
+    capacity: int = 1  # max chunks dispatched-but-not-emitted (the read-ahead
+                       # buffer). Decoupled from the worker count so the K bots
+                       # keep fetching ahead instead of idling until the emitter
+                       # catches up — that idle was the periodic flush gap.
     next_dispatch: int = 0
     next_emit: int = 0
     results: dict = field(default_factory=dict)  # seq -> trimmed bytes
@@ -114,12 +117,14 @@ class _StreamState:
 
 
 class ParallelStreamer:
-    """Streams a file's range over K bots with a FIFO window and transparent
-    failover. Workers pull chunks in order (window bounds claimed-but-not-emitted
-    to K, so RAM ≈ K chunks); the emitter yields strictly in seq order. A worker
-    whose bot floods/times-out/loses the channel swaps to a replacement and
-    requeues the chunk; FileRefExpired re-resolves the part once. The client sees
-    only ordered bytes, never the reshuffling underneath.
+    """Streams a file's range over K bots with a read-ahead buffer and transparent
+    failover. K worker tasks pull the next chunk as soon as they are free — bounded
+    only by the buffer capacity C = 2*K (K in flight + K fetched ahead), NOT by the
+    emit position — so the bots never idle waiting for the in-order chunk. The
+    emitter yields strictly in seq order; RAM per stream ≈ C chunks. A worker whose
+    bot floods/times-out/loses the channel swaps to a replacement and requeues the
+    chunk; FileRefExpired re-resolves the part once (per-bot). The client sees only
+    ordered bytes, never the reshuffling underneath.
     """
 
     def __init__(
@@ -167,28 +172,34 @@ class ParallelStreamer:
     ) -> AsyncIterator[bytes]:
         chunks = plan.chunks
 
-        # per-stream K, with optional soft-limit degradation: when the estimated
-        # buffers would blow past memory_soft_limit, a NEW stream starts at K=1
-        # (sequential) — degraded, never refused. Decision + reservation are
-        # synchronous (no await between), so concurrent starts don't race.
+        # K = bots fetching in parallel for this stream (config multi_bot_download).
+        # The read-ahead buffer is C = 2*K: K chunks in flight + K already fetched
+        # and waiting, so a bot that finishes a chunk immediately grabs the next
+        # instead of idling until the in-order chunk is emitted. RAM per stream is
+        # bounded by C chunks. Optional soft-limit degradation: when the estimated
+        # buffers would blow past memory_soft_limit, a NEW stream starts at K=1 —
+        # degraded, never refused. Decision + reservation are synchronous (no await
+        # between), so concurrent starts don't race.
         k = self._k
+        capacity = 2 * k
         if (
             self._memory_soft_limit > 0
-            and self._buffered_bytes + k * self._chunk_size > self._memory_soft_limit
+            and self._buffered_bytes + capacity * self._chunk_size > self._memory_soft_limit
         ):
             k = 1
+            capacity = 2
             self._degraded_total += 1
             log.warning(
-                "[degraded] buffered %d B; a new K=%d stream would exceed soft "
+                "[degraded] buffered %d B; a new stream would exceed soft "
                 "limit %d B -> starting at K=1",
-                self._buffered_bytes, self._k, self._memory_soft_limit,
+                self._buffered_bytes, self._memory_soft_limit,
             )
-        reserve = k * self._chunk_size
+        reserve = capacity * self._chunk_size
         self._buffered_bytes += reserve
         self._active_streams += 1
         self._streams_total += 1
         try:
-            state = _StreamState(cond=asyncio.Condition(), n=len(chunks), k=k)
+            state = _StreamState(cond=asyncio.Condition(), n=len(chunks), capacity=capacity)
             part_refs: dict[tuple[str, int], Any] = {}  # (bot name, part idx) -> DocRef
 
             # generic lease (works whether the pool is a BotPool or, when no bots
@@ -197,8 +208,8 @@ class ParallelStreamer:
             if not bots:
                 bots = [await self._replace(channel_id, failed=None)]
             log.debug(
-                "[stream] channel %s, %d chunk(s), K=%d, clients %s",
-                channel_id, len(chunks), k, [b.name for b in bots],
+                "[stream] channel %s, %d chunk(s), K=%d, read-ahead=%d, clients %s",
+                channel_id, len(chunks), k, capacity, [b.name for b in bots],
             )
 
             workers = [
@@ -231,7 +242,11 @@ class ParallelStreamer:
                 while True:
                     if state.error is not None or state.next_dispatch >= state.n:
                         return
-                    if state.next_dispatch < state.next_emit + state.k:
+                    # dispatch as long as the read-ahead buffer has room, gated by
+                    # capacity (= 2*K) and NOT by next_emit: a free bot grabs the
+                    # next chunk immediately instead of waiting for the in-order one
+                    # to be emitted, so the K bots never idle between batches.
+                    if state.next_dispatch < state.next_emit + state.capacity:
                         idx = state.next_dispatch
                         state.next_dispatch += 1
                         break

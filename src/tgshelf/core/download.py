@@ -226,7 +226,14 @@ class ParallelStreamer:
                             raise state.error
                         data = state.results.pop(seq)
                         state.next_emit = seq + 1
+                        # occupancy = dispatched-but-not-emitted (in flight + ready).
+                        # ≈ capacity -> buffer full = client-paced backpressure (idle
+                        # bots are normal); ≈ 0 -> starving = bots can't keep up.
+                        occupancy = state.next_dispatch - state.next_emit
                         state.cond.notify_all()
+                    if seq % 50 == 0:
+                        log.debug("[buf] seq %d buffer %d/%d (ready %d)",
+                                  seq, occupancy, state.capacity, len(state.results))
                     self._bytes_total += len(data)
                     yield data
             finally:

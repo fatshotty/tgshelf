@@ -220,11 +220,13 @@ async def run_server(config: Config) -> None:
     runner = web.AppRunner(app, handler_cancellation=True)
     await runner.setup()
     for host in (h.strip() for h in config.http.host.split(",") if h.strip()):
-        # shutdown_timeout short (default 60s): a streaming response never finishes
-        # on its own (whole-file range), so a graceful shutdown would hang on
-        # Ctrl-C until the client disconnects. With handler_cancellation the active
-        # streams are cancelled (finally -> aclose -> bots freed) within this grace.
-        await web.TCPSite(runner, host, config.http.port, shutdown_timeout=2.0).start()
+        # shutdown_timeout is the GRACE aiohttp waits for in-flight handlers to
+        # finish on their own before cancelling them. A streaming response never
+        # finishes (whole-file range), so any grace is just wasted "flush" time on
+        # Ctrl-C. Keep it tiny (NOT 0 — ceil_timeout treats <=0 as "no timeout" =
+        # wait forever): ~0.1s grace, then handler_cancellation cancels the streams
+        # (finally -> aclose -> bots freed) almost immediately.
+        await web.TCPSite(runner, host, config.http.port, shutdown_timeout=0.1).start()
         log.info("serving on %s:%s", host, config.http.port)
 
     stop = asyncio.Event()

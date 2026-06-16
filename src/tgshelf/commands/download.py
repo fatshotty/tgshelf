@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import AsyncContextManager, Callable
 
 from tgshelf.core.fs import FileSystem
 from tgshelf.progress import ProgressState
@@ -84,3 +85,53 @@ async def download_file(
         raise ValueError(f"size mismatch for {node.name}: wrote {written}, expected {size}")
     state.finish(key, "ok")
     return "ok"
+
+
+@dataclass
+class DownloadResult:
+    ok: int = 0
+    skipped: int = 0
+    failed: int = 0
+    errors: list[tuple[str, str]] = field(default_factory=list)  # (rel_path, reason)
+
+
+async def download_tree(
+    fs: FileSystem, path: str, dest, *, concurrent: int, overwrite: bool,
+    fs_factory: Callable[[], AsyncContextManager[FileSystem]],
+    state: ProgressState | None = None,
+) -> DownloadResult:
+    """Plan + download every file concurrently. `fs_factory()` is an async context
+    manager yielding a fresh fs (its own DB session) for ONE file — sessions are
+    not concurrent-safe; the context manager opens/closes it. `state` (optional) is
+    updated for the renderer; created internally if omitted. Local layout mirrors
+    the drive name: dest/<root-name>/<rel> for a folder, dest/<name> for a single
+    file. Never aborts on a per-file failure."""
+    dest = Path(dest)
+    files = await plan_download(fs, path)
+    root = await fs.resolve(path)
+    # folder -> nest under dest/<folder-name>; single file -> straight into dest
+    base = dest / root.name if root.is_folder else dest
+
+    st = state or ProgressState(len(files), sum(f.size for f in files))
+    result = DownloadResult()
+    sem = asyncio.Semaphore(max(1, concurrent))
+
+    async def worker(idx: int, pf: PlannedFile) -> None:
+        local = base / pf.rel_path
+        async with sem:
+            try:
+                async with fs_factory() as wfs:
+                    status = await download_file(
+                        wfs, pf.id, local, st, key=str(idx), overwrite=overwrite,
+                    )
+                if status == "ok":
+                    result.ok += 1
+                elif status == "skipped":
+                    result.skipped += 1
+            except Exception as exc:  # noqa: BLE001 - one bad file never aborts
+                result.failed += 1
+                result.errors.append((pf.rel_path, str(exc)))
+                log.error("[download] FAILED %s: %s", pf.rel_path, exc)
+
+    await asyncio.gather(*(worker(i, pf) for i, pf in enumerate(files)))
+    return result

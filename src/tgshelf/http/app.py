@@ -7,6 +7,7 @@ open. IPv6 / missing remote are handled gracefully (the legacy crashed on them).
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import ipaddress
@@ -89,6 +90,12 @@ def _domain_status(exc: Exception) -> int | None:
     return None
 
 
+# a client closing the connection mid-response (very common for the interrupted
+# range requests of a streaming player) surfaces as one of these; it is not a
+# server fault, so it must not produce a 500 stacktrace.
+_CLIENT_GONE = (ConnectionResetError, ConnectionError, asyncio.CancelledError)
+
+
 @web.middleware
 async def error_middleware(request: web.Request, handler):
     """Pass HTTP responses through; map domain exceptions to status codes;
@@ -96,6 +103,12 @@ async def error_middleware(request: web.Request, handler):
     try:
         return await handler(request)
     except web.HTTPException:
+        raise
+    except _CLIENT_GONE as exc:
+        # client went away mid-response: log quietly (no stacktrace) and re-raise
+        # so aiohttp tears the request down — the socket is gone, no 500 to send.
+        log.debug("client disconnected on %s %s: %s",
+                  request.method, request.path, exc.__class__.__name__)
         raise
     except Exception as exc:  # noqa: BLE001
         status = _domain_status(exc)

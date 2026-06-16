@@ -22,6 +22,7 @@ from tgshelf.config import Config
 from tgshelf.core.fs import FileSystem
 from tgshelf.db.engine import create_engine, create_session_factory
 from tgshelf.db.repo import NodeRepo
+from tgshelf.looplag import start_loop_lag_monitor, stop_loop_lag_monitor
 from tgshelf.progress import (
     ProgressState, build_block, format_recap, error_header, error_line, error_footer,
 )
@@ -244,6 +245,8 @@ async def run(config: Config, args) -> int:
 
         stop = asyncio.Event()
         renderer = None if debug else asyncio.create_task(_render_loop(state, header, stop))
+        # at debug, watch for event-loop stalls that would freeze every fetch at once
+        lag_task = start_loop_lag_monitor() if debug else None
         try:
             async with session_factory() as read_session:
                 result = await download_tree(
@@ -255,6 +258,7 @@ async def run(config: Config, args) -> int:
             stop.set()
             if renderer is not None:
                 await renderer
+            await stop_loop_lag_monitor(lag_task)
 
         print(format_recap(state.snapshot()))
         if result.errors:

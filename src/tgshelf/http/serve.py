@@ -21,6 +21,7 @@ from tgshelf.core.executor import FsExecutor
 from tgshelf.core.uploader import Uploader
 from tgshelf.db.engine import create_engine, create_session_factory
 from tgshelf.http.app import make_app
+from tgshelf.looplag import start_loop_lag_monitor, stop_loop_lag_monitor
 from tgshelf.telegram.pool import BotPool, ClientPool, PoolMember
 from tgshelf.telegram.ratelimit import InMemoryRateLimiter
 
@@ -225,9 +226,12 @@ async def run_server(config: Config) -> None:
         if watcher_client is not None
         else None
     )
+    # at debug, flag event-loop stalls that would freeze every in-flight stream at once
+    lag_task = start_loop_lag_monitor() if log.isEnabledFor(logging.DEBUG) else None
     try:
         await stop.wait()
     finally:
+        await stop_loop_lag_monitor(lag_task)
         if monitor is not None:
             monitor.cancel()
         await runner.cleanup()

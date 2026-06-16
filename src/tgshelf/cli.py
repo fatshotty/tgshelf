@@ -23,6 +23,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "accounts": ("manage Telegram accounts/sessions (login, add-bot, list)", "A3"),
     "create-bots": ("create bots via BotFather and join them to channels", "C4"),
     "bots": ("check/repair bot membership on all channels in use", "C4"),
+    "mkdir": ("create a folder (with parents) in the virtual filesystem", "C2"),
     "ls": ("list a folder of the virtual filesystem", "C2"),
     "cp": ("copy files/folders", "C2"),
     "mv": ("move files/folders", "C2"),
@@ -48,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
         cmd = subparsers.add_parser(name, help=help_text)
         if name == "accounts":
             _add_accounts_subparsers(cmd)
-        elif name in ("ls", "rm", "purge"):
+        elif name in ("ls", "rm", "purge", "mkdir"):
             cmd.add_argument("path", help="path of a folder or file")
         elif name in ("cp", "mv"):
             cmd.add_argument("src", help="source path (file or folder)")
@@ -113,7 +114,7 @@ def _dispatch(config: Config, args: argparse.Namespace) -> int:
 
         return asyncio.run(accounts.run(config, args))
 
-    if args.command in ("ls", "cp", "mv", "rm", "purge"):
+    if args.command in ("mkdir", "ls", "cp", "mv", "rm", "purge"):
         from tgshelf.commands import fsops
 
         return asyncio.run(fsops.run(config, args))

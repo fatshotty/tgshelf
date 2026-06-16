@@ -52,6 +52,14 @@ async def _do_ls(fs: FileSystem, path: str) -> int:
     return 0
 
 
+async def _do_mkdir(fs: FileSystem, path: str) -> int:
+    # mkdirs semantics (like `mkdir -p`): create missing parents, idempotent if it
+    # already exists. DB-only — a folder has no Telegram footprint until files land.
+    node = await fs.mkdirs(path)
+    print(f"created {path} ({node.id})")
+    return 0
+
+
 async def _do_rm(fs: FileSystem, path: str) -> int:
     node = await fs.resolve(path)
     if node is None:
@@ -150,6 +158,9 @@ async def run(config: Config, args) -> int:
     if cmd == "ls":
         async with _db_fs(config) as fs:
             return await _do_ls(fs, args.path)
+    if cmd == "mkdir":
+        async with _db_fs(config) as fs:
+            return await _do_mkdir(fs, args.path)
     if cmd == "rm":
         async with _db_fs(config) as fs:
             return await _do_rm(fs, args.path)

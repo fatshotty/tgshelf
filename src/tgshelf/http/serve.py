@@ -198,7 +198,13 @@ async def run_server(config: Config) -> None:
         config, session_factory=session_factory, user_gateway=user_gateway, notifier=notifier
     )
 
-    runner = web.AppRunner(app)
+    # handler_cancellation: cancel the request task as soon as the client
+    # disconnects. A streaming player that seeks closes the old connection while
+    # our handler may be parked in the streamer's ordered-reassembly wait (not
+    # writing, so a disconnect would otherwise go unnoticed and leak its leased
+    # bots). Cancellation reaches the handler -> finally aclose() -> bots freed
+    # immediately, so the new seek stream is never starved.
+    runner = web.AppRunner(app, handler_cancellation=True)
     await runner.setup()
     for host in (h.strip() for h in config.http.host.split(",") if h.strip()):
         await web.TCPSite(runner, host, config.http.port).start()

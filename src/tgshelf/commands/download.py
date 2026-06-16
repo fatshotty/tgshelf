@@ -227,7 +227,10 @@ async def run(config: Config, args) -> int:
 
         header = (f"download {args.path}  —  boost multi_bot_download="
                   f"{config.download.multi_bot_download}, {concurrent} concurrent")
-        print(header)
+        # On a TTY the render loop owns the whole block (header included); print it
+        # once only when there is no live block to draw it.
+        if not sys.stdout.isatty():
+            print(header)
         state = ProgressState(len(files), sum(f.size for f in files))
 
         stop = asyncio.Event()

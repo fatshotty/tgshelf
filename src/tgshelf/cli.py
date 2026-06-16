@@ -20,6 +20,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "serve": ("run the HTTP server (API + streaming)", "B1"),
     "sync": ("upload a local directory tree to the drive", "C3"),
     "strm": ("generate .strm files from the virtual filesystem", "C3"),
+    "download": ("download a file/folder from the drive to local disk", "C-download"),
     "accounts": ("manage Telegram accounts/sessions (login, add-bot, list)", "A3"),
     "create-bots": ("create bots via BotFather and join them to channels", "C4"),
     "bots": ("check/repair bot membership on all channels in use", "C4"),
@@ -62,6 +63,15 @@ def build_parser() -> argparse.ArgumentParser:
             cmd.add_argument("local_dir", help="local directory to upload")
             cmd.add_argument("--dest", help="drive destination folder (default: /)")
             cmd.add_argument("--concurrent", type=int, help="parallel uploads (default: config operations.concurrent)")
+        elif name == "download":
+            cmd.add_argument("path", help="drive path of a file or folder to download")
+            cmd.add_argument("--dest", help="local destination dir (default: cwd)")
+            cmd.add_argument("--concurrent", type=int,
+                             help="parallel files (default: config operations.concurrent)")
+            cmd.add_argument("--overwrite", action="store_true",
+                             help="re-download from scratch (ignore skip/resume)")
+            cmd.add_argument("--log-file", dest="log_file",
+                             help="errors log file (default: <dest>/tgshelf-download-errors.log)")
         elif name == "create-bots":
             cmd.add_argument("--prefix", required=True, help="bot username prefix (e.g. 'redstream' -> redstream_01_bot)")
             cmd.add_argument("--count", type=int, required=True, help="how many bots to create")
@@ -128,6 +138,11 @@ def _dispatch(config: Config, args: argparse.Namespace) -> int:
         from tgshelf.commands import sync
 
         return asyncio.run(sync.run(config, args))
+
+    if args.command == "download":
+        from tgshelf.commands import download
+
+        return asyncio.run(download.run(config, args))
 
     if args.command == "create-bots":
         from tgshelf.commands import bots

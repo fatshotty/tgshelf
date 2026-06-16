@@ -100,7 +100,9 @@ def build_runtime(config: Config, session_factory, clients) -> dict[str, Any]:
 
 async def start_clients(config: Config, rate_limiter) -> list[tuple[Any, Any]]:
     """Connect each configured account from its stored session. Accounts without
-    a usable session are skipped with a warning (run `accounts login`)."""
+    a usable session are skipped with a warning (run `accounts login`). The
+    `main_bot` watcher is NOT here — it is a dedicated instance started separately
+    by serve (its own token, receive_updates=True), never a pool client."""
     from telethon import TelegramClient
     from telethon.sessions import StringSession
 
@@ -177,6 +179,25 @@ async def run_server(config: Config) -> None:
     register_upload_routes(app)  # streaming upload (B3)
     register_ops_routes(app)  # /status (B3)
 
+    # start the live channel watcher (no-op if not configured); fetches posted
+    # documents through a user client from the pool. The watcher is best-effort:
+    # any failure is logged + pushed to the notify channel, never fatal to serve.
+    from tgshelf.bot.watcher import start_watcher
+    from tgshelf.core.notify import Notifier
+
+    user_gateway = (
+        runtime["client_pool"].members[0].client
+        if runtime["client_pool"].members
+        else None
+    )
+    notifier = Notifier(
+        client=getattr(user_gateway, "_client", None),
+        channel=config.telegram.notify.channel,
+    )
+    watcher_client = await start_watcher(
+        config, session_factory=session_factory, user_gateway=user_gateway, notifier=notifier
+    )
+
     runner = web.AppRunner(app)
     await runner.setup()
     for host in (h.strip() for h in config.http.host.split(",") if h.strip()):
@@ -190,13 +211,47 @@ async def run_server(config: Config) -> None:
             loop.add_signal_handler(sig, stop.set)
         except NotImplementedError:  # pragma: no cover - non-unix
             pass
+
+    # watch the watcher: if the bot drops while serving, log + notify and keep
+    # serving (no live cataloging until restart; `import-channel` backfills)
+    monitor = (
+        asyncio.create_task(_watch_health(watcher_client, notifier, stop))
+        if watcher_client is not None
+        else None
+    )
     try:
         await stop.wait()
     finally:
+        if monitor is not None:
+            monitor.cancel()
         await runner.cleanup()
+        if watcher_client is not None:
+            await watcher_client.disconnect()
         for _account, client in clients:
             disconnect = getattr(getattr(client, "_client", None), "disconnect", None)
             if disconnect is not None:
                 await disconnect()
         await engine.dispose()
         log.info("stopped")
+
+
+async def _watch_health(watcher_client, notifier, stop: asyncio.Event) -> None:
+    """Notify (never raise) if the watcher bot disconnects on its own while serve
+    is still up. A normal shutdown sets `stop` first, so it is not reported."""
+    try:
+        await watcher_client.disconnected
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 - monitoring must never crash serve
+        pass
+    if stop.is_set():
+        return
+    msg = (
+        "main_bot watcher disconnected; serving continues WITHOUT "
+        "live cataloging — run `tgshelf import-channel` to catch up"
+    )
+    log.error("[watch] %s", msg)
+    if notifier is not None:
+        from tgshelf.telegram.errors import Severity
+
+        await notifier.notify(msg, severity=Severity.ERROR)

@@ -94,8 +94,9 @@ async def run(config: Config, args) -> int:
                 gateway=gateway,
                 min_size=config.telegram.upload.min_size,
             )
-            log.info("scanning master channel %s (limit=%s)", master, limit or "all")
+            log.info("[import] scanning master channel %s (limit=%s)", master, limit or "all")
             stats = await reconcile(raw.iter_messages(master, limit=limit), fs, master)
+            log.info("[import] done: %s", stats)
     finally:
         await engine.dispose()
         for _account, client in pairs:

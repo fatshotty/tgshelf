@@ -60,11 +60,25 @@ class RateLimitConfig:
 
 
 @dataclass(frozen=True)
+class MainBotConfig:
+    """A dedicated, brand-new bot (its own BotFather token) that watches the
+    master channel live. NOT one of the pool `users`: it is a separate instance
+    with receive_updates=True, started only by `serve`. The operator must add it
+    as admin of the master channel."""
+
+    api_id: int
+    api_hash: str
+    bot_token: str
+
+
+@dataclass(frozen=True)
 class TelegramConfig:
     upload: UploadConfig
     notify: NotifyConfig = NotifyConfig()
     users: tuple[AccountConfig, ...] = ()
     rate_limit: RateLimitConfig = RateLimitConfig()
+    # optional dedicated watcher bot (own token, outside `users`); None = disabled
+    main_bot: MainBotConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -227,11 +241,28 @@ def _parse_telegram(raw: Mapping[str, Any]) -> TelegramConfig:
     if rate_limit.window <= 0:
         raise ConfigError("'telegram.rate_limit.window' must be > 0")
 
+    users = _parse_accounts(section.get("users"))
+
+    raw_main = section.get("main_bot")
+    main_bot = None
+    if raw_main not in (None, "", {}):
+        if not isinstance(raw_main, Mapping):
+            raise ConfigError("'telegram.main_bot' must be a mapping")
+        for required in ("api_id", "api_hash", "bot_token"):
+            if not raw_main.get(required):
+                raise ConfigError(f"'telegram.main_bot.{required}' is required")
+        main_bot = MainBotConfig(
+            api_id=_int(raw_main, "api_id", 0, path="telegram.main_bot"),
+            api_hash=str(raw_main["api_hash"]),
+            bot_token=str(raw_main["bot_token"]),
+        )
+
     return TelegramConfig(
         upload=UploadConfig(channel=channel, min_size=min_size),
         notify=NotifyConfig(channel=notify_channel),
-        users=_parse_accounts(section.get("users")),
+        users=users,
         rate_limit=rate_limit,
+        main_bot=main_bot,
     )
 
 

@@ -8,6 +8,8 @@ ineligibility, plus a small pool-level summary. No DB access. `/metrics`
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from typing import Any
 
@@ -16,6 +18,8 @@ from aiohttp import web
 from tgshelf.http.app import RUNTIME
 
 log = logging.getLogger("tgshelf.http.ops")
+
+METRICS_SSE_INTERVAL = 1.0  # seconds between pushed snapshots
 
 
 def _member_status(m: Any, now: float) -> dict:
@@ -132,7 +136,30 @@ async def metrics_text(request: web.Request) -> web.Response:
     return web.Response(body=body, headers={"Content-Type": _PROM_CONTENT_TYPE})
 
 
+async def metrics_stream(request: web.Request) -> web.StreamResponse:
+    """`GET /api/v1/metrics/stream` — Server-Sent Events: pushes a metrics
+    snapshot (`_metrics_json`) ~once a second for the live WebUI dashboard. Ends
+    quietly when the client disconnects (the request task is cancelled by
+    handler_cancellation, or the write fails)."""
+    resp = web.StreamResponse(headers={
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",  # don't let a reverse proxy buffer the stream
+    })
+    await resp.prepare(request)
+    rt = request.app[RUNTIME]
+    try:
+        while True:
+            payload = json.dumps(_metrics_json(rt))
+            await resp.write(f"data: {payload}\n\n".encode())
+            await asyncio.sleep(METRICS_SSE_INTERVAL)
+    except (ConnectionResetError, ConnectionError, asyncio.CancelledError):
+        pass  # client went away — stop pushing
+    return resp
+
+
 def register_ops_routes(app: web.Application) -> None:
     app.router.add_get("/status", status)
     app.router.add_get("/metrics", metrics)            # JSON
     app.router.add_get("/metrics.txt", metrics_text)   # Prometheus text
+    app.router.add_get("/api/v1/metrics/stream", metrics_stream)  # SSE (live WebUI)

@@ -582,6 +582,40 @@ class FileSystem:
         await self.repo.session.commit()
         return await self.repo.get(target_id)
 
+    async def reorder_parts(self, file_id: str, order: Sequence[int]) -> Node:
+        """Re-sequence the parts of ONE multi-part file: `order` is a permutation
+        of the current part indices (e.g. [2,0,1]) giving the new position order.
+        Re-indexes 0..n in a single transaction. The total size is invariant under
+        a permutation, but the BYTE LAYOUT served by /download changes — so mtime
+        is bumped (the ETag folds it in) to invalidate caches. Raises ValueError on
+        an inline file, no parts, or a non-permutation (which would drop/duplicate
+        parts and change the size)."""
+        if await self.repo.content_of(file_id) is not None:
+            raise ValueError(f"cannot reorder parts of an inline (DB-stored) file {file_id}")
+        current = list(await self.repo.parts_of(file_id))
+        if not current:
+            raise ValueError(f"file {file_id} has no parts to reorder")
+        if sorted(order) != list(range(len(current))):
+            raise ValueError(
+                f"order must be a permutation of 0..{len(current) - 1} "
+                f"(got {list(order)})"
+            )
+
+        reordered = [current[i] for i in order]
+        await self.repo.clear_parts(file_id)
+        for i, p in enumerate(reordered):
+            await self.repo.add_part(
+                file_id, idx=i, channel_id=p.channel_id, message_id=p.message_id,
+                doc_id=p.doc_id, size=p.size, original_filename=p.original_filename,
+            )
+        # size unchanged by a permutation (re-asserted defensively); bump mtime so
+        # the download ETag changes and clients/players don't serve stale bytes.
+        await self.repo.set_fields(
+            file_id, size=sum(p.size for p in reordered), mtime=func.now()
+        )
+        await self.repo.session.commit()
+        return await self.repo.get(file_id)
+
     # -- read ---------------------------------------------------------------
 
     async def open_read(

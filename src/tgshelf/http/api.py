@@ -288,6 +288,42 @@ async def strm_node(request: web.Request) -> web.Response:
         )
 
 
+async def list_parts(request: web.Request) -> web.Response:
+    """Ordered parts of a multi-part file (for the WebUI reorder view)."""
+    node_id = request.match_info["id"]
+    async with open_fs(request) as fs:
+        node = await fs.get(node_id)
+        if node is None:
+            return _not_found(f"node {node_id} not found")
+        if node.is_folder:
+            return _bad_request("a folder has no parts")
+        parts = await fs.repo.parts_of(node_id)
+        return web.json_response([
+            {"idx": p.idx, "size": p.size, "original_filename": p.original_filename}
+            for p in parts
+        ])
+
+
+async def reorder_parts_node(request: web.Request) -> web.Response:
+    """Re-sequence the parts of one file. Body `{order:[int,...]}` = a permutation
+    of the current part indices. fs.reorder_parts raises ValueError (inline / no
+    parts / non-permutation) → 400 via the error middleware."""
+    node_id = request.match_info["id"]
+    body = await _json_body(request)
+    order = body.get("order")
+    if not isinstance(order, list) or not order or not all(isinstance(i, int) for i in order):
+        return _bad_request("'order' must be a non-empty list of integers")
+    async with open_fs(request) as fs:
+        node = await fs.get(node_id)
+        if node is None:
+            return _not_found(f"node {node_id} not found")
+        if node.is_folder:
+            return _bad_request("a folder has no parts to reorder")
+        updated = await fs.reorder_parts(node_id, order)
+        log.info("reordered parts of %s -> %s", node_id, order)
+        return web.json_response(node_to_dict(updated))
+
+
 def register_routes(app: web.Application) -> None:
     app.router.add_get("/api/v1/nodes/{id}", get_node)
     app.router.add_get("/api/v1/nodes/{id}/children", list_children)
@@ -300,4 +336,6 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/api/v1/nodes/{id}/move", move_node)
     app.router.add_post("/api/v1/nodes/{id}/copy", copy_node)
     app.router.add_post("/api/v1/nodes/{id}/merge", merge_node)
+    app.router.add_get("/api/v1/nodes/{id}/parts", list_parts)
+    app.router.add_put("/api/v1/nodes/{id}/parts", reorder_parts_node)
     app.router.add_post("/api/v1/nodes/{id}/strm", strm_node)

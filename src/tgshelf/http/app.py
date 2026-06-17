@@ -20,7 +20,17 @@ from tgshelf.config import HttpConfig
 
 log = logging.getLogger("tgshelf.http")
 
-AUTH_EXEMPT_PATHS = frozenset({"/ping"})
+def _is_protected(path: str) -> bool:
+    """Auth covers the DATA surface (JSON API + byte streaming + ops). The SPA
+    shell, its `/assets`, and `/ping` load freely so the WebUI can boot and then
+    prompt for credentials (the SPA sends Basic auth on API calls)."""
+    return (
+        path.startswith("/api/")
+        or path == "/download"
+        or path.startswith("/download/")
+        or path == "/status"
+        or path.startswith("/metrics")
+    )
 
 # runtime components (session_factory, master_channel, executor, …) live under
 # one typed AppKey — avoids aiohttp's deprecated str-keyed app storage
@@ -54,7 +64,7 @@ def make_auth_middleware(config: HttpConfig):
 
     @web.middleware
     async def auth_middleware(request: web.Request, handler):
-        if request.path in AUTH_EXEMPT_PATHS or not auth_required:
+        if not auth_required or not _is_protected(request.path):
             return await handler(request)
 
         ip = _client_ip(request)

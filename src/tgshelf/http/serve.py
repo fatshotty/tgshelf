@@ -197,6 +197,7 @@ async def run_server(config: Config) -> None:
     from tgshelf.http.download import register_download_routes
     from tgshelf.http.ops import register_ops_routes
     from tgshelf.http.upload import register_upload_routes
+    from tgshelf.http.webui import register_webui_routes
 
     app = make_app(
         config.http,
@@ -215,6 +216,7 @@ async def run_server(config: Config) -> None:
     register_download_routes(app)  # streaming download (B3)
     register_upload_routes(app)  # streaming upload (B3)
     register_ops_routes(app)  # /status (B3)
+    register_webui_routes(app)  # React SPA at / — LAST (catch-all fallback)
 
     # start the live channel watcher (no-op if not configured); fetches posted
     # documents through a user client from the pool. The watcher is best-effort:

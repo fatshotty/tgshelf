@@ -88,7 +88,10 @@ async def download(request: web.Request) -> web.StreamResponse:
             )
 
         size = node.size
-        etag = f'"{node.id}-{size}"'
+        # mtime folded into the ETag: a parts-reorder keeps the size but changes
+        # the byte layout, so size alone wouldn't invalidate caches/players.
+        mtime_us = int(node.mtime.timestamp() * 1_000_000)
+        etag = f'"{node.id}-{size}-{mtime_us}"'
         if request.headers.get("If-None-Match") == etag:
             return web.Response(status=304, headers={"ETag": etag})
 

@@ -143,11 +143,17 @@ async def start_clients(config: Config, rate_limiter) -> list[tuple[Any, Any]]:
                 log.warning("session for '%s' is not authorized; re-login", account.name)
                 await tele.disconnect()
                 continue
-            # Bots are leased only by the streamer, which fails over on cooldown.
-            # Surface their FloodWaits immediately (threshold 0) so a throttled bot
-            # is swapped mid-stream instead of sleeping ~1s inline. User accounts
-            # (upload, no failover) keep the default inline-sleep behaviour.
-            tg_kwargs = {"flood_threshold": 0} if account.is_bot else {}
+            # Bots are leased only by the streamer (which fails over on cooldown).
+            # Telegram's "natural" sub-second FloodWaits are absorbed inline (DEBUG,
+            # no warning, no bot swap) — the read-ahead buffer covers them; only a
+            # FloodWait >= chunk_timeout surfaces as FloodCooldown -> [flood] WARNING
+            # + failover. Threshold is chunk_timeout-1 so the inline sleep never
+            # races the per-chunk wait_for(chunk_timeout). User accounts (upload, no
+            # failover) keep the default inline-sleep threshold.
+            tg_kwargs = (
+                {"flood_threshold": max(0, int(config.download.chunk_timeout) - 1)}
+                if account.is_bot else {}
+            )
             clients.append((account, TgClient(
                 tele, name=account.name, rate_limiter=rate_limiter, **tg_kwargs,
             )))

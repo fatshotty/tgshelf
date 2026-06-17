@@ -20,6 +20,8 @@ from urllib.parse import quote
 from aiohttp import web
 
 from tgshelf.http.api import open_fs
+from tgshelf.log import new_request_id
+from tgshelf.telegram.errors import ChannelUnavailable, FloodCooldown, PartMissing
 
 log = logging.getLogger("tgshelf.http.download")
 
@@ -27,6 +29,10 @@ log = logging.getLogger("tgshelf.http.download")
 # writing to the socket. It is not a server fault: swallow it where it happens
 # so nothing escapes to be logged with a stacktrace (by us OR by aiohttp.server).
 _CLIENT_GONE = (ConnectionResetError, ConnectionError, asyncio.CancelledError)
+
+# the streamer exhausted its failover (every bot flooding/unavailable) or the
+# part is gone from Telegram: an expected backend condition, not a server bug.
+_STREAM_ABORTED = (FloodCooldown, ChannelUnavailable, PartMissing)
 
 
 class _BadRange(Exception):
@@ -73,6 +79,7 @@ def _content_disposition(name: str) -> str:
 
 async def download(request: web.Request) -> web.StreamResponse:
     file_id = request.match_info["file_id"]
+    new_request_id()  # tag this request + its streamer workers in the log
     async with open_fs(request) as fs:
         node = await fs.get(file_id)
         if node is None or node.is_folder or node.state != "ACTIVE":
@@ -130,6 +137,13 @@ async def download(request: web.Request) -> web.StreamResponse:
                       node.id, exc.__class__.__name__)
             if isinstance(exc, asyncio.CancelledError):
                 raise
+        except _STREAM_ABORTED as exc:
+            # the streamer gave up (all bots flooding/unavailable, part gone): the
+            # response already started, so we can't change the status — log it
+            # cleanly (no stacktrace) and end the (truncated) response. Pre-stream
+            # occurrences map to a proper status via the error middleware.
+            log.warning("[download] %s stream aborted (%s): %s",
+                        node.id, exc.__class__.__name__, exc)
         finally:
             await stream.aclose()  # release the streamer's bots on disconnect too
         return resp

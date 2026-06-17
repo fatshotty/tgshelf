@@ -22,6 +22,7 @@ from tgshelf.config import Config
 from tgshelf.core.fs import FileSystem
 from tgshelf.db.engine import create_engine, create_session_factory
 from tgshelf.db.repo import NodeRepo
+from tgshelf.log import new_request_id
 from tgshelf.looplag import start_loop_lag_monitor, stop_loop_lag_monitor
 from tgshelf.progress import (
     ProgressState, build_block, format_recap, error_header, error_line, error_footer,
@@ -67,6 +68,7 @@ async def download_file(
     "ok" | "skipped". Creates the parent dir on-demand. Without overwrite: skip if
     the local size already matches, resume if it is smaller. Raises ValueError on a
     size-mismatch sanity failure (the caller turns that into a "failed")."""
+    new_request_id()  # tag this file's fetches (+ streamer workers) in the log
     node = await fs.get(node_id)
     size = node.size
     state.start_file(key, node.name, size)

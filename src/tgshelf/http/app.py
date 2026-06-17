@@ -78,6 +78,7 @@ def _domain_status(exc: Exception) -> int | None:
     from tgshelf.core.download import RangeNotSatisfiable
     from tgshelf.core.fs import NotAReadableFile
     from tgshelf.db.repo import DuplicateNameError
+    from tgshelf.telegram.errors import ChannelUnavailable, FloodCooldown, PartMissing
 
     if isinstance(exc, DuplicateNameError):
         return 409
@@ -85,6 +86,13 @@ def _domain_status(exc: Exception) -> int | None:
         return 404
     if isinstance(exc, RangeNotSatisfiable):
         return 416
+    # streamer backend conditions (no bot can serve / part gone): not a 500.
+    # For a stream already started the download handler catches these first;
+    # this covers pre-response occurrences.
+    if isinstance(exc, (FloodCooldown, ChannelUnavailable)):
+        return 503
+    if isinstance(exc, PartMissing):
+        return 502
     if isinstance(exc, ValueError):
         return 400
     return None

@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import uuid
+from contextvars import ContextVar
 
 LEVELS = {
     "no": logging.CRITICAL,
@@ -22,8 +24,34 @@ LEVELS = {
 
 NOISY_LOGGERS = ("telethon", "aiohttp.access", "sqlalchemy.engine", "alembic")
 
-FORMAT = "[%(asctime)s][%(name)s][%(levelname)s] %(message)s"
+# request/stream correlation id: set once per HTTP stream or per CLI download
+# file, it tags EVERY log line emitted while serving it (handler + streamer
+# workers, which inherit the context via asyncio.create_task). Grep one id to
+# reconstruct a whole request: which bots were leased and how each fetch went.
+_request_id: ContextVar[str] = ContextVar("tgshelf_request_id", default="-")
+
+FORMAT = "[%(asctime)s][%(name)s][%(levelname)s][%(request_id)s] %(message)s"
 DATE_FORMAT = "%d/%m/%Y %H:%M:%S"
+
+
+def new_request_id() -> str:
+    """Mint a short id and bind it to the current context; returns it for the
+    caller to log at request arrival."""
+    rid = uuid.uuid4().hex[:8]
+    _request_id.set(rid)
+    return rid
+
+
+def current_request_id() -> str:
+    return _request_id.get()
+
+
+class _RequestIdFilter(logging.Filter):
+    """Stamp every record with the current request id (default '-')."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = _request_id.get()
+        return True
 
 
 class _DropConnectionErrors(logging.Filter):
@@ -47,6 +75,11 @@ def setup_logging(level_name: str) -> None:
     )
     for name in NOISY_LOGGERS:
         logging.getLogger(name).setLevel(logging.WARNING)
+    # stamp the request id on every emitted record (on the handler so it covers
+    # records propagated from child loggers too) — needed by the FORMAT above.
+    for handler in logging.getLogger().handlers:
+        if not any(isinstance(f, _RequestIdFilter) for f in handler.filters):
+            handler.addFilter(_RequestIdFilter())
     # aiohttp logs client disconnects on its own server logger, outside our
     # middleware; drop just those records (keep genuine handler errors).
     server_log = logging.getLogger("aiohttp.server")

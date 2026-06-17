@@ -2,6 +2,7 @@ import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
 
 import BrowseView from './views/BrowseView'
 import MetricsView from './views/MetricsView'
+import SearchView from './views/SearchView'
 
 export default function App() {
   return (
@@ -17,6 +18,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Navigate to="/b" replace />} />
           <Route path="/b/*" element={<BrowseView />} />
+          <Route path="/search" element={<SearchView />} />
           <Route path="/stats" element={<MetricsView />} />
           <Route path="*" element={<Navigate to="/b" replace />} />
         </Routes>

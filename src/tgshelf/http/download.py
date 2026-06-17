@@ -125,14 +125,18 @@ async def download(request: web.Request) -> web.StreamResponse:
             "download %s '%s' bytes %d-%d/%d", node.id, node.name, start, end, size
         )
         stream = fs.open_read(file_id, start, end)
+        sent = 0
+        outcome = "completed"
         try:
             async for chunk in stream:
                 await resp.write(chunk)
+                sent += len(chunk)
             await resp.write_eof()
         except _CLIENT_GONE as exc:
             # client went away mid-stream: quiet log, return the started response
             # so nothing propagates (CancelledError is re-raised to honour
             # cooperative cancellation).
+            outcome = f"client disconnected ({exc.__class__.__name__})"
             log.debug("download %s: client disconnected (%s)",
                       node.id, exc.__class__.__name__)
             if isinstance(exc, asyncio.CancelledError):
@@ -142,10 +146,15 @@ async def download(request: web.Request) -> web.StreamResponse:
             # response already started, so we can't change the status — log it
             # cleanly (no stacktrace) and end the (truncated) response. Pre-stream
             # occurrences map to a proper status via the error middleware.
+            outcome = f"aborted ({exc.__class__.__name__})"
             log.warning("[download] %s stream aborted (%s): %s",
                         node.id, exc.__class__.__name__, exc)
         finally:
             await stream.aclose()  # release the streamer's bots on disconnect too
+            # one terminal line per request: how it ended + bytes actually served
+            # (runs on every exit incl. cancellation, before it re-propagates).
+            log.info("[download] %s request ended: %s — %d/%d bytes sent",
+                     node.id, outcome, sent, length)
         return resp
 
 

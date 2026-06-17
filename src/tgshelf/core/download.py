@@ -285,19 +285,28 @@ class ParallelStreamer:
             # collapsed throughput on seek). `bot` may change on replacement, so
             # the key is recomputed each iteration.
             cache_key = (bot.name, chunk.part_idx)
-            ref = part_refs.get(cache_key)
-            if ref is None:
-                log.debug("[fetch] resolving part %d (msg %s @ channel %s, dc %s) via '%s'",
-                          chunk.part_idx, p.message_id, p.channel_id,
-                          getattr(ref, "dc_id", None), bot.name)
-                ref = await bot.client.get_document(p.channel_id, p.message_id)
-                if ref is None:
-                    raise PartMissing(file_path=str(p.message_id), part_idx=chunk.part_idx)
-                part_refs[cache_key] = ref
-
             self._bot_pool.acquire(bot)
             need_replacement = False
             try:
+                # RESOLVE is inside the failover loop too (timeout + replace): a bot
+                # that can't reach the channel raises ChannelUnavailable here ->
+                # logged [eligibility]/[failover] + swapped; a hung get_document is
+                # bounded by chunk_timeout instead of stalling the stream forever.
+                ref = part_refs.get(cache_key)
+                if ref is None:
+                    log.debug("[fetch] resolving part %d (msg %s @ channel %s) via '%s'",
+                              chunk.part_idx, p.message_id, p.channel_id, bot.name)
+                    t_r = time.monotonic()
+                    ref = await asyncio.wait_for(
+                        bot.client.get_document(p.channel_id, p.message_id),
+                        timeout=self._chunk_timeout,
+                    )
+                    if ref is None:
+                        raise PartMissing(file_path=str(p.message_id), part_idx=chunk.part_idx)
+                    part_refs[cache_key] = ref
+                    log.debug("[fetch] resolved part %d (dc %s) via '%s' in %.2fs",
+                              chunk.part_idx, getattr(ref, "dc_id", None), bot.name,
+                              time.monotonic() - t_r)
                 t0 = time.monotonic()
                 raw = await asyncio.wait_for(
                     bot.client.get_file_chunk(ref, chunk.offset, chunk.limit),
@@ -327,7 +336,7 @@ class ParallelStreamer:
                 last_exc, need_replacement = exc, True
             except asyncio.TimeoutError as exc:
                 self._bot_pool.mark_error(bot)
-                log.warning("[failover] chunk %d: '%s' timed out (>%.0fs); replacing",
+                log.warning("[failover] chunk %d: '%s' timed out (>%.0fs at resolve/fetch); replacing",
                             chunk.seq, bot.name, self._chunk_timeout)
                 last_exc, need_replacement = exc, True
             finally:

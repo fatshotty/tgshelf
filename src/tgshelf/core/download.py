@@ -202,19 +202,24 @@ class ParallelStreamer:
         try:
             state = _StreamState(cond=asyncio.Condition(), n=len(chunks), capacity=capacity)
             part_refs: dict[tuple[str, int], Any] = {}  # (bot name, part idx) -> DocRef
+            # bots that turned out unable to reach this channel: excluded for the
+            # REST OF THIS STREAM ONLY (not persisted in the pool). A bot you
+            # re-add to the channel is re-checked on the NEXT stream, no restart.
+            unreachable: list = []
 
             # generic lease (works whether the pool is a BotPool or, when no bots
             # are configured, the user ClientPool)
             bots = self._bot_pool.lease(k, channel_id=channel_id)
             if not bots:
-                bots = [await self._replace(channel_id, failed=None)]
+                bots = [await self._replace(channel_id, exclude=[])]
             log.debug(
                 "[stream] channel %s, %d chunk(s), K=%d, read-ahead=%d, clients %s",
                 channel_id, len(chunks), k, capacity, [b.name for b in bots],
             )
 
             workers = [
-                asyncio.create_task(self._worker(state, chunks, parts, channel_id, part_refs, bot))
+                asyncio.create_task(
+                    self._worker(state, chunks, parts, channel_id, part_refs, bot, unreachable))
                 for bot in bots
             ]
             try:
@@ -245,7 +250,7 @@ class ParallelStreamer:
             self._buffered_bytes -= reserve
             self._active_streams -= 1
 
-    async def _worker(self, state, chunks, parts, channel_id, part_refs, bot):
+    async def _worker(self, state, chunks, parts, channel_id, part_refs, bot, unreachable):
         while True:
             async with state.cond:
                 while True:
@@ -262,7 +267,7 @@ class ParallelStreamer:
                     await state.cond.wait()
             chunk = chunks[idx]
             try:
-                data, bot = await self._fetch(chunk, parts, channel_id, part_refs, bot)
+                data, bot = await self._fetch(chunk, parts, channel_id, part_refs, bot, unreachable)
             except BaseException as exc:  # noqa: BLE001 - propagated to the emitter
                 async with state.cond:
                     if state.error is None:
@@ -273,7 +278,7 @@ class ParallelStreamer:
                 state.results[chunk.seq] = data
                 state.cond.notify_all()
 
-    async def _fetch(self, chunk, parts, channel_id, part_refs, bot):
+    async def _fetch(self, chunk, parts, channel_id, part_refs, bot, unreachable):
         p = parts[chunk.part_idx]
         retries = 0
         last_exc: BaseException | None = None
@@ -330,9 +335,12 @@ class ParallelStreamer:
                 part_refs.pop(cache_key, None)  # re-resolve for THIS bot only
                 last_exc = exc
             except ChannelUnavailable as exc:
-                self._bot_pool.mark_ineligible(bot, channel_id)
-                log.warning("[failover] chunk %d: '%s' cannot reach channel %s; replacing",
-                            chunk.seq, bot.name, channel_id)
+                # per-stream exclusion (NOT persisted): a re-added bot is rechecked
+                # on the next stream. Other workers see it via the shared list.
+                if bot not in unreachable:
+                    unreachable.append(bot)
+                log.warning("[eligibility] chunk %d: '%s' cannot reach channel %s; "
+                            "excluded for this stream", chunk.seq, bot.name, channel_id)
                 last_exc, need_replacement = exc, True
             except asyncio.TimeoutError as exc:
                 self._bot_pool.mark_error(bot)
@@ -346,10 +354,12 @@ class ParallelStreamer:
             if retries > self._max_retries:
                 raise last_exc
             if need_replacement:
-                bot = await self._replace(channel_id, failed=bot)
+                # exclude the per-stream unreachable set + the bot that just failed
+                # (flood/timeout recover via the pool, so they're excluded only for
+                # this immediate pick).
+                bot = await self._replace(channel_id, exclude=unreachable + [bot])
 
-    async def _replace(self, channel_id: int, failed: PoolMember | None) -> PoolMember:
-        exclude = [failed] if failed is not None else []
+    async def _replace(self, channel_id: int, exclude: Sequence[PoolMember]) -> PoolMember:
         repl = self._bot_pool.replace(channel_id=channel_id, exclude=exclude)
         if repl is not None:
             return repl

@@ -36,6 +36,7 @@ class FsExecutor:
         min_size: int = 0,
         uploader: Any = None,
         streamer: Any = None,
+        notifier: Any = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ):
         self._session_factory = session_factory
@@ -45,6 +46,7 @@ class FsExecutor:
         self._min_size = min_size
         self._uploader = uploader
         self._streamer = streamer
+        self._notifier = notifier
         self._sleep = sleep
 
     async def run(
@@ -76,6 +78,7 @@ class FsExecutor:
                     uploader=self._uploader,
                     streamer=self._streamer,
                     min_size=self._min_size,
+                    notifier=self._notifier,
                 )
                 return await op(fs, item)
         finally:

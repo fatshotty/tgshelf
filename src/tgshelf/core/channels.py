@@ -10,7 +10,7 @@ import logging
 from typing import Any, Sequence
 
 from tgshelf.core.upload import PartRecord
-from tgshelf.telegram.errors import DocIdMismatch, PartMissing
+from tgshelf.telegram.errors import DocIdMismatch, PartMissing, Severity, TgError
 
 log = logging.getLogger("tgshelf.channels")
 
@@ -66,7 +66,16 @@ async def forward_parts(
         ref = await gateway.get_document(part.channel_id, part.message_id)
         if ref is None:
             raise PartMissing(file_path=str(part.message_id), part_idx=part.idx)
-        if part.doc_id is not None and ref.doc_id != part.doc_id:
+        if part.doc_id is None:
+            # legacy record with unknown doc_id: the account-independent integrity
+            # check can't run, so this part is forwarded blind. Expected after the
+            # Mongo migration (garbage fileids -> NULL), but worth a trace.
+            log.warning(
+                "[move] forwarding part %s (msg %s in channel %s) WITHOUT doc_id "
+                "integrity check (legacy record with no doc_id)",
+                part.idx, part.message_id, part.channel_id,
+            )
+        elif ref.doc_id != part.doc_id:
             raise DocIdMismatch(expected=part.doc_id, found=ref.doc_id)
 
         message_id, doc_id = await gateway.copy_message(
@@ -85,15 +94,38 @@ async def forward_parts(
     return new_parts
 
 
-async def delete_originals(gateway: Any, parts: Sequence[PartRecord]) -> None:
+async def delete_originals(
+    gateway: Any, parts: Sequence[PartRecord], *, notifier: Any = None
+) -> None:
     """Best-effort deletion of the original messages after a move's DB commit.
 
-    A message already gone (deleted out-of-band) or an undeletable one never
-    fails the move — at worst a duplicate is leaked in the old channel.
+    Deletion never fails the move — the move is already committed; at worst a
+    duplicate is leaked in the old channel. But not all failures are equal:
+
+    - a *benign* failure (message already gone out-of-band, transient) is just a
+      WARNING — nothing to act on;
+    - a *critical* one (dead session, lost channel access) means the originals
+      could NOT be deleted for a real reason: the duplicate leak is durable and
+      the account/channel needs attention. It must be logged at ERROR and, when a
+      Notifier is wired, pushed to the alert channel — never hidden as a WARNING.
     """
     for part in parts:
         try:
             await gateway.delete_message(part.channel_id, part.message_id)
+        except TgError as exc:
+            if exc.severity in (Severity.ERROR, Severity.CRITICAL):
+                msg = (
+                    f"could not delete original message {part.message_id} in "
+                    f"channel {part.channel_id} after move: {exc}"
+                )
+                log.error("[move] %s", msg)
+                if notifier is not None:
+                    await notifier.notify(msg, severity=exc.severity)
+            else:  # WARNING-class domain error (flood/transient): best-effort
+                log.warning(
+                    "could not delete original message %s in channel %s: %s",
+                    part.message_id, part.channel_id, exc,
+                )
         except Exception as exc:  # noqa: BLE001 - best-effort, never fail the move
             log.warning(
                 "could not delete original message %s in channel %s: %s",

@@ -176,6 +176,23 @@ async def run_server(config: Config) -> None:
     clients = await start_clients(config, rate_limiter)
     runtime = build_runtime(config, session_factory, clients)
 
+    from tgshelf.core.notify import Notifier
+
+    # the alert channel writer: a user client pushes grave conditions (watcher
+    # failures, critical move-cleanup failures) to telegram.notify.channel. Built
+    # once here and shared by the executor (folder moves), per-request FS (file
+    # moves) and the watcher. (Which account writes is still open — see PLAN.md.)
+    user_gateway = (
+        runtime["client_pool"].members[0].client
+        if runtime["client_pool"].members
+        else None
+    )
+    notifier = Notifier(
+        client=getattr(user_gateway, "_client", None),
+        channel=config.telegram.notify.channel,
+    )
+    runtime["executor"]._notifier = notifier
+
     from tgshelf.http.api import register_routes
     from tgshelf.http.download import register_download_routes
     from tgshelf.http.ops import register_ops_routes
@@ -191,6 +208,7 @@ async def run_server(config: Config) -> None:
         streamer=runtime["streamer"],
         client_pool=runtime["client_pool"],
         bot_pool=runtime["bot_pool"],
+        notifier=notifier,
         strm=config.strm,
     )
     register_routes(app)  # JSON metadata + tree (B2)
@@ -202,17 +220,7 @@ async def run_server(config: Config) -> None:
     # documents through a user client from the pool. The watcher is best-effort:
     # any failure is logged + pushed to the notify channel, never fatal to serve.
     from tgshelf.bot.watcher import start_watcher
-    from tgshelf.core.notify import Notifier
 
-    user_gateway = (
-        runtime["client_pool"].members[0].client
-        if runtime["client_pool"].members
-        else None
-    )
-    notifier = Notifier(
-        client=getattr(user_gateway, "_client", None),
-        channel=config.telegram.notify.channel,
-    )
     watcher_client = await start_watcher(
         config, session_factory=session_factory, user_gateway=user_gateway, notifier=notifier
     )

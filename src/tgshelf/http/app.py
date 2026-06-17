@@ -76,7 +76,7 @@ def make_auth_middleware(config: HttpConfig):
 def _domain_status(exc: Exception) -> int | None:
     """Map a domain exception to an HTTP status (None = unhandled → 500)."""
     from tgshelf.core.download import RangeNotSatisfiable
-    from tgshelf.core.fs import NotAReadableFile
+    from tgshelf.core.fs import NotAFolder, NotAReadableFile
     from tgshelf.db.repo import DuplicateNameError
     from tgshelf.telegram.errors import ChannelUnavailable, FloodCooldown, PartMissing
 
@@ -84,6 +84,8 @@ def _domain_status(exc: Exception) -> int | None:
         return 409
     if isinstance(exc, NotAReadableFile):
         return 404
+    if isinstance(exc, NotAFolder):
+        return 400
     if isinstance(exc, RangeNotSatisfiable):
         return 416
     # streamer backend conditions (no bot can serve / part gone): not a 500.

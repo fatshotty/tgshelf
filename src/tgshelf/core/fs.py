@@ -14,6 +14,7 @@ import mimetypes
 import re
 from typing import Any, AsyncIterator, Callable, Sequence
 
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 
 from tgshelf.constants import ROOT_ID
@@ -42,6 +43,10 @@ class NotAReadableFile(Exception):
     """The node is missing, a folder, or not ACTIVE."""
 
 
+class NotAFolder(Exception):
+    """The destination of a move/copy exists but is not a folder."""
+
+
 class IntegrityViolation(Exception):
     """A file's expected size (node.size, frozen when the content is defined)
     disagrees with its effective size (inline = len(content); parts =
@@ -61,6 +66,7 @@ class FileSystem:
         min_size: int = 0,
         throttle: Throttle | None = None,
         executor: Any = None,
+        notifier: Any = None,
     ):
         self.repo = repo
         self._master_channel = master_channel
@@ -68,6 +74,9 @@ class FileSystem:
         self._streamer = streamer
         self._gateway = gateway  # user client for management ops (delete/forward)
         self._min_size = min_size
+        # optional Notifier: critical move/copy cleanup failures get pushed to the
+        # alert channel (see channels.delete_originals); None -> log-only.
+        self._notifier = notifier
         # FsExecutor: when set, folder move/copy fan out per-file (each on its own
         # session + leased account). Without it, the fallback runs sequentially on
         # this instance's session/gateway.
@@ -124,20 +133,39 @@ class FileSystem:
         return await self.repo.get(node.id)
 
     async def mkdirs(self, path: str) -> Node:
-        """mkdir -p: create missing folders along `path`, reusing existing ones."""
+        """mkdir -p: create missing folders along `path`, reusing existing ones.
+
+        Idempotent under concurrent creation: if another instance/operation
+        creates the same segment between our read and our write, the create loses
+        with DuplicateNameError — we re-query and reuse the folder it created
+        instead of failing the whole `mkdir -p` (the multi-instance model makes
+        this race real). A name taken by a *file* still surfaces the error."""
         current = ROOT_ID
         for segment in (s for s in path.split("/") if s):
-            existing = await self.repo.children(current, folders_only=True)
-            match = next((n for n in existing if n.name.lower() == segment.lower()), None)
-            if match is None:
-                created = await self.repo.create(
-                    name=segment, parent_id=current, is_folder=True, state="ACTIVE"
-                )
-                await self.repo.session.commit()
-                current = created.id
-            else:
-                current = match.id
+            current = await self._mkdir_or_reuse(current, segment)
         return await self.repo.get(current)
+
+    async def _mkdir_or_reuse(self, parent_id: str, segment: str) -> str:
+        match = await self._find_child_folder(parent_id, segment)
+        if match is not None:
+            return match.id
+        try:
+            created = await self.repo.create(
+                name=segment, parent_id=parent_id, is_folder=True, state="ACTIVE"
+            )
+            await self.repo.session.commit()
+            return created.id
+        except DuplicateNameError:
+            # lost the race (or a same-name node appeared): reuse it if it is a
+            # folder, otherwise the name is genuinely taken -> re-raise.
+            match = await self._find_child_folder(parent_id, segment)
+            if match is None:
+                raise
+            return match.id
+
+    async def _find_child_folder(self, parent_id: str, segment: str) -> Node | None:
+        children = await self.repo.children(parent_id, folders_only=True)
+        return next((n for n in children if n.name.lower() == segment.lower()), None)
 
     async def rename(self, node_id: str, new_name: str) -> Node:
         try:
@@ -186,7 +214,7 @@ class FileSystem:
         # purge: remove the Telegram messages of every file in the subtree first
         parts = await self.repo.parts_in_subtree(node_id)
         if parts and self._gateway is not None:
-            await channels.delete_originals(self._gateway, parts)
+            await channels.delete_originals(self._gateway, parts, notifier=self._notifier)
         await self.repo.purge_subtree(node_id)
         await self.repo.session.commit()
 
@@ -202,6 +230,16 @@ class FileSystem:
 
     # -- move ---------------------------------------------------------------
 
+    async def ensure_move_target(self, new_parent_id: str) -> None:
+        """Validate a move/copy destination before any DB write: it must exist,
+        be ACTIVE and be a folder. Fail-fast with a precise error instead of
+        letting a stale/file target surface as a misleading FK/duplicate error."""
+        parent = await self.repo.get(new_parent_id)
+        if parent is None or parent.state != "ACTIVE":
+            raise NotAReadableFile(f"destination folder {new_parent_id} not found")
+        if not parent.is_folder:
+            raise NotAFolder(f"destination {new_parent_id} is not a folder")
+
     async def move(self, node_id: str, new_parent_id: str) -> Node:
         """Move a node to a new parent. A file (or a folder's descendant files)
         whose effective channel changes has its parts physically forwarded to
@@ -209,6 +247,7 @@ class FileSystem:
         node = await self.repo.get(node_id)
         if node is None:
             raise NotAReadableFile(f"node {node_id} not found")
+        await self.ensure_move_target(new_parent_id)
         name, is_folder = node.name, node.is_folder  # before any rollback expires node
 
         try:
@@ -270,7 +309,8 @@ class FileSystem:
         await self.repo.session.commit()  # commit BEFORE deleting originals (crash-safe)
 
         await channels.delete_originals(
-            self._gateway, [p for p in parts if p.channel_id != dest]
+            self._gateway, [p for p in parts if p.channel_id != dest],
+            notifier=self._notifier,
         )
 
     # -- copy ---------------------------------------------------------------
@@ -281,6 +321,7 @@ class FileSystem:
         node = await self.repo.get(node_id)
         if node is None:
             raise NotAReadableFile(f"node {node_id} not found")
+        await self.ensure_move_target(new_parent_id)
         if node.is_folder:
             return await self._copy_folder(node, new_parent_id)
         # single file: also via the executor (solution B) -> account-leased

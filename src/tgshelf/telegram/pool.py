@@ -15,6 +15,7 @@ Health, all driven by the engines reacting to TgClient errors:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any, Callable, Iterable, Sequence
@@ -106,7 +107,7 @@ class Pool:
         *,
         channel_id: int | None = None,
         exclude: Sequence[PoolMember] = (),
-        sleep=time.sleep,
+        sleep=asyncio.sleep,  # awaited below: must be an async sleep, not time.sleep
     ) -> PoolMember | None:
         """Lease the least-loaded eligible member; if all eligible ones are on
         cooldown, wait for the earliest to free and retry. Returns None when no

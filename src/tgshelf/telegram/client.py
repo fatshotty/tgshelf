@@ -168,9 +168,11 @@ class TgClient:
             ret = time.monotonic() - t_ret
             self._log_slow_fetch(ref.dc_id, "borrowed", borrow=borrow, send=send, ret=ret)
 
-    def _log_slow_fetch(self, dc_id, path, *, borrow, send, ret, threshold=0.5) -> None:
-        """Break down a chunk fetch into borrow/send/return when it was slow, to
-        pinpoint which step stalls (the event loop is NOT blocked — see [looplag])."""
+    def _log_slow_fetch(self, dc_id, path, *, borrow, send, ret, threshold=2.0) -> None:
+        """Break down a chunk fetch into borrow/send/return when it is REALLY slow
+        (> threshold s), to pinpoint which step stalls (the event loop is NOT
+        blocked — see [looplag]). Telegram's ~1s natural FloodWaits are below it,
+        so they don't fill the log."""
         total = borrow + send + ret
         if total > threshold:
             log.warning(

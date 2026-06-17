@@ -107,11 +107,32 @@ def _metrics_text(rt: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _metrics_json(rt: dict) -> dict:
+    """Same data as the Prometheus exposition, structured for the WebUI: pool
+    health (full members, like /status) + streamer counters/gauges."""
+    s = rt.get("streamer")
+    return {
+        "pools": {
+            "clients": _pool_status(rt.get("client_pool")),
+            "bots": _pool_status(rt.get("bot_pool")),
+        },
+        "stream": s.metrics() if s is not None else {},
+    }
+
+
 async def metrics(request: web.Request) -> web.Response:
+    """JSON by default (the WebUI just does GET /metrics)."""
+    return web.json_response(_metrics_json(request.app[RUNTIME]))
+
+
+async def metrics_text(request: web.Request) -> web.Response:
+    """`GET /metrics.txt` — Prometheus text exposition (for scrapers). The `.txt`
+    URL suffix is our text opt-in; everything else stays JSON."""
     body = _metrics_text(request.app[RUNTIME]).encode("utf-8")
     return web.Response(body=body, headers={"Content-Type": _PROM_CONTENT_TYPE})
 
 
 def register_ops_routes(app: web.Application) -> None:
     app.router.add_get("/status", status)
-    app.router.add_get("/metrics", metrics)
+    app.router.add_get("/metrics", metrics)            # JSON
+    app.router.add_get("/metrics.txt", metrics_text)   # Prometheus text

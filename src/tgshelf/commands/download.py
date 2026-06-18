@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shutil
 import sys
-import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -25,8 +23,9 @@ from tgshelf.db.repo import NodeRepo
 from tgshelf.log import new_request_id
 from tgshelf.looplag import start_loop_lag_monitor, stop_loop_lag_monitor
 from tgshelf.progress import (
-    ProgressState, build_block, format_recap, error_header, error_line, error_footer,
+    ProgressState, format_recap, error_header, error_line, error_footer,
 )
+from tgshelf.render import run_render_loop
 
 log = logging.getLogger("tgshelf.download")
 
@@ -150,45 +149,6 @@ async def download_tree(
     return result
 
 
-async def _render_loop(state: ProgressState, header: str, stop: asyncio.Event,
-                       *, interval: float = 0.2) -> None:
-    """Repaint the live block in place (TTY) until `stop`. Non-TTY: a periodic
-    plain status line. Never raises."""
-    tty = sys.stdout.isatty()
-    prev_lines = 0
-    last_plain = 0.0
-    try:
-        while not stop.is_set():
-            snap = state.snapshot()
-            if tty:
-                # Truncate every line to the terminal width: a wrapped line would
-                # occupy >1 physical row, desyncing the cursor-up count below and
-                # making the block "stair-step" / duplicate the header.
-                width = max(1, shutil.get_terminal_size((80, 24)).columns)
-                lines = [ln[:width] for ln in build_block(snap, header=header)]
-                out = ""
-                if prev_lines:
-                    out += f"\033[{prev_lines}F"      # cursor up to block start
-                out += "\033[J"                       # clear from cursor to end of screen
-                for ln in lines:
-                    out += ln + "\n"
-                sys.stdout.write(out)
-                sys.stdout.flush()
-                prev_lines = len(lines)
-            else:
-                now = time.monotonic()
-                if now - last_plain >= 3.0:
-                    last_plain = now
-                    log.info("[download] %s | ok %d skip %d err %d remaining %d",
-                             build_block(snap, header="")[2], snap.ok, snap.skipped,
-                             snap.failed, snap.remaining)
-            await asyncio.sleep(interval)
-    except asyncio.CancelledError:
-        raise
-    except Exception:  # noqa: BLE001 - rendering must never crash the download
-        log.debug("[download] renderer error", exc_info=True)
-
-
 def _ts() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -246,7 +206,8 @@ async def run(config: Config, args) -> int:
         state = ProgressState(len(files), sum(f.size for f in files))
 
         stop = asyncio.Event()
-        renderer = None if debug else asyncio.create_task(_render_loop(state, header, stop))
+        renderer = None if debug else asyncio.create_task(
+            run_render_loop(state, header=header, stop=stop, log=log, marker="download"))
         # at debug, watch for event-loop stalls that would freeze every fetch at once
         lag_task = start_loop_lag_monitor() if debug else None
         try:

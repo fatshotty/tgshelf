@@ -412,9 +412,14 @@ class FileSystem:
         source_factory: Callable[[], AsyncIterator[bytes]],
         *,
         mime: str | None = None,
+        overwrite: bool = False,
     ) -> Node:
         """Upload a file under `parent_id`, converging the three upload paths
         (CLI sync / mount PUT / webui) into one place.
+
+        With `overwrite=True`, a colliding ACTIVE sibling is soft-deleted and the
+        new node activated in one commit AT FINALIZE (safe swap): a failed upload
+        leaves the old file untouched. Default False — other callers are unaffected.
 
         A TEMP node is created first (invisible to readers); the Uploader streams
         to the parent's effective channel persisting each portion's parts row as
@@ -457,6 +462,15 @@ class FileSystem:
             await self.repo.session.commit()
             raise
 
+        # Safe swap: only now that the upload succeeded do we remove a colliding
+        # ACTIVE sibling, so a failed upload (handled above) never loses the old
+        # file. Soft-delete + activate happen in one commit; the old node is
+        # DELETED before the new becomes ACTIVE, so the partial unique index
+        # (uq_nodes_parent_lower_name_active) is always satisfied.
+        if overwrite:
+            old = await self.repo.get_child_by_name(parent_id, name, state="ACTIVE")
+            if old is not None and old.id != node.id:
+                await self.repo.set_state_subtree(old.id, "DELETED", from_states=("ACTIVE", "TEMP"))
         if result.inline_content is not None:
             await self.repo.set_fields(
                 node.id, content=result.inline_content, size=result.size, state="ACTIVE"

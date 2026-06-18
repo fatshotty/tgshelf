@@ -49,14 +49,22 @@ log = logging.getLogger("raw.bench")
 
 
 async def _dedicated_media_sender(client: TelegramClient, dc_id: int) -> MTProtoSender:
-    """A fresh MTProtoSender to `dc_id`, reusing the client's existing auth_key
-    (valid because it's the HOME DC) — no ExportAuthorization. Mirrors Telethon's
-    _create_exported_sender minus the auth export/import, then inits the new
-    connection (InvokeWithLayer + initConnection) so Telegram accepts requests."""
-    dc = await client._get_dc(dc_id)
+    """A fresh MTProtoSender to the dc's MEDIA endpoint (media_only=True), reusing
+    the client's existing auth_key (valid because it's the HOME DC) — no
+    ExportAuthorization. This is what Pyrogram's is_media session does and what
+    Telethon does NOT: Telethon's _get_dc always returns the regular endpoint,
+    which Telegram throttles for sustained GetFile. We init the fresh connection
+    (InvokeWithLayer + initConnection) so Telegram accepts requests."""
+    cfg = await client(functions.help.GetConfigRequest())
+    opts = [o for o in cfg.dc_options
+            if o.id == dc_id and not o.cdn and bool(o.ipv6) == client._use_ipv6]
+    media = next((o for o in opts if o.media_only), None)
+    chosen = media or (opts[0] if opts else await client._get_dc(dc_id))
+    log.info("[raw] dc %d endpoint: ip=%s port=%s media_only=%s",
+             dc_id, chosen.ip_address, chosen.port, getattr(chosen, "media_only", None))
     sender = MTProtoSender(client.session.auth_key, loggers=client._log)
     await sender.connect(client._connection(
-        dc.ip_address, dc.port, dc.id,
+        chosen.ip_address, chosen.port, dc_id,
         loggers=client._log, proxy=client._proxy, local_addr=client._local_addr,
     ))
     sender.dc_id = dc_id
@@ -64,7 +72,6 @@ async def _dedicated_media_sender(client: TelegramClient, dc_id: int) -> MTProto
     init = copy.copy(client._init_request)
     init.query = functions.help.GetConfigRequest()
     await sender.send(functions.InvokeWithLayerRequest(LAYER, init))
-    log.info("[raw] dedicated media sender connected to dc %d", dc_id)
     return sender
 
 

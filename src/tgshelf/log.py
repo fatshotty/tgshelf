@@ -55,14 +55,26 @@ class _RequestIdFilter(logging.Filter):
 
 
 class _DropConnectionErrors(logging.Filter):
-    """Drop records whose exception is a client-disconnect (ConnectionError /
-    reset / cancellation). aiohttp's server logger reports these as "Error
-    handling request" with a stacktrace when a streaming client goes away mid
-    response — noise, not a server fault. Real errors keep their stacktrace."""
+    """Drop records whose exception is a client-side condition, not a server
+    fault. aiohttp's server logger reports these as "Error handling request"
+    with a stacktrace:
+
+      - ConnectionError / reset / cancellation: a streaming client went away
+        mid response (very common for interrupted range requests).
+      - HttpProcessingError (e.g. BadHttpMessage "Pause on PRI/Upgrade"): the
+        parser got malformed / non-HTTP1.1 bytes — raised below our middleware,
+        typically a keep-alive connection torn down abruptly when a download is
+        interrupted, or an HTTP/2/upgrade probe. The client is already gone.
+
+    Real handler errors keep their stacktrace."""
 
     def filter(self, record: logging.LogRecord) -> bool:
+        from aiohttp.http_exceptions import HttpProcessingError
+
         exc = record.exc_info[1] if record.exc_info else None
-        return not isinstance(exc, (ConnectionError, asyncio.CancelledError))
+        return not isinstance(
+            exc, (ConnectionError, asyncio.CancelledError, HttpProcessingError)
+        )
 
 
 def setup_logging(level_name: str) -> None:

@@ -32,10 +32,21 @@ import asyncio
 import logging
 import time
 
-from pyrogram import Client, raw
+from pyrogram import Client, raw, utils
 from pyrogram.errors import AuthBytesInvalid, FloodWait
 from pyrogram.file_id import FileId
 from pyrogram.session import Auth, Session
+
+def get_peer_type_new(peer_id: int) -> str:
+    peer_id_str = str(peer_id)
+    if not peer_id_str.startswith("-"):
+        return "user"
+    elif peer_id_str.startswith("-100"):
+        return "channel"
+    else:
+        return "chat"
+
+utils.get_peer_type = get_peer_type_new
 
 UPLOAD_CHUNK = 512 * 1024
 CHUNK = UPLOAD_CHUNK * 2  # 1 MiB — identical to legacy

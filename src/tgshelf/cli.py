@@ -67,6 +67,8 @@ def build_parser() -> argparse.ArgumentParser:
                              help="delete each uploaded file from disk (+ prune emptied dirs, not the root)")
             cmd.add_argument("--overwrite", action="store_true",
                              help="re-upload and replace an existing drive file (default: skip)")
+            cmd.add_argument("--log-file", dest="log_file",
+                             help="write a full run log (all [sync] events + recap) to this file")
         elif name == "download":
             cmd.add_argument("path", help="drive path of a file or folder to download")
             cmd.add_argument("--dest", help="local destination dir (default: cwd)")

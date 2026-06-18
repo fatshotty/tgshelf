@@ -43,6 +43,7 @@ class Stats:
     uploaded: int = 0
     skipped: int = 0
     mismatched: int = 0
+    overwritten: int = 0
     deleted: int = 0
     failed: int = 0
 
@@ -50,7 +51,7 @@ class Stats:
         return (
             f"{self.uploaded} uploaded, {self.skipped} skipped, "
             f"{self.mismatched} size-mismatch (skipped), "
-            f"{self.deleted} deleted, {self.failed} failed"
+            f"{self.overwritten} overwritten, {self.deleted} deleted, {self.failed} failed"
         )
 
 
@@ -109,7 +110,7 @@ def _fs(session, *, master_channel, min_size, uploader, streamer) -> FileSystem:
 
 async def sync(session_factory, uploader, *, master_channel: int, min_size: int,
                local_dir, dest: str = "/", concurrent: int = 1, streamer=None,
-               delete_source: bool = False) -> Stats:
+               delete_source: bool = False, overwrite: bool = False) -> Stats:
     root_dir = Path(local_dir)
     files = scan_local(local_dir)
     stats = Stats()
@@ -142,7 +143,7 @@ async def sync(session_factory, uploader, *, master_channel: int, min_size: int,
                 async with session_factory() as session:
                     fs = make_fs(session)
                     existing = await fs.repo.get_child_by_name(parent_id, lf.name, state="ACTIVE")
-                    if existing is not None:
+                    if existing is not None and not overwrite:
                         if existing.size == lf.size:
                             stats.skipped += 1
                         else:
@@ -152,9 +153,14 @@ async def sync(session_factory, uploader, *, master_channel: int, min_size: int,
                             )
                             stats.mismatched += 1
                         return
-                    node = await fs.write(parent_id, lf.name, file_source(lf.path))
-                stats.uploaded += 1
-                log.info("[sync] uploaded %s", lf.name)
+                    replaced = existing is not None and overwrite
+                    node = await fs.write(parent_id, lf.name, file_source(lf.path), overwrite=overwrite)
+                if replaced:
+                    stats.overwritten += 1
+                    log.info("[sync] overwritten %s", lf.name)
+                else:
+                    stats.uploaded += 1
+                    log.info("[sync] uploaded %s", lf.name)
                 if delete_source:
                     if node.size != lf.size:
                         log.warning(
@@ -201,6 +207,7 @@ async def run(config: Config, args) -> int:
             dest=getattr(args, "dest", None) or "/",
             concurrent=getattr(args, "concurrent", None) or config.operations.concurrent,
             delete_source=getattr(args, "delete_source", False),
+            overwrite=getattr(args, "overwrite", False),
         )
     finally:
         await engine.dispose()

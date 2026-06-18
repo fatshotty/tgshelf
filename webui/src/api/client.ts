@@ -44,7 +44,8 @@ const id = (s: string) => encodeURIComponent(s)
 export const api = {
   // -- read / navigate
   getNode: (nodeId: string) => request<FsNode>('GET', `/api/v1/nodes/${id(nodeId)}`),
-  listChildren: (nodeId: string) => request<FsNode[]>('GET', `/api/v1/nodes/${id(nodeId)}/children`),
+  listChildren: (nodeId: string, state?: 'ACTIVE' | 'DELETED' | 'TEMP') =>
+    request<FsNode[]>('GET', `/api/v1/nodes/${id(nodeId)}/children`, { query: { state } }),
   resolve: (path: string) => request<FsNode>('GET', '/api/v1/resolve', { query: { path } }),
   search: (q: string, root?: string) => request<FsNode[]>('GET', '/api/v1/search', { query: { q, root } }),
 

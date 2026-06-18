@@ -90,6 +90,9 @@ def _truthy(value: str) -> bool:
     return value.lower() in ("1", "true", "yes")
 
 
+_LIST_STATES = ("ACTIVE", "DELETED", "TEMP")
+
+
 async def get_node(request: web.Request) -> web.Response:
     async with open_fs(request) as fs:
         node = await fs.get(request.match_info["id"])
@@ -99,8 +102,11 @@ async def get_node(request: web.Request) -> web.Response:
 
 
 async def list_children(request: web.Request) -> web.Response:
+    state = request.query.get("state", "ACTIVE")
+    if state not in _LIST_STATES:
+        return _bad_request(f"state must be one of {', '.join(_LIST_STATES)}")
     async with open_fs(request) as fs:
-        nodes = await fs.list_children(request.match_info["id"])
+        nodes = await fs.list_children(request.match_info["id"], state=state)
         return web.json_response([node_to_dict(n) for n in nodes])
 
 

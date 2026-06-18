@@ -43,13 +43,32 @@ class Stats:
     uploaded: int = 0
     skipped: int = 0
     mismatched: int = 0
+    deleted: int = 0
     failed: int = 0
 
     def __str__(self) -> str:
         return (
             f"{self.uploaded} uploaded, {self.skipped} skipped, "
-            f"{self.mismatched} size-mismatch (skipped), {self.failed} failed"
+            f"{self.mismatched} size-mismatch (skipped), "
+            f"{self.deleted} deleted, {self.failed} failed"
         )
+
+
+def prune_empty_dirs(start_dir: Path, stop_root: Path) -> int:
+    """Remove empty directories from `start_dir` upward, stopping BEFORE
+    `stop_root` (the scan root is never removed). Best-effort: a non-empty dir
+    (OSError) or one already removed by another worker (FileNotFoundError) ends
+    the walk. Returns how many dirs were removed."""
+    removed = 0
+    current = start_dir
+    while current != stop_root and stop_root in current.parents:
+        try:
+            current.rmdir()  # raises OSError if not empty
+        except (FileNotFoundError, OSError):
+            break
+        removed += 1
+        current = current.parent
+    return removed
 
 
 def scan_local(local_dir) -> list[LocalFile]:
@@ -89,7 +108,9 @@ def _fs(session, *, master_channel, min_size, uploader, streamer) -> FileSystem:
 
 
 async def sync(session_factory, uploader, *, master_channel: int, min_size: int,
-               local_dir, dest: str = "/", concurrent: int = 1, streamer=None) -> Stats:
+               local_dir, dest: str = "/", concurrent: int = 1, streamer=None,
+               delete_source: bool = False) -> Stats:
+    root_dir = Path(local_dir)
     files = scan_local(local_dir)
     stats = Stats()
 
@@ -131,9 +152,23 @@ async def sync(session_factory, uploader, *, master_channel: int, min_size: int,
                             )
                             stats.mismatched += 1
                         return
-                    await fs.write(parent_id, lf.name, file_source(lf.path))
+                    node = await fs.write(parent_id, lf.name, file_source(lf.path))
                 stats.uploaded += 1
                 log.info("[sync] uploaded %s", lf.name)
+                if delete_source:
+                    if node.size != lf.size:
+                        log.warning(
+                            "[sync] not deleting source %s: size %d != node %d",
+                            lf.path, lf.size, node.size,
+                        )
+                    else:
+                        try:
+                            lf.path.unlink()
+                            stats.deleted += 1
+                            prune_empty_dirs(lf.path.parent, root_dir)
+                            log.info("[sync] deleted source %s", lf.path)
+                        except OSError:
+                            log.warning("[sync] could not delete source %s", lf.path)
             except Exception:  # noqa: BLE001 - one bad file never aborts the run
                 stats.failed += 1
                 log.exception("[sync] FAILED %s", lf.name)
@@ -165,6 +200,7 @@ async def run(config: Config, args) -> int:
             local_dir=local_dir,
             dest=getattr(args, "dest", None) or "/",
             concurrent=getattr(args, "concurrent", None) or config.operations.concurrent,
+            delete_source=getattr(args, "delete_source", False),
         )
     finally:
         await engine.dispose()

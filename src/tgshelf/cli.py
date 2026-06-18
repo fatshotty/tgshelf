@@ -63,6 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
             cmd.add_argument("local_dir", help="local directory to upload")
             cmd.add_argument("--dest", help="drive destination folder (default: /)")
             cmd.add_argument("--concurrent", type=int, help="parallel uploads (default: config operations.concurrent)")
+            cmd.add_argument("--delete-source", action="store_true", dest="delete_source",
+                             help="delete each uploaded file from disk (+ prune emptied dirs, not the root)")
         elif name == "download":
             cmd.add_argument("path", help="drive path of a file or folder to download")
             cmd.add_argument("--dest", help="local destination dir (default: cwd)")

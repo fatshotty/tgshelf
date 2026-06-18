@@ -272,6 +272,9 @@ async def run_server(config: Config) -> None:
         if watcher_client is not None:
             await watcher_client.disconnect()
         for _account, client in clients:
+            aclose = getattr(client, "aclose", None)
+            if aclose is not None:
+                await aclose()  # disconnect the per-DC media senders first
             disconnect = getattr(getattr(client, "_client", None), "disconnect", None)
             if disconnect is not None:
                 await disconnect()

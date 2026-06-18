@@ -11,6 +11,7 @@ touch telethon — they are exercised by manual smoke tests (real Telegram).
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import math
 import time
@@ -19,6 +20,9 @@ from typing import Any, Awaitable, Callable
 log = logging.getLogger("tgshelf.client")
 
 from telethon import errors as tg_errors
+from telethon import functions
+from telethon.network import MTProtoSender
+from telethon.tl.alltlobjects import LAYER
 from telethon.tl.functions.messages import SendMediaRequest
 from telethon.tl.functions.upload import GetFileRequest, SaveBigFilePartRequest
 from telethon.tl.types import (
@@ -63,6 +67,13 @@ class TgClient:
         self._max_flood_retries = max_flood_retries
         self._sleep = sleep
         self._rate_limiter = rate_limiter
+        # per-DC media senders, connected to each DC's media_only endpoint and
+        # reused for every chunk/stream (the legacy get_media_session, Telethon
+        # edition). Downloading on the regular endpoint / main connection makes
+        # Telegram throttle sustained GetFile with ~1-2s FloodWaits; the media
+        # endpoint does not. Built lazily, disconnected by aclose().
+        self._media_senders: dict[int, Any] = {}
+        self._media_lock = asyncio.Lock()
 
     # -- middleware --------------------------------------------------------
 
@@ -143,30 +154,85 @@ class TgClient:
         request = GetFileRequest(
             location=ref.location, offset=offset, limit=limit, precise=False
         )
-        # same DC as the client -> use the main connection directly. Exporting an
-        # authorization for the home DC raises DcIdInvalidError (legacy did the
-        # same check). Only foreign-DC files need a borrowed media sender.
-        home_dc = getattr(self._client.session, "dc_id", None)
-        if ref.dc_id is None or ref.dc_id == home_dc:
-            t_send = time.monotonic()
-            result = await self._with_middleware(lambda: self._client(request))
-            self._log_slow_fetch(ref.dc_id, "home", borrow=0.0, send=time.monotonic() - t_send, ret=0.0)
-            return result.bytes
-
-        t_borrow = time.monotonic()
-        sender = await self._client._borrow_exported_sender(ref.dc_id)
-        borrow = time.monotonic() - t_borrow
-        send = ret = 0.0
+        # Always read on the DC's MEDIA endpoint, never the regular endpoint /
+        # main connection: Telegram throttles sustained GetFile on the regular
+        # endpoint with ~1-2s FloodWaits (the legacy used a dedicated is_media
+        # session for exactly this reason). One cached media sender per DC is
+        # reused for every chunk of every stream.
+        dc_id = ref.dc_id if ref.dc_id is not None else getattr(self._client.session, "dc_id", None)
+        sender = await self._media_sender(dc_id)
+        t_send = time.monotonic()
         try:
-            t_send = time.monotonic()
             result = await self._with_middleware(lambda: sender.send(request))
-            send = time.monotonic() - t_send
-            return result.bytes
-        finally:
-            t_ret = time.monotonic()
-            await self._client._return_exported_sender(sender)
-            ret = time.monotonic() - t_ret
-            self._log_slow_fetch(ref.dc_id, "borrowed", borrow=borrow, send=send, ret=ret)
+        except ConnectionError:
+            # the media connection dropped: discard it so the next call rebuilds,
+            # and let the streamer retry this chunk (per-bot failover loop).
+            self._media_senders.pop(dc_id, None)
+            raise
+        self._log_slow_fetch(dc_id, "media", borrow=0.0, send=time.monotonic() - t_send, ret=0.0)
+        return result.bytes
+
+    async def _media_sender(self, dc_id: int) -> MTProtoSender:
+        sender = self._media_senders.get(dc_id)
+        if sender is not None:
+            return sender
+        async with self._media_lock:
+            sender = self._media_senders.get(dc_id)
+            if sender is None:
+                sender = await self._build_media_sender(dc_id)
+                self._media_senders[dc_id] = sender
+            return sender
+
+    async def _build_media_sender(self, dc_id: int) -> MTProtoSender:
+        """A dedicated MTProtoSender to `dc_id`'s media_only endpoint, reused for
+        all downloads on that DC. Mirrors the legacy get_media_session: the home
+        DC reuses the existing auth_key (no ExportAuthorization, which Telegram
+        refuses for the home DC); a foreign DC handshakes a fresh key and imports
+        an exported authorization, exactly like Telethon's _create_exported_sender
+        — but pointed at the media endpoint instead of the regular one."""
+        client = self._client
+        cfg = await self._with_middleware(lambda: client(functions.help.GetConfigRequest()))
+        opts = [
+            o for o in cfg.dc_options
+            if o.id == dc_id and not o.cdn and bool(o.ipv6) == client._use_ipv6
+        ]
+        chosen = next((o for o in opts if o.media_only), None) or (opts[0] if opts else None)
+        if chosen is None:
+            raise ConnectionError(f"no dc_option for dc {dc_id}")
+
+        home_dc = getattr(client.session, "dc_id", None)
+        auth_key = client.session.auth_key if dc_id == home_dc else None
+        sender = MTProtoSender(auth_key, loggers=client._log)
+        await sender.connect(client._connection(
+            chosen.ip_address, chosen.port, dc_id,
+            loggers=client._log, proxy=client._proxy, local_addr=client._local_addr,
+        ))
+        sender.dc_id = dc_id
+        # a freshly connected sender must carry initConnection on its first call
+        init = copy.copy(client._init_request)
+        if dc_id == home_dc:
+            init.query = functions.help.GetConfigRequest()
+        else:
+            auth = await self._with_middleware(
+                lambda: client(functions.auth.ExportAuthorizationRequest(dc_id))
+            )
+            init.query = functions.auth.ImportAuthorizationRequest(id=auth.id, bytes=auth.bytes)
+        await sender.send(functions.InvokeWithLayerRequest(LAYER, init))
+        log.info(
+            "[media] '%s' media sender for dc %d -> %s (media_only=%s)",
+            self.name, dc_id, chosen.ip_address, getattr(chosen, "media_only", None),
+        )
+        return sender
+
+    async def aclose(self) -> None:
+        """Disconnect the cached per-DC media senders. Call before disconnecting
+        the main client on shutdown. Safe to call more than once."""
+        senders, self._media_senders = self._media_senders, {}
+        for dc_id, sender in senders.items():
+            try:
+                await sender.disconnect()
+            except Exception:  # noqa: BLE001 - best effort on shutdown
+                log.debug("[media] '%s' error disconnecting dc %d sender", self.name, dc_id)
 
     def _log_slow_fetch(self, dc_id, path, *, borrow, send, ret, threshold=2.0) -> None:
         """Break down a chunk fetch into borrow/send/return when it is REALLY slow

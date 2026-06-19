@@ -20,7 +20,7 @@ from tgshelf.constants import PART_SIZE
 
 LOG_LEVELS = ("no", "error", "warn", "info", "debug")
 SESSION_STORAGES = ("db", "file")
-STRM_PLACEHOLDERS = ("file_id", "filename", "channel_id", "parts", "size", "mime")
+STRM_PLACEHOLDERS = ("file_id", "filename", "channel_id", "parts", "parts_dash", "size", "mime")
 
 
 class ConfigError(Exception):

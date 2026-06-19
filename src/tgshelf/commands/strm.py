@@ -7,7 +7,8 @@ writes the raw bytes under the original name (subtitles, .nfo, …). DB-only —
 Telegram. Placeholders (closed set, validated at config-load):
 
   {file_id}=node.id  {filename}=node.name  {channel_id}=node.channel_id
-  {parts}=part message_ids by idx, comma-joined  {size}=node.size  {mime}=node.mime
+  {parts}=part message_ids by idx, comma-joined  {parts_dash}=same, dash-joined
+  (URL-safe — no comma, which ffmpeg/Emby reject)  {size}=node.size  {mime}=node.mime
 """
 
 from __future__ import annotations
@@ -45,12 +46,16 @@ def _blank(value) -> str:
 
 
 def resolve_template(template: str, node, part_message_ids) -> str:
+    part_ids = [str(m) for m in part_message_ids]
     return template.format_map(
         {
             "file_id": node.id,
             "filename": node.name,
             "channel_id": _blank(node.channel_id),
-            "parts": ",".join(str(m) for m in part_message_ids),
+            "parts": ",".join(part_ids),
+            # URL-safe variant: message_ids are integers, so a dash join yields a
+            # path segment of only [0-9-] — no comma (which ffmpeg/Emby choke on).
+            "parts_dash": "-".join(part_ids),
             "size": node.size,
             "mime": _blank(node.mime),
         }

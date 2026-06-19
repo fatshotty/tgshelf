@@ -82,8 +82,11 @@ strm:
   # query string — is free and ignored by the server (decoration for clients/
   # players). Every placeholder you use is resolved from the node by the strm
   # generator: {file_id}=id, {filename}=name, {channel_id}=channel, {parts}=part
-  # message_ids (by idx, comma-separated), {size}=bytes, {mime}=mime.
-  # e.g. "http://127.0.0.1:3000/download/{file_id}/{filename}?{channel_id}|{parts}"
+  # message_ids (by idx, comma-separated), {parts_dash}=same but dash-separated,
+  # {size}=bytes, {mime}=mime.
+  # NOTE: prefer {parts_dash} over {parts} in the PATH — Emby/ffmpeg reject a raw
+  # comma (and a raw "|"); a dash join keeps the segment URL-safe ([0-9-] only).
+  # e.g. "http://127.0.0.1:3000/download/{file_id}/{channel_id}/{parts_dash}"
   template: "http://127.0.0.1:3000/download/{file_id}/{filename}"
   clear_folder: false
 

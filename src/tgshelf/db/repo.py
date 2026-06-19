@@ -214,20 +214,28 @@ class NodeRepo:
             stmt = stmt.where(Node.state == state)
         return (await self.session.execute(stmt.limit(1))).scalars().first()
 
-    async def parts_in_subtree(self, root_id: str) -> Sequence[Part]:
-        """All parts of every file in the subtree (for purge → Telegram delete)."""
+    async def parts_in_subtree(
+        self, root_id: str, *, state: str | None = None
+    ) -> Sequence[Part]:
+        """All parts of every file in the subtree (for purge → Telegram delete).
+
+        `state` restricts to the parts of files in that node state (e.g.
+        "DELETED" to collect only a backup's discards); None = all files."""
+        node_filter = "" if state is None else " AND nodes.state = :state"
         result = await self.session.execute(
             text(
-                """
+                f"""
                 WITH RECURSIVE sub AS (
                   SELECT id FROM nodes WHERE id = :root
                   UNION ALL
                   SELECT n.id FROM nodes n JOIN sub ON n.parent_id = sub.id
                 )
-                SELECT * FROM parts WHERE file_id IN (SELECT id FROM sub)
+                SELECT parts.* FROM parts
+                JOIN nodes ON nodes.id = parts.file_id
+                WHERE parts.file_id IN (SELECT id FROM sub){node_filter}
                 """
             ).columns(*Part.__table__.columns),
-            {"root": root_id},
+            {"root": root_id, "state": state},
         )
         return [Part(**row._mapping) for row in result]
 
@@ -251,19 +259,23 @@ class NodeRepo:
             {"root": root_id, "state": new_state, "from_states": list(from_states)},
         )
 
-    async def purge_subtree(self, root_id: str) -> None:
+    async def purge_subtree(self, root_id: str, *, state: str | None = None) -> None:
+        """Hard-delete the subtree's nodes (parts cascade). `state` restricts the
+        DELETE to nodes in that state (e.g. "DELETED" leaves the ACTIVE tree, and
+        the root, intact); None = the whole subtree including the root."""
+        state_filter = "" if state is None else " AND state = :state"
         await self.session.execute(
             text(
-                """
+                f"""
                 WITH RECURSIVE sub AS (
                   SELECT id FROM nodes WHERE id = :root
                   UNION ALL
                   SELECT n.id FROM nodes n JOIN sub ON n.parent_id = sub.id
                 )
-                DELETE FROM nodes WHERE id IN (SELECT id FROM sub)
+                DELETE FROM nodes WHERE id IN (SELECT id FROM sub){state_filter}
                 """
             ),
-            {"root": root_id},
+            {"root": root_id, "state": state},
         )
 
     # -- hierarchy reads ----------------------------------------------------

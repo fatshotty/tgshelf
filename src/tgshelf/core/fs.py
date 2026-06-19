@@ -206,16 +206,22 @@ class FileSystem:
         await self.repo.session.commit()
         return await self.repo.get(node_id)
 
-    async def delete(self, node_id: str, *, purge: bool = False) -> None:
+    async def delete(
+        self, node_id: str, *, purge: bool = False, deleted_only: bool = False
+    ) -> None:
         if not purge:
             await self.repo.set_state_subtree(node_id, "DELETED", from_states=("ACTIVE", "TEMP"))
             await self.repo.session.commit()
             return
-        # purge: remove the Telegram messages of every file in the subtree first
-        parts = await self.repo.parts_in_subtree(node_id)
+        # purge: remove the Telegram messages of every file in the subtree first.
+        # deleted_only restricts both the Telegram deletion and the row removal to
+        # the subtree's DELETED nodes — the ACTIVE tree (and the root) survive. It
+        # is the manual cleanup of a backup's discards after a mirror run.
+        state = "DELETED" if deleted_only else None
+        parts = await self.repo.parts_in_subtree(node_id, state=state)
         if parts and self._gateway is not None:
             await channels.delete_originals(self._gateway, parts, notifier=self._notifier)
-        await self.repo.purge_subtree(node_id)
+        await self.repo.purge_subtree(node_id, state=state)
         await self.repo.session.commit()
 
     async def restore(self, node_id: str) -> None:

@@ -2,8 +2,11 @@
 // text/number field); it keeps the modal open and shows the error inline when the
 // submit promise rejects (e.g. 409 duplicate name). ConfirmDialog drives delete
 // (soft) and purge (danger: a checkbox must be ticked to enable the button).
+import { useQuery } from '@tanstack/react-query'
 import { type FormEvent, useState } from 'react'
 
+import { api } from '../api/client'
+import { humanBytes } from '../lib/format'
 import { Modal } from './Modal'
 
 export function PromptDialog({
@@ -54,6 +57,31 @@ export function PromptDialog({
           </button>
         </div>
       </form>
+    </Modal>
+  )
+}
+
+// Read-only: shows a node's total size. For a folder it's the recursive sum of
+// all ACTIVE files in its subtree (server-computed via /nodes/{id}/size).
+export function SizeDialog({ nodeId, name, onClose }: { nodeId: string; name: string; onClose: () => void }) {
+  const sizeQ = useQuery({ queryKey: ['nodeSize', nodeId], queryFn: () => api.nodeSize(nodeId) })
+
+  return (
+    <Modal title={`Disk usage — ${name}`} onClose={onClose}>
+      <div className="dialog">
+        {sizeQ.isLoading && <p>Computing…</p>}
+        {sizeQ.error && <div className="error">{String(sizeQ.error)}</div>}
+        {sizeQ.data && (
+          <p>
+            <strong>{humanBytes(sizeQ.data.size)}</strong> ({sizeQ.data.size.toLocaleString()} bytes)
+          </p>
+        )}
+        <div className="dialog-actions">
+          <button type="button" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
     </Modal>
   )
 }

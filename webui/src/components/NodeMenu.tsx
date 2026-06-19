@@ -6,7 +6,15 @@ import { useEffect, useRef, useState } from 'react'
 
 import type { FsNode } from '../api/types'
 
-export type NodeAction = 'rename' | 'setChannel' | 'move' | 'copy' | 'delete' | 'restore' | 'purge'
+export type NodeAction =
+  | 'size'
+  | 'rename'
+  | 'setChannel'
+  | 'move'
+  | 'copy'
+  | 'delete'
+  | 'restore'
+  | 'purge'
 
 interface Item {
   a: NodeAction
@@ -34,6 +42,7 @@ export function NodeMenu({ node, onAction }: { node: FsNode; onAction: (a: NodeA
           { a: 'purge', label: 'Purge', danger: true },
         ]
       : [
+          ...(node.is_folder ? [{ a: 'size' as NodeAction, label: 'Disk usage' }] : []),
           { a: 'rename', label: 'Rename' },
           ...(node.is_folder ? [{ a: 'setChannel' as NodeAction, label: 'Set channel' }] : []),
           { a: 'move', label: 'Move…' },

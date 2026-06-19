@@ -13,6 +13,13 @@ export interface FsNode {
   info: Record<string, unknown>
 }
 
+// GET /api/v1/nodes/{id}/size — a file's own size, or a folder's recursive total
+export interface NodeSize {
+  id: string
+  is_folder: boolean
+  size: number
+}
+
 // GET /api/v1/nodes/{id}/parts
 export interface FilePart {
   idx: number

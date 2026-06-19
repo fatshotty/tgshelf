@@ -4,7 +4,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 
 import { api, ApiError } from '../api/client'
 import type { FsNode } from '../api/types'
-import { ConfirmDialog, PromptDialog } from '../components/dialogs'
+import { ConfirmDialog, PromptDialog, SizeDialog } from '../components/dialogs'
 import { FolderPicker } from '../components/FolderPicker'
 import { NodeList } from '../components/NodeList'
 import type { NodeAction } from '../components/NodeMenu'
@@ -21,6 +21,7 @@ type Dialog =
   | { kind: 'purge'; node: FsNode }
   | { kind: 'move'; node: FsNode }
   | { kind: 'copy'; node: FsNode }
+  | { kind: 'size'; node: FsNode }
   | null
 
 export default function BrowseView() {
@@ -50,7 +51,8 @@ export default function BrowseView() {
   const [dialog, setDialog] = useState<Dialog>(null)
 
   const onAction = (node: FsNode, a: NodeAction) => {
-    if (a === 'rename') setDialog({ kind: 'rename', node })
+    if (a === 'size') setDialog({ kind: 'size', node })
+    else if (a === 'rename') setDialog({ kind: 'rename', node })
     else if (a === 'setChannel') setDialog({ kind: 'setChannel', node })
     else if (a === 'move') setDialog({ kind: 'move', node })
     else if (a === 'copy') setDialog({ kind: 'copy', node })
@@ -119,6 +121,9 @@ export default function BrowseView() {
           onClose={() => setDialog(null)}
           onSubmit={(name) => actions.createFolder(name)}
         />
+      )}
+      {dialog?.kind === 'size' && (
+        <SizeDialog nodeId={dialog.node.id} name={dialog.node.name} onClose={() => setDialog(null)} />
       )}
       {dialog?.kind === 'rename' && (
         <PromptDialog

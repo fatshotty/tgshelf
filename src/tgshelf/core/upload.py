@@ -134,9 +134,16 @@ class UploadEngine:
             nxt = await anext(pieces, None)
             is_last_piece = nxt is None
 
+            # Telegram only exempts the LAST part of a file from the part-size
+            # rule, and only when total_parts says so. Stream intermediate parts
+            # with -1, but declare the real count on the part that closes the
+            # portion (boundary hit or EOF) so a short tail is accepted.
+            is_portion_end = part_idx + 1 >= max_upload_parts or is_last_piece
+            total_parts = part_idx + 1 if is_portion_end else -1
+
             await sem.acquire()  # gate reading: bounds pieces in memory to K
             in_flight.append(
-                asyncio.create_task(self._save(file_id, part_idx, prev, sem))
+                asyncio.create_task(self._save(file_id, part_idx, total_parts, prev, sem))
             )
             part_idx += 1
             portion_size += len(prev)
@@ -180,9 +187,9 @@ class UploadEngine:
         if carry:
             yield bytes(carry)
 
-    async def _save(self, file_id, part_idx, data, sem):
+    async def _save(self, file_id, part_idx, total_parts, data, sem):
         try:
-            await self._gw.save_big_part(file_id, part_idx, -1, data)
+            await self._gw.save_big_part(file_id, part_idx, total_parts, data)
         finally:
             sem.release()
 

@@ -39,7 +39,9 @@ class Gateway(Protocol):
     async def save_big_part(
         self, file_id: int, part_idx: int, total_parts: int, data: bytes
     ) -> None:
-        """SaveBigFilePart; total_parts=-1 while the stream length is unknown."""
+        """SaveBigFilePart; total_parts=-1 for streamed intermediate parts, the
+        real count on the last part of a portion so Telegram exempts a short
+        tail from the part-size rule (else FILE_PART_SIZE_INVALID)."""
         ...
 
     async def send_document(

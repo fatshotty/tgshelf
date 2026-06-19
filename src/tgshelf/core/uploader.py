@@ -72,6 +72,7 @@ class Uploader:
         min_size: int,
         on_part: Hook | None = None,
         on_reset: Callable[[], Any] | None = None,
+        on_account: Callable[[str], Any] | None = None,
         resume_parts: tuple[PartRecord, ...] = (),
     ) -> UploadResult:
         member = self._pool.lease_one()
@@ -80,6 +81,8 @@ class Uploader:
 
         self._pool.acquire(member)
         try:
+            if on_account is not None:
+                await _maybe_await(on_account(member.name))
             if self._premium_check is not None:
                 member.is_premium = await self._premium_check(member.client)
             log.info(

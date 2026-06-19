@@ -43,6 +43,7 @@ class FileSnap:
     size: int
     done: int
     rate: float
+    account: str = ""  # uploading account name (upload only; empty for download)
 
 
 @dataclass
@@ -64,6 +65,7 @@ class _Active:
     name: str
     size: int
     done: int = 0
+    account: str = ""
     samples: Deque[tuple[float, int]] = field(default_factory=deque)
 
 
@@ -88,6 +90,11 @@ class ProgressState:
 
     def start_file(self, key: str, name: str, size: int) -> None:
         self.active[key] = _Active(name, size)
+
+    def set_account(self, key: str, account: str) -> None:
+        fp = self.active.get(key)
+        if fp is not None:
+            fp.account = account
 
     def advance(self, key: str, nbytes: int) -> None:
         fp = self.active.get(key)
@@ -131,7 +138,7 @@ class ProgressState:
         for fp in self.active.values():
             fp.samples.append((now, fp.done))
             self._prune(fp.samples, now)
-            files.append(FileSnap(fp.name, fp.size, fp.done, self._rate(fp.samples)))
+            files.append(FileSnap(fp.name, fp.size, fp.done, self._rate(fp.samples), fp.account))
         return Snapshot(
             self.total_files, self.total_bytes, self.ok, self.skipped, self.failed,
             self.remaining, self.bytes_done, self._rate(self._samples), files,
@@ -158,7 +165,8 @@ def build_block(snap: Snapshot, *, header: str) -> list[str]:
     ]
     for f in snap.files:
         name = f.name if len(f.name) <= _NAME_MAX else f.name[: _NAME_MAX - 1] + "…"
-        lines.append(f"{name}  {_pct(f.done, f.size):>3}% ({human_rate(f.rate)})")
+        tag = f" [{f.account}]" if f.account else ""
+        lines.append(f"{name}  {_pct(f.done, f.size):>3}% ({human_rate(f.rate)}){tag}")
     return lines
 
 

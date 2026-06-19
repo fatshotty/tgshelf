@@ -429,6 +429,7 @@ class FileSystem:
         *,
         mime: str | None = None,
         overwrite: bool = False,
+        on_account: Callable[[str], Any] | None = None,
     ) -> Node:
         """Upload a file under `parent_id`, converging the three upload paths
         (CLI sync / mount PUT / webui) into one place.
@@ -472,6 +473,7 @@ class FileSystem:
             result = await self._uploader.upload(
                 source_factory, filename=name, mime=mime, channel_id=channel,
                 min_size=self._min_size, on_part=persist_part, on_reset=reset_parts,
+                on_account=on_account,
             )
         except BaseException:
             await self.repo.purge(node.id)  # drop TEMP (parts cascade)

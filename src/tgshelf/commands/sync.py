@@ -185,7 +185,8 @@ async def sync(session_factory, uploader, *, master_channel: int, min_size: int,
                         return
                     replaced = existing is not None and overwrite
                     node = await fs.write(parent_id, lf.name,
-                                          counting_source(lf.path, key, st), overwrite=overwrite)
+                                          counting_source(lf.path, key, st), overwrite=overwrite,
+                                          on_account=lambda name: st.set_account(key, name))
                 if replaced:
                     stats.overwritten += 1
                     log.info("[sync] overwritten %s", lf.name)

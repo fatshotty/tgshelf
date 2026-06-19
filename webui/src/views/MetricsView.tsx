@@ -20,10 +20,13 @@ export default function MetricsView() {
   const [rate, setRate] = useState(0)
   const [series, setSeries] = useState<number[]>([])
 
-  const totalBytes = snapshot?.stream.bytes_total
+  // Recompute on every SSE tick (snapshot is a fresh object each second), NOT
+  // only when bytes_total changes: throughput is a time-based rate, so an idle
+  // tick with the counter frozen must derive to 0 — otherwise the last rate
+  // (and the sparkline) would stay stuck at the pre-idle value.
   useEffect(() => {
-    if (totalBytes === undefined) return
-    const cur: Sample = { bytes: totalBytes, t: Date.now() }
+    if (!snapshot) return
+    const cur: Sample = { bytes: snapshot.stream.bytes_total ?? 0, t: Date.now() }
     if (prev.current) {
       const r = deriveRate(prev.current, cur)
       setRate(r)
@@ -31,7 +34,7 @@ export default function MetricsView() {
       setSeries(ring.current.values())
     }
     prev.current = cur
-  }, [totalBytes])
+  }, [snapshot])
 
   if (!snapshot) {
     return (

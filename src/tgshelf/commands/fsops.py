@@ -40,11 +40,26 @@ def _human(size: int) -> str:
 
 
 async def _resolve_any(fs: FileSystem, path: str):
-    """Resolve a path, trying ACTIVE first then the trash (DELETED)."""
+    """Resolve a path, trying ACTIVE first then the trash (DELETED).
+
+    `resolve` matches a single state across the *whole* path, so it handles a
+    fully-ACTIVE path and a fully-DELETED one (e.g. an rm'd folder). The common
+    case it misses is a single file rm'd inside a folder that stays ACTIVE: the
+    path is mixed-state (ACTIVE parent + DELETED leaf). Resolve the parent as
+    ACTIVE and pick the trashed child by name so `purge <path>` can reach it."""
     node = await fs.resolve(path)
-    if node is None:
-        node = await fs.repo.resolve(path, state="DELETED")
-    return node
+    if node is not None:
+        return node
+    node = await fs.repo.resolve(path, state="DELETED")
+    if node is not None:
+        return node
+    segments = [s for s in path.split("/") if s]
+    if not segments:
+        return None
+    parent = await fs.resolve("/" + "/".join(segments[:-1]))
+    if parent is None:
+        return None
+    return await fs.repo.get_child_by_name(parent.id, segments[-1], state="DELETED")
 
 
 # -- command logic (testable: operate on a given fs) ------------------------
@@ -62,12 +77,12 @@ async def _do_ls(fs: FileSystem, path: str) -> int:
     return 0
 
 
-async def _do_du(fs: FileSystem, path: str, *, human: bool) -> int:
+async def _do_du(fs: FileSystem, path: str) -> int:
     node = await fs.resolve(path)
     if node is None:
         return _err(f"path not found: {path}")
     total = await fs.total_size(node.id)
-    print(f"{_human(total) if human else total}\t{path}")
+    print(f"{total}\t{_human(total)}\t{path}")
     return 0
 
 

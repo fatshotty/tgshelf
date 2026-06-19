@@ -112,6 +112,16 @@ class FileSystem:
     async def search(self, term: str, *, root_id: str | None = None) -> Sequence[Node]:
         return await self.repo.search(term, root_id=root_id)
 
+    async def total_size(self, node_id: str, *, state: str = "ACTIVE") -> int:
+        """Total byte size of a node: a file's own size, or the recursive sum of
+        all ACTIVE files in a folder's subtree. Raises if the node is missing."""
+        node = await self.repo.get(node_id)
+        if node is None:
+            raise NotAReadableFile(f"node {node_id} not found")
+        if not node.is_folder:
+            return node.size
+        return await self.repo.subtree_size(node_id, state=state)
+
     # -- channel resolution -------------------------------------------------
 
     async def effective_channel(self, node_id: str, *, skip_current: bool = False) -> int:

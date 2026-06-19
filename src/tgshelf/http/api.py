@@ -101,6 +101,18 @@ async def get_node(request: web.Request) -> web.Response:
         return web.json_response(node_to_dict(node))
 
 
+async def node_size(request: web.Request) -> web.Response:
+    node_id = request.match_info["id"]
+    async with open_fs(request) as fs:
+        node = await fs.get(node_id)
+        if node is None:
+            return _not_found(f"node {node_id} not found")
+        total = await fs.total_size(node_id)
+        return web.json_response(
+            {"id": node.id, "is_folder": node.is_folder, "size": total}
+        )
+
+
 async def list_children(request: web.Request) -> web.Response:
     state = request.query.get("state", "ACTIVE")
     if state not in _LIST_STATES:
@@ -333,6 +345,7 @@ async def reorder_parts_node(request: web.Request) -> web.Response:
 def register_routes(app: web.Application) -> None:
     app.router.add_get("/api/v1/nodes/{id}", get_node)
     app.router.add_get("/api/v1/nodes/{id}/children", list_children)
+    app.router.add_get("/api/v1/nodes/{id}/size", node_size)
     app.router.add_get("/api/v1/resolve", resolve)
     app.router.add_get("/api/v1/search", search)
     app.router.add_post("/api/v1/folders", create_folder)

@@ -326,6 +326,16 @@ class NodeRepo:
             stmt = stmt.where(Node.state == state)
         return (await self.session.execute(stmt)).scalars().all()
 
+    async def subtree_size(self, root_id: str, *, state: str = "ACTIVE") -> int:
+        """Total byte size of all files in a node's subtree (root excluded),
+        summed in SQL. Folders contribute nothing (their size is 0)."""
+        stmt = (
+            select(func.coalesce(func.sum(Node.size), 0))
+            .join(self._subtree_cte(root_id), Node.id == text("subtree.id"))
+            .where(Node.is_folder.is_(False), Node.state == state)
+        )
+        return int((await self.session.execute(stmt)).scalar_one())
+
     def _subtree_cte(self, root_id: str):
         base = (
             select(Node.id, literal(0).label("depth"))

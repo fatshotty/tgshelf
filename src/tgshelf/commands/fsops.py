@@ -29,6 +29,16 @@ def _fmt(node) -> str:
     return f"{kind} {node.id}  {size:>12}  {node.name}"
 
 
+def _human(size: int) -> str:
+    """Render a byte count as a short human-readable string (1024-based)."""
+    value = float(size)
+    for unit in ("B", "K", "M", "G", "T", "P"):
+        if value < 1024 or unit == "P":
+            return f"{int(value)}{unit}" if unit == "B" else f"{value:.1f}{unit}"
+        value /= 1024
+    return f"{size}B"  # unreachable, keeps type checker happy
+
+
 async def _resolve_any(fs: FileSystem, path: str):
     """Resolve a path, trying ACTIVE first then the trash (DELETED)."""
     node = await fs.resolve(path)
@@ -49,6 +59,15 @@ async def _do_ls(fs: FileSystem, path: str) -> int:
         return 0
     for child in await fs.list_children(node.id):
         print(_fmt(child))
+    return 0
+
+
+async def _do_du(fs: FileSystem, path: str, *, human: bool) -> int:
+    node = await fs.resolve(path)
+    if node is None:
+        return _err(f"path not found: {path}")
+    total = await fs.total_size(node.id)
+    print(f"{_human(total) if human else total}\t{path}")
     return 0
 
 
@@ -158,6 +177,9 @@ async def run(config: Config, args) -> int:
     if cmd == "ls":
         async with _db_fs(config) as fs:
             return await _do_ls(fs, args.path)
+    if cmd == "du":
+        async with _db_fs(config) as fs:
+            return await _do_du(fs, args.path, human=args.human)
     if cmd == "mkdir":
         async with _db_fs(config) as fs:
             return await _do_mkdir(fs, args.path)

@@ -123,6 +123,26 @@ class ChangesFeedConfig:
 
 
 @dataclass(frozen=True)
+class RcloneConfig:
+    """rclone integration: a read-write WebDAV data-plane (`/dav`) plus a
+    push-based control-plane that invalidates rclone's VFS directory cache the
+    instant any writer touches the tree (changes feed → `vfs/forget`).
+
+    No rc endpoint lives here (user decision): the rclone client declares its own
+    rc URL at mount time via the `X-Tgshelf-RC` header and is kept in an in-memory
+    registry. `register_token` (shared secret) authorises that self-registration;
+    empty = self-registration disabled (safe default). `allowed_rc_networks` is an
+    extra CIDR allowlist for the declared rc host (anti-SSRF); the request's own
+    source IP is always allowed."""
+
+    webdav_enabled: bool = False
+    bridge_enabled: bool = False
+    register_token: str = ""
+    allowed_rc_networks: tuple[str, ...] = ()
+    registry_ttl: int = 600
+
+
+@dataclass(frozen=True)
 class Config:
     db: str
     telegram: TelegramConfig
@@ -139,6 +159,7 @@ class Config:
     http: HttpConfig = HttpConfig()
     strm: StrmConfig = StrmConfig()
     changes_feed: ChangesFeedConfig = ChangesFeedConfig()
+    rclone: RcloneConfig = RcloneConfig()
 
 
 def _section(raw: Mapping[str, Any], key: str) -> Mapping[str, Any]:
@@ -341,6 +362,30 @@ def _parse_changes_feed(raw: Mapping[str, Any]) -> ChangesFeedConfig:
     )
 
 
+def _parse_rclone(raw: Mapping[str, Any]) -> RcloneConfig:
+    section = _section(raw, "rclone")
+    networks = section.get("allowed_rc_networks") or []
+    if not isinstance(networks, list):
+        raise ConfigError("'rclone.allowed_rc_networks' must be a list of CIDR strings")
+    for net in networks:
+        try:
+            ipaddress.ip_network(net, strict=False)
+        except ValueError:
+            raise ConfigError(
+                f"'rclone.allowed_rc_networks' contains an invalid network: {net!r}"
+            ) from None
+    cfg = RcloneConfig(
+        webdav_enabled=_bool(section, "webdav_enabled", RcloneConfig.webdav_enabled, path="rclone"),
+        bridge_enabled=_bool(section, "bridge_enabled", RcloneConfig.bridge_enabled, path="rclone"),
+        register_token=_str(section, "register_token", RcloneConfig.register_token, path="rclone"),
+        allowed_rc_networks=tuple(str(n) for n in networks),
+        registry_ttl=_int(section, "registry_ttl", RcloneConfig.registry_ttl, path="rclone"),
+    )
+    if cfg.registry_ttl <= 0:
+        raise ConfigError("'rclone.registry_ttl' must be > 0")
+    return cfg
+
+
 def _parse_operations(raw: Mapping[str, Any]) -> OperationsConfig:
     section = _section(raw, "operations")
     return OperationsConfig(
@@ -397,4 +442,5 @@ def load_config(path: str | Path, env: Mapping[str, str] | None = None) -> Confi
         http=_parse_http(raw),
         strm=_parse_strm(raw),
         changes_feed=_parse_changes_feed(raw),
+        rclone=_parse_rclone(raw),
     )

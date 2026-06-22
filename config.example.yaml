@@ -105,3 +105,27 @@ strm:
 changes_feed:
   enabled: false        # Postgres trigger + LISTEN/NOTIFY feed (mount / strm watch)
   retention_days: 7
+
+# rclone integration. Mount the drive as a real read-write cloud-storage over
+# WebDAV (data-plane) and push-invalidate rclone's directory cache the instant
+# ANY writer (webui/CLI/watcher/manual) touches the tree (control-plane), so a
+# new file/folder shows up at the next `ls` without waiting for --dir-cache-time.
+#
+# The rc endpoint is NOT configured here: the rclone client declares its own rc
+# URL at mount time via headers, e.g.
+#   rclone mount mywebdav: /mnt \
+#     --header "X-Tgshelf-RC: http://<host-running-rclone>:5572" \
+#     --header "X-Tgshelf-Token: <register_token below>"
+# rclone must expose its rc reachable by tgshelf (--rc --rc-addr :5572, with
+# --rc-user/--rc-pass embedded in the X-Tgshelf-RC URL if rc auth is enabled).
+rclone:
+  webdav_enabled: false   # serve the read-write WebDAV data-plane at /dav
+  bridge_enabled: false   # LISTEN the changes feed → push vfs/forget (needs changes_feed.enabled)
+  # Shared secret a client must send as X-Tgshelf-Token to register its rc URL.
+  # Empty = self-registration disabled (no auto-refresh). Anti-SSRF: tgshelf only
+  # POSTs to a declared rc URL when the token matches.
+  register_token: ""
+  # Extra CIDR allowlist for the declared rc host (the request's own source IP is
+  # always allowed). e.g. ["192.168.1.0/24"]
+  allowed_rc_networks: []
+  registry_ttl: 600       # seconds an idle mount stays registered before it's dropped

@@ -202,8 +202,17 @@ async def run_server(config: Config) -> None:
     from tgshelf.http.api import register_routes
     from tgshelf.http.download import register_download_routes
     from tgshelf.http.ops import register_ops_routes
+    from tgshelf.http.rcregistry import RcRegistry
     from tgshelf.http.upload import register_upload_routes
     from tgshelf.http.webui import register_webui_routes
+
+    # shared by the WebDAV self-registration middleware and the rc bridge; only
+    # built when rclone integration is on at all.
+    rc_registry = (
+        RcRegistry(ttl=config.rclone.registry_ttl)
+        if (config.rclone.webdav_enabled or config.rclone.bridge_enabled)
+        else None
+    )
 
     app = make_app(
         config.http,
@@ -217,11 +226,18 @@ async def run_server(config: Config) -> None:
         bot_pool=runtime["bot_pool"],
         notifier=notifier,
         strm=config.strm,
+        rclone=config.rclone,
+        rc_registry=rc_registry,
     )
     register_routes(app)  # JSON metadata + tree (B2)
     register_download_routes(app)  # streaming download (B3)
     register_upload_routes(app)  # streaming upload (B3)
     register_ops_routes(app)  # /status (B3)
+    if config.rclone.webdav_enabled:
+        from tgshelf.http.webdav import register_webdav_routes
+
+        register_webdav_routes(app)  # rclone WebDAV data-plane at /dav
+        log.info("rclone WebDAV data-plane enabled at /dav")
     register_webui_routes(app)  # React SPA at / — LAST (catch-all fallback)
 
     # start the live channel watcher (no-op if not configured); fetches posted
@@ -232,6 +248,14 @@ async def run_server(config: Config) -> None:
     watcher_client = await start_watcher(
         config, session_factory=session_factory, user_gateway=user_gateway, notifier=notifier
     )
+
+    # rclone control-plane: LISTEN the changes feed → push vfs/forget to the
+    # registered mounts. Best-effort (None when disabled / feed off), never fatal.
+    from tgshelf.bridge.rclone import start_rcbridge
+
+    rcbridge_task = await start_rcbridge(
+        config, session_factory=session_factory, registry=rc_registry
+    ) if rc_registry is not None else None
 
     # handler_cancellation: cancel the request task as soon as the client
     # disconnects. A streaming player that seeks closes the old connection while
@@ -274,6 +298,8 @@ async def run_server(config: Config) -> None:
         await stop_loop_lag_monitor(lag_task)
         if monitor is not None:
             monitor.cancel()
+        if rcbridge_task is not None:
+            rcbridge_task.cancel()
         await runner.cleanup()
         if watcher_client is not None:
             await watcher_client.disconnect()

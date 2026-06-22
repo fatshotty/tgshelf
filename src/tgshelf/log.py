@@ -65,6 +65,27 @@ class _DropConnectionErrors(logging.Filter):
         return not isinstance(exc, (ConnectionError, asyncio.CancelledError))
 
 
+# telethon WARNING prefixes that are benign chatter, not faults: the server
+# routinely drops idle/extra MTProto connections and telethon just reconnects.
+# Far more frequent now that each client opens several connections per DC
+# (concurrent_tcp_connections). Matched against the formatted message; only the
+# listed prefixes are dropped, every other telethon warning still gets through.
+_BENIGN_TELETHON_PREFIXES = ("Server closed the connection",)
+
+
+class _DropBenignTelethon(logging.Filter):
+    """Drop the handful of known-benign telethon connection WARNINGs (see
+    `_BENIGN_TELETHON_PREFIXES`). Attached to the root handler so it also sees
+    records propagated from telethon's sub-loggers (telethon.network.*)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name.startswith("telethon") and record.levelno == logging.WARNING:
+            message = record.getMessage()
+            if any(message.startswith(p) for p in _BENIGN_TELETHON_PREFIXES):
+                return False
+        return True
+
+
 def setup_logging(level_name: str) -> None:
     logging.basicConfig(
         level=LEVELS[level_name],
@@ -80,6 +101,10 @@ def setup_logging(level_name: str) -> None:
     for handler in logging.getLogger().handlers:
         if not any(isinstance(f, _RequestIdFilter) for f in handler.filters):
             handler.addFilter(_RequestIdFilter())
+        # drop benign telethon reconnection chatter (covers propagated records
+        # from telethon.network.* since it sits on the root handler).
+        if not any(isinstance(f, _DropBenignTelethon) for f in handler.filters):
+            handler.addFilter(_DropBenignTelethon())
     # aiohttp logs client disconnects on its own server logger, outside our
     # middleware; drop just those records (keep genuine handler errors).
     server_log = logging.getLogger("aiohttp.server")

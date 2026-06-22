@@ -14,6 +14,18 @@ logger: info            # no | error | warn | info | debug
 #          sharing the same DB and the same config must NOT share sessions)
 session_storage: db
 
+# Global throughput knob, valid for ALL clients (user + bot): number of TCP
+# connections each client opens per DC for the data path (upload/download), with
+# round-robin. Telegram throttles per-connection, so >1 raises throughput.
+#   0 or 1 = off (one connection, the current behavior)
+#   2      = safe sweet spot
+# Going above 3 is discouraged: every client shares the server's single IP and
+# there is a per-IP ceiling that more connections won't break through. Note the
+# effect is asymmetric: upload speeds up even a single file, while download only
+# benefits when bots are shared by concurrent streams (it lifts the per-bot
+# connection budget, not the speed of a lone stream).
+concurrent_tcp_connections: 1
+
 telegram:
   users:                # accounts; entries with bot_token are bots
     - name: main

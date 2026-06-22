@@ -129,6 +129,11 @@ class Config:
     data: str = "./data"
     logger: str = "info"
     session_storage: str = "db"
+    # Global: TCP connections (MTProtoSenders) each client opens per DC for the
+    # high-volume data path (upload SaveBigFilePart / download GetFile), with
+    # round-robin. Telegram throttles per-connection; >1 raises throughput.
+    # Normalized to max(1, N): 0 and 1 both mean "off" (one connection).
+    concurrent_tcp_connections: int = 1
     download: DownloadConfig = DownloadConfig()
     operations: OperationsConfig = OperationsConfig()
     http: HttpConfig = HttpConfig()
@@ -375,12 +380,18 @@ def load_config(path: str | Path, env: Mapping[str, str] | None = None) -> Confi
             f"'session_storage' must be one of {SESSION_STORAGES}, got {session_storage!r}"
         )
 
+    # max(1, N): 0 and 1 both disable the feature (one connection per DC).
+    tcp_connections = max(
+        1, _int(raw, "concurrent_tcp_connections", 1, path="<root>")
+    )
+
     return Config(
         db=str(db),
         telegram=_parse_telegram(raw),
         data=_str(raw, "data", "./data", path="<root>"),
         logger=logger,
         session_storage=session_storage,
+        concurrent_tcp_connections=tcp_connections,
         download=_parse_download(raw),
         operations=_parse_operations(raw),
         http=_parse_http(raw),

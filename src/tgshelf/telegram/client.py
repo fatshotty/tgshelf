@@ -56,24 +56,36 @@ class TgClient:
         flood_threshold: int = 25,
         max_retries: int = 3,
         max_flood_retries: int = 3,
+        tcp_connections: int = 1,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         rate_limiter: Any = None,
     ):
         self._client = client
         self.name = name
-        self._sem = asyncio.Semaphore(semaphore_limit)
+        # TCP connections per DC for the data path (round-robin). Telegram
+        # throttles per-connection; >1 raises throughput. max(1, N): 0/1 = off.
+        self._tcp = max(1, tcp_connections)
+        # the per-client semaphore must not strangle the N data connections.
+        self._sem = asyncio.Semaphore(max(semaphore_limit, self._tcp))
         self._flood_threshold = flood_threshold
         self._max_retries = max_retries
         self._max_flood_retries = max_flood_retries
         self._sleep = sleep
         self._rate_limiter = rate_limiter
-        # per-DC media senders, connected to each DC's media_only endpoint and
-        # reused for every chunk/stream (the legacy get_media_session, Telethon
-        # edition). Downloading on the regular endpoint / main connection makes
-        # Telegram throttle sustained GetFile with ~1-2s FloodWaits; the media
-        # endpoint does not. Built lazily, disconnected by aclose().
-        self._media_senders: dict[int, Any] = {}
+        # per-DC sender POOLS (lists of self._tcp senders), round-robined for the
+        # high-volume data path; control-plane calls keep using the main client.
+        #   media   = download GetFile, each DC's media_only endpoint. Downloading
+        #             on the regular endpoint / main connection makes Telegram
+        #             throttle sustained GetFile with ~1-2s FloodWaits; media does not.
+        #   upload  = SaveBigFilePart, the home DC's regular endpoint.
+        # Built lazily (the legacy get_media_session, Telethon edition; one entry
+        # per DC when N=1), refilled on lease, disconnected by aclose().
+        self._media_senders: dict[int, list] = {}
+        self._upload_senders: dict[int, list] = {}
+        self._media_rr: dict[int, int] = {}
+        self._upload_rr: dict[int, int] = {}
         self._media_lock = asyncio.Lock()
+        self._upload_lock = asyncio.Lock()
 
     # -- middleware --------------------------------------------------------
 
@@ -160,43 +172,60 @@ class TgClient:
         # session for exactly this reason). One cached media sender per DC is
         # reused for every chunk of every stream.
         dc_id = ref.dc_id if ref.dc_id is not None else getattr(self._client.session, "dc_id", None)
-        sender = await self._media_sender(dc_id)
+        sender = await self._lease_sender(
+            self._media_senders, self._media_rr, self._media_lock, dc_id, media_only=True
+        )
         t_send = time.monotonic()
         try:
             result = await self._with_middleware(lambda: sender.send(request))
         except ConnectionError:
-            # the media connection dropped: discard it so the next call rebuilds,
-            # and let the streamer retry this chunk (per-bot failover loop).
-            self._media_senders.pop(dc_id, None)
+            # the media connection dropped: discard just this sender so the next
+            # lease rebuilds it (the others stay live), and let the streamer retry
+            # this chunk (per-bot failover loop).
+            self._discard_sender(self._media_senders, dc_id, sender)
             raise
         self._log_slow_fetch(dc_id, "media", borrow=0.0, send=time.monotonic() - t_send, ret=0.0)
         return result.bytes
 
-    async def _media_sender(self, dc_id: int) -> MTProtoSender:
-        sender = self._media_senders.get(dc_id)
-        if sender is not None:
-            return sender
-        async with self._media_lock:
-            sender = self._media_senders.get(dc_id)
-            if sender is None:
-                sender = await self._build_media_sender(dc_id)
-                self._media_senders[dc_id] = sender
-            return sender
+    async def _lease_sender(self, store, rr, lock, dc_id, *, media_only) -> MTProtoSender:
+        """Round-robin one of up to self._tcp senders to `dc_id`, building or
+        refilling the pool lazily. The rr counter increment is synchronous (no
+        await between get and set) so it is atomic on the event loop."""
+        pool = store.get(dc_id)
+        if pool is None or len(pool) < self._tcp:
+            async with lock:
+                pool = store.setdefault(dc_id, [])
+                while len(pool) < self._tcp:
+                    pool.append(await self._build_sender(dc_id, media_only=media_only))
+        i = rr.get(dc_id, 0)
+        rr[dc_id] = (i + 1) % len(pool)
+        return pool[i % len(pool)]
 
-    async def _build_media_sender(self, dc_id: int) -> MTProtoSender:
-        """A dedicated MTProtoSender to `dc_id`'s media_only endpoint, reused for
-        all downloads on that DC. Mirrors the legacy get_media_session: the home
-        DC reuses the existing auth_key (no ExportAuthorization, which Telegram
-        refuses for the home DC); a foreign DC handshakes a fresh key and imports
-        an exported authorization, exactly like Telethon's _create_exported_sender
-        — but pointed at the media endpoint instead of the regular one."""
+    @staticmethod
+    def _discard_sender(store, dc_id, sender) -> None:
+        """Drop a broken sender from its pool (already in ConnectionError, so no
+        disconnect); the next lease refills the pool back up to self._tcp."""
+        pool = store.get(dc_id)
+        if pool and sender in pool:
+            pool.remove(sender)
+
+    async def _build_sender(self, dc_id: int, *, media_only: bool) -> MTProtoSender:
+        """A dedicated MTProtoSender to `dc_id`, reused for the data path on that DC.
+        Mirrors the legacy get_media_session: the home DC reuses the existing
+        auth_key (no ExportAuthorization, which Telegram refuses for the home DC);
+        a foreign DC handshakes a fresh key and imports an exported authorization,
+        exactly like Telethon's _create_exported_sender. `media_only` picks the
+        media endpoint (downloads) or the regular one (uploads)."""
         client = self._client
         cfg = await self._with_middleware(lambda: client(functions.help.GetConfigRequest()))
         opts = [
             o for o in cfg.dc_options
             if o.id == dc_id and not o.cdn and bool(o.ipv6) == client._use_ipv6
         ]
-        chosen = next((o for o in opts if o.media_only), None) or (opts[0] if opts else None)
+        if media_only:
+            chosen = next((o for o in opts if o.media_only), None) or (opts[0] if opts else None)
+        else:
+            chosen = next((o for o in opts if not o.media_only), None) or (opts[0] if opts else None)
         if chosen is None:
             raise ConnectionError(f"no dc_option for dc {dc_id}")
 
@@ -219,20 +248,24 @@ class TgClient:
             init.query = functions.auth.ImportAuthorizationRequest(id=auth.id, bytes=auth.bytes)
         await sender.send(functions.InvokeWithLayerRequest(LAYER, init))
         log.info(
-            "[media] '%s' media sender for dc %d -> %s (media_only=%s)",
-            self.name, dc_id, chosen.ip_address, getattr(chosen, "media_only", None),
+            "[media] '%s' %s sender for dc %d -> %s (media_only=%s)",
+            self.name, "media" if media_only else "upload",
+            dc_id, chosen.ip_address, getattr(chosen, "media_only", None),
         )
         return sender
 
     async def aclose(self) -> None:
-        """Disconnect the cached per-DC media senders. Call before disconnecting
-        the main client on shutdown. Safe to call more than once."""
-        senders, self._media_senders = self._media_senders, {}
-        for dc_id, sender in senders.items():
-            try:
-                await sender.disconnect()
-            except Exception:  # noqa: BLE001 - best effort on shutdown
-                log.debug("[media] '%s' error disconnecting dc %d sender", self.name, dc_id)
+        """Disconnect every cached per-DC sender (media + upload pools). Call before
+        disconnecting the main client on shutdown. Safe to call more than once."""
+        stores = (self._media_senders, self._upload_senders)
+        self._media_senders, self._upload_senders = {}, {}
+        for store in stores:
+            for dc_id, senders in store.items():
+                for sender in senders:
+                    try:
+                        await sender.disconnect()
+                    except Exception:  # noqa: BLE001 - best effort on shutdown
+                        log.debug("[media] '%s' error disconnecting dc %d sender", self.name, dc_id)
 
     def _log_slow_fetch(self, dc_id, path, *, borrow, send, ret, threshold=2.0) -> None:
         """Break down a chunk fetch into borrow/send/return when it is REALLY slow
@@ -251,11 +284,24 @@ class TgClient:
     async def save_big_part(
         self, file_id: int, part_idx: int, total_parts: int, data: bytes
     ) -> None:
-        await self.invoke(
-            SaveBigFilePartRequest(
-                file_id=file_id, file_part=part_idx, file_total_parts=total_parts, bytes=data
-            )
+        request = SaveBigFilePartRequest(
+            file_id=file_id, file_part=part_idx, file_total_parts=total_parts, bytes=data
         )
+        if self._tcp <= 1:
+            # single connection: identical to the original path (main connection).
+            await self.invoke(request)
+            return
+        # multi-connection: round-robin parts across N senders to the home DC's
+        # regular endpoint, bypassing Telegram's per-connection upload throttle.
+        dc_id = getattr(self._client.session, "dc_id", None)
+        sender = await self._lease_sender(
+            self._upload_senders, self._upload_rr, self._upload_lock, dc_id, media_only=False
+        )
+        try:
+            await self._with_middleware(lambda: sender.send(request))
+        except ConnectionError:
+            self._discard_sender(self._upload_senders, dc_id, sender)
+            raise
 
     async def send_document(
         self,

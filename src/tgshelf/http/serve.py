@@ -64,7 +64,12 @@ def build_runtime(config: Config, session_factory, clients) -> dict[str, Any]:
     """Assemble pools + engines + executor from started clients. Returns the
     components the HTTP routes will use."""
     client_pool, bot_pool = build_pools(clients)
-    uploader = Uploader(client_pool, part_size=PART_SIZE)
+    # with N>1 connections per client, the engine must fire >= N concurrent saves
+    # to keep them busy; the client round-robins them across the connections.
+    uploader = Uploader(
+        client_pool, part_size=PART_SIZE,
+        max_in_flight=max(3, config.concurrent_tcp_connections),
+    )
     streamer_pool = bot_pool if bot_pool.members else client_pool
     from tgshelf.core.download import ParallelStreamer
 
@@ -155,7 +160,8 @@ async def start_clients(config: Config, rate_limiter) -> list[tuple[Any, Any]]:
                 if account.is_bot else {}
             )
             clients.append((account, TgClient(
-                tele, name=account.name, rate_limiter=rate_limiter, **tg_kwargs,
+                tele, name=account.name, rate_limiter=rate_limiter,
+                tcp_connections=config.concurrent_tcp_connections, **tg_kwargs,
             )))
     finally:
         if store_session is not None:

@@ -9,6 +9,9 @@ Serves a single Range (206 + Content-Range), 416 with `Content-Range: bytes
 */size` on an unsatisfiable one, an ETag with If-None-Match -> 304, and HEAD
 (headers only). Bytes come from `fs.open_read`, written straight to the socket;
 the generator is closed in a `finally` so the streamer releases its bots.
+
+The byte-serving core is `stream_node`, shared with the WebDAV GET handler so
+the mount honours the exact same Range/ETag/streaming semantics.
 """
 
 from __future__ import annotations
@@ -86,79 +89,88 @@ async def download(request: web.Request) -> web.StreamResponse:
             return web.json_response(
                 {"error": f"file {file_id} not found"}, status=404
             )
+        return await stream_node(request, fs, node)
 
-        size = node.size
-        # mtime folded into the ETag: a parts-reorder keeps the size but changes
-        # the byte layout, so size alone wouldn't invalidate caches/players.
-        mtime_us = int(node.mtime.timestamp() * 1_000_000)
-        etag = f'"{node.id}-{size}-{mtime_us}"'
-        if request.headers.get("If-None-Match") == etag:
-            return web.Response(status=304, headers={"ETag": etag})
 
-        try:
-            rng = parse_range(request.headers.get("Range"), size)
-        except _BadRange:
-            return web.Response(
-                status=416,
-                headers={"Content-Range": f"bytes */{size}", "Accept-Ranges": "bytes"},
-            )
+async def stream_node(request: web.Request, fs, node) -> web.StreamResponse:
+    """Serve `node`'s bytes from `fs.open_read` (Range/206/416/ETag/304/HEAD).
 
-        if rng is None:
-            start, end, status = 0, max(size - 1, 0), 200
-        else:
-            start, end = rng
-            status = 206
+    `node` is an already-resolved ACTIVE file. Shared by the `/download` route
+    (resolves by file_id) and the WebDAV GET handler (resolves by path) so both
+    honour the exact same byte semantics.
+    """
+    size = node.size
+    # mtime folded into the ETag: a parts-reorder keeps the size but changes
+    # the byte layout, so size alone wouldn't invalidate caches/players.
+    mtime_us = int(node.mtime.timestamp() * 1_000_000)
+    etag = f'"{node.id}-{size}-{mtime_us}"'
+    if request.headers.get("If-None-Match") == etag:
+        return web.Response(status=304, headers={"ETag": etag})
 
-        resp = web.StreamResponse(status=status)
-        resp.headers["Content-Type"] = node.mime or "application/octet-stream"
-        resp.headers["Accept-Ranges"] = "bytes"
-        resp.headers["Content-Disposition"] = _content_disposition(node.name)
-        resp.headers["ETag"] = etag
-        length = 0 if size == 0 else end - start + 1
-        resp.content_length = length
-        if status == 206:
-            resp.headers["Content-Range"] = f"bytes {start}-{end}/{size}"
-
-        await resp.prepare(request)
-        if request.method == "HEAD" or size == 0:
-            await resp.write_eof()
-            return resp
-
-        log.info(
-            "download %s '%s' bytes %d-%d/%d", node.id, node.name, start, end, size
+    try:
+        rng = parse_range(request.headers.get("Range"), size)
+    except _BadRange:
+        return web.Response(
+            status=416,
+            headers={"Content-Range": f"bytes */{size}", "Accept-Ranges": "bytes"},
         )
-        stream = fs.open_read(file_id, start, end)
-        sent = 0
-        outcome = "completed"
-        try:
-            async for chunk in stream:
-                await resp.write(chunk)
-                sent += len(chunk)
-            await resp.write_eof()
-        except _CLIENT_GONE as exc:
-            # client went away mid-stream: quiet log, return the started response
-            # so nothing propagates (CancelledError is re-raised to honour
-            # cooperative cancellation).
-            outcome = f"client disconnected ({exc.__class__.__name__})"
-            log.debug("download %s: client disconnected (%s)",
-                      node.id, exc.__class__.__name__)
-            if isinstance(exc, asyncio.CancelledError):
-                raise
-        except _STREAM_ABORTED as exc:
-            # the streamer gave up (all bots flooding/unavailable, part gone): the
-            # response already started, so we can't change the status — log it
-            # cleanly (no stacktrace) and end the (truncated) response. Pre-stream
-            # occurrences map to a proper status via the error middleware.
-            outcome = f"aborted ({exc.__class__.__name__})"
-            log.warning("[download] %s stream aborted (%s): %s",
-                        node.id, exc.__class__.__name__, exc)
-        finally:
-            await stream.aclose()  # release the streamer's bots on disconnect too
-            # one terminal line per request: how it ended + bytes actually served
-            # (runs on every exit incl. cancellation, before it re-propagates).
-            log.info("[download] %s request ended: %s — %d/%d bytes sent",
-                     node.id, outcome, sent, length)
+
+    if rng is None:
+        start, end, status = 0, max(size - 1, 0), 200
+    else:
+        start, end = rng
+        status = 206
+
+    resp = web.StreamResponse(status=status)
+    resp.headers["Content-Type"] = node.mime or "application/octet-stream"
+    resp.headers["Accept-Ranges"] = "bytes"
+    resp.headers["Content-Disposition"] = _content_disposition(node.name)
+    resp.headers["ETag"] = etag
+    length = 0 if size == 0 else end - start + 1
+    resp.content_length = length
+    if status == 206:
+        resp.headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+
+    await resp.prepare(request)
+    if request.method == "HEAD" or size == 0:
+        await resp.write_eof()
         return resp
+
+    log.info(
+        "download %s '%s' bytes %d-%d/%d", node.id, node.name, start, end, size
+    )
+    stream = fs.open_read(node.id, start, end)
+    sent = 0
+    outcome = "completed"
+    try:
+        async for chunk in stream:
+            await resp.write(chunk)
+            sent += len(chunk)
+        await resp.write_eof()
+    except _CLIENT_GONE as exc:
+        # client went away mid-stream: quiet log, return the started response
+        # so nothing propagates (CancelledError is re-raised to honour
+        # cooperative cancellation).
+        outcome = f"client disconnected ({exc.__class__.__name__})"
+        log.debug("download %s: client disconnected (%s)",
+                  node.id, exc.__class__.__name__)
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+    except _STREAM_ABORTED as exc:
+        # the streamer gave up (all bots flooding/unavailable, part gone): the
+        # response already started, so we can't change the status — log it
+        # cleanly (no stacktrace) and end the (truncated) response. Pre-stream
+        # occurrences map to a proper status via the error middleware.
+        outcome = f"aborted ({exc.__class__.__name__})"
+        log.warning("[download] %s stream aborted (%s): %s",
+                    node.id, exc.__class__.__name__, exc)
+    finally:
+        await stream.aclose()  # release the streamer's bots on disconnect too
+        # one terminal line per request: how it ended + bytes actually served
+        # (runs on every exit incl. cancellation, before it re-propagates).
+        log.info("[download] %s request ended: %s — %d/%d bytes sent",
+                 node.id, outcome, sent, length)
+    return resp
 
 
 def register_download_routes(app: web.Application) -> None:

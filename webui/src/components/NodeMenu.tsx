@@ -5,9 +5,11 @@
 import { useEffect, useRef, useState } from 'react'
 
 import type { FsNode } from '../api/types'
+import { isTextMime } from '../lib/format'
 
 export type NodeAction =
   | 'size'
+  | 'edit'
   | 'rename'
   | 'setChannel'
   | 'move'
@@ -43,6 +45,10 @@ export function NodeMenu({ node, onAction }: { node: FsNode; onAction: (a: NodeA
         ]
       : [
           ...(node.is_folder ? [{ a: 'size' as NodeAction, label: 'Disk usage' }] : []),
+          // inline (DB-stored) files are editable in place; text → edit, binary → view
+          ...(!node.is_folder && node.inline
+            ? [{ a: 'edit' as NodeAction, label: isTextMime(node.mime) ? 'Edit' : 'View' }]
+            : []),
           { a: 'rename', label: 'Rename' },
           ...(node.is_folder ? [{ a: 'setChannel' as NodeAction, label: 'Set channel' }] : []),
           { a: 'move', label: 'Move…' },

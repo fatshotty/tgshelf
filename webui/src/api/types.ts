@@ -8,6 +8,7 @@ export interface FsNode {
   channel_id: number | null
   state: string // ACTIVE | TEMP | DELETED
   size: number
+  inline: boolean // stored in the DB (editable in place) vs Telegram-backed
   ctime: string | null
   mtime: string | null
   info: Record<string, unknown>

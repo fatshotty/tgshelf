@@ -35,5 +35,7 @@ export function useTreeActions(folderId: string | undefined, path: string) {
     restore: (id: string) => api.restoreNode(id).then(invalidate),
     move: (id: string, destId: string) => api.moveNode(id, destId).then((r) => afterMoveCopy(r, 'Move')),
     copy: (id: string, destId: string) => api.copyNode(id, destId).then((r) => afterMoveCopy(r, 'Copy')),
+    setContent: (id: string, data: string | Blob, force = false) =>
+      api.setContent(id, data, force).then(invalidate),
   }
 }

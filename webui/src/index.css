@@ -201,6 +201,15 @@ body {
 .dialog-actions button.danger { border-color: #d33; color: #d33; }
 .dialog-actions button:disabled { opacity: 0.5; cursor: default; }
 .ack { display: flex; align-items: center; gap: 0.4rem; font-size: 0.9em; }
+.warn { color: #d33; font-size: 0.9em; }
+.modal:has(.editor) { width: min(56rem, 94vw); }
+.editor {
+  width: 100%; min-height: 50vh; resize: vertical; box-sizing: border-box;
+  padding: 0.6rem; border: 1px solid var(--border); border-radius: 7px;
+  background: var(--bg); color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem; line-height: 1.4; tab-size: 2;
+}
 
 .picker { display: flex; flex-direction: column; gap: 0.6rem; }
 .picker-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 0.1rem; }

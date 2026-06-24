@@ -12,3 +12,14 @@ export function humanBytes(n: number): string {
 export function humanRate(bytesPerSec: number): string {
   return `${humanBytes(bytesPerSec)}/s`
 }
+
+// Whether a mime is text we can safely edit as UTF-8 in a textarea. Covers
+// text/* plus the common structured-text application/* types; everything else
+// (images, video, octet-stream, …) is treated as binary → view only.
+const TEXT_APPLICATION = /^application\/(json|xml|x-yaml|yaml|javascript|x-sh|toml|x-ndjson|sql)$/
+
+export function isTextMime(mime: string | null): boolean {
+  if (!mime) return false
+  const m = mime.split(';')[0].trim().toLowerCase()
+  return m.startsWith('text/') || m.endsWith('+json') || m.endsWith('+xml') || TEXT_APPLICATION.test(m)
+}

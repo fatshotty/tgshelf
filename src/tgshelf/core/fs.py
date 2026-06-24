@@ -47,6 +47,12 @@ class NotAFolder(Exception):
     """The destination of a move/copy exists but is not a folder."""
 
 
+class InlineTooLarge(Exception):
+    """An in-place content edit would push an inline (DB-stored) file past the
+    inline threshold (min_size). The caller must opt in (force) to convert it to
+    a Telegram-backed file instead — surfaced as 409 by the HTTP layer."""
+
+
 class IntegrityViolation(Exception):
     """A file's expected size (node.size, frozen when the content is defined)
     disagrees with its effective size (inline = len(content); parts =
@@ -501,6 +507,76 @@ class FileSystem:
         # correct write; a guard, not a recovery path.
         await self.check_size(node.id)
         return await self.repo.get(node.id)
+
+    async def replace_content(
+        self, node_id: str, data: bytes, *, force: bool = False
+    ) -> Node:
+        """Overwrite the body of an INLINE (DB-stored) file in place.
+
+        Editing is restricted to inline files (Telegram-backed ones would mean
+        re-chunking + re-uploading the whole file → use overwrite upload). The
+        new body keeps the file inline while it stays within `min_size`; once it
+        grows past the threshold the file must become Telegram-backed, which only
+        happens with `force=True` (otherwise InlineTooLarge → 409). `mtime` is
+        bumped so the /download ETag and the rclone VFS invalidate.
+        """
+        node = await self.repo.get(node_id)
+        if node is None or node.is_folder or node.state != "ACTIVE":
+            raise NotAReadableFile(f"node {node_id} is not a readable file")
+        if await self.repo.content_of(node_id) is None:
+            raise ValueError(
+                "only inline (DB-stored) files can be edited; "
+                f"file {node_id} is Telegram-backed"
+            )
+
+        if len(data) <= self._min_size:
+            await self.repo.set_fields(
+                node_id, content=data, size=len(data), mtime=func.now()
+            )
+            await self.repo.session.commit()
+            return await self.repo.get(node_id)
+
+        # The edit overflows the inline threshold: convert to Telegram-backed.
+        if not force:
+            raise InlineTooLarge(
+                f"content ({len(data)} bytes) exceeds the inline limit "
+                f"({self._min_size}); pass force to store it on Telegram"
+            )
+        if self._uploader is None:
+            raise ValueError("uploader unavailable: cannot store content on Telegram")
+
+        channel = node.channel_id or await self.effective_channel(node.parent_id)
+
+        async def persist_part(rec: PartRecord) -> None:
+            await self.repo.add_part(
+                node_id, idx=rec.idx, channel_id=rec.channel_id,
+                message_id=rec.message_id, doc_id=rec.doc_id,
+                size=rec.size, original_filename=rec.original_filename,
+            )
+            await self.repo.session.commit()
+
+        async def reset_parts() -> None:
+            await self.repo.clear_parts(node_id)
+            await self.repo.session.commit()
+
+        def source_factory() -> AsyncIterator[bytes]:
+            async def gen() -> AsyncIterator[bytes]:
+                yield data
+
+            return gen()
+
+        result = await self._uploader.upload(
+            source_factory, filename=node.name, mime=node.mime, channel_id=channel,
+            min_size=self._min_size, on_part=persist_part, on_reset=reset_parts,
+        )
+        # Drop the inline body now that the parts are durable; size follows the
+        # parts. (force-path data is always > min_size, so it never stays inline.)
+        await self.repo.set_fields(
+            node_id, content=None, size=result.size, mtime=func.now()
+        )
+        await self.repo.session.commit()
+        await self.check_size(node_id)
+        return await self.repo.get(node_id)
 
     # -- integrity ----------------------------------------------------------
 

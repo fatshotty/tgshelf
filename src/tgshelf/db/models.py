@@ -28,7 +28,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, column_property, mapped_column
 
 from tgshelf.constants import ROOT_ID
 
@@ -88,6 +88,14 @@ class Node(Base):
             postgresql_where=text("channel_id IS NOT NULL"),
         ),
     )
+
+
+# Computed (not stored): True when an inline body is present, i.e. the file is
+# stored in the DB rather than backed by Telegram parts (content is NULL there).
+# A SQL expression — `content IS NOT NULL` is added to the SELECT, the blob bytes
+# are NEVER transferred (content stays deferred). Lets the API/WebUI tell which
+# files are editable in place without dragging the body along.
+Node.inline = column_property(Node.content.isnot(None))
 
 
 class Part(Base):

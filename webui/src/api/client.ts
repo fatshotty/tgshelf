@@ -72,6 +72,26 @@ export const api = {
   reorderParts: (nodeId: string, order: number[]) =>
     request<FsNode>('PUT', `/api/v1/nodes/${id(nodeId)}/parts`, { body: { order } }),
 
+  // -- inline file content (edit)
+  fileContent: async (nodeId: string): Promise<string> => {
+    const resp = await fetch(downloadUrl(nodeId), { headers: { ...authHeaders() } })
+    if (!resp.ok) throw new ApiError(resp.status, resp.statusText)
+    return resp.text()
+  },
+  setContent: async (nodeId: string, data: string | Blob, force = false): Promise<FsNode> => {
+    const url = new URL(`/api/v1/nodes/${id(nodeId)}/content`, window.location.origin)
+    if (force) url.searchParams.set('force', 'true')
+    const resp = await fetch(url, {
+      method: 'PUT',
+      headers: { ...authHeaders(), 'Content-Type': 'application/octet-stream' },
+      body: data,
+    })
+    const text = await resp.text()
+    const parsed = text ? JSON.parse(text) : undefined
+    if (!resp.ok) throw new ApiError(resp.status, parsed?.error ?? resp.statusText)
+    return parsed as FsNode
+  },
+
   // -- ops
   getMetrics: () => request<MetricsSnapshot>('GET', '/metrics'),
 

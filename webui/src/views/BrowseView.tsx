@@ -5,6 +5,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { api, ApiError } from '../api/client'
 import type { FsNode } from '../api/types'
 import { ConfirmDialog, PromptDialog, SizeDialog } from '../components/dialogs'
+import { FileEditDialog } from '../components/FileEditDialog'
 import { FolderPicker } from '../components/FolderPicker'
 import { NodeList } from '../components/NodeList'
 import type { NodeAction } from '../components/NodeMenu'
@@ -15,6 +16,7 @@ import { browseUrl, fsPath, pathSegments } from '../lib/path'
 // which modal (if any) is open, and on which node
 type Dialog =
   | { kind: 'newFolder' }
+  | { kind: 'edit'; node: FsNode }
   | { kind: 'rename'; node: FsNode }
   | { kind: 'setChannel'; node: FsNode }
   | { kind: 'delete'; node: FsNode }
@@ -52,6 +54,7 @@ export default function BrowseView() {
 
   const onAction = (node: FsNode, a: NodeAction) => {
     if (a === 'size') setDialog({ kind: 'size', node })
+    else if (a === 'edit') setDialog({ kind: 'edit', node })
     else if (a === 'rename') setDialog({ kind: 'rename', node })
     else if (a === 'setChannel') setDialog({ kind: 'setChannel', node })
     else if (a === 'move') setDialog({ kind: 'move', node })
@@ -124,6 +127,13 @@ export default function BrowseView() {
       )}
       {dialog?.kind === 'size' && (
         <SizeDialog nodeId={dialog.node.id} name={dialog.node.name} onClose={() => setDialog(null)} />
+      )}
+      {dialog?.kind === 'edit' && (
+        <FileEditDialog
+          node={dialog.node}
+          onClose={() => setDialog(null)}
+          onSave={(data, force) => actions.setContent(dialog.node.id, data, force)}
+        />
       )}
       {dialog?.kind === 'rename' && (
         <PromptDialog

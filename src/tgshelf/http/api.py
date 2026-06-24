@@ -177,6 +177,30 @@ async def update_node(request: web.Request) -> web.Response:
         return web.json_response(node_to_dict(await fs.get(node_id)))
 
 
+_MAX_INLINE_EDIT = 256 * 1024 * 1024  # cap the in-memory read for an edit
+
+
+async def replace_content(request: web.Request) -> web.Response:
+    """PUT raw body = the new file body. Only INLINE (DB-stored) files are
+    editable; a body within min_size stays inline, a larger one needs `?force=`
+    to convert the file to Telegram-backed (fs raises InlineTooLarge → 409
+    otherwise). Telegram-backed files are rejected (ValueError → 400)."""
+    node_id = request.match_info["id"]
+    force = _truthy(request.query.get("force", ""))
+    if request.content_length is not None and request.content_length > _MAX_INLINE_EDIT:
+        return _bad_request(f"content exceeds the {_MAX_INLINE_EDIT}-byte edit limit")
+    data = await request.read()
+    async with open_fs(request) as fs:
+        node = await fs.get(node_id)
+        if node is None:
+            return _not_found(f"node {node_id} not found")
+        if node.is_folder:
+            return _bad_request("a folder has no content")
+        updated = await fs.replace_content(node_id, data, force=force)
+        log.info("edited content of %s (%d bytes, force=%s)", node_id, len(data), force)
+        return web.json_response(node_to_dict(updated))
+
+
 async def delete_node(request: web.Request) -> web.Response:
     node_id = request.match_info["id"]
     purge = _truthy(request.query.get("purge", ""))
@@ -350,6 +374,7 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/api/v1/search", search)
     app.router.add_post("/api/v1/folders", create_folder)
     app.router.add_put("/api/v1/nodes/{id}", update_node)
+    app.router.add_put("/api/v1/nodes/{id}/content", replace_content)
     app.router.add_delete("/api/v1/nodes/{id}", delete_node)
     app.router.add_post("/api/v1/nodes/{id}/restore", restore_node)
     app.router.add_post("/api/v1/nodes/{id}/move", move_node)

@@ -81,11 +81,11 @@ def make_auth_middleware(config: HttpConfig):
 def _domain_status(exc: Exception) -> int | None:
     """Map a domain exception to an HTTP status (None = unhandled → 500)."""
     from tgshelf.core.download import RangeNotSatisfiable
-    from tgshelf.core.fs import NotAFolder, NotAReadableFile
+    from tgshelf.core.fs import InlineTooLarge, NotAFolder, NotAReadableFile
     from tgshelf.db.repo import DuplicateNameError
     from tgshelf.telegram.errors import ChannelUnavailable, FloodCooldown, PartMissing
 
-    if isinstance(exc, DuplicateNameError):
+    if isinstance(exc, (DuplicateNameError, InlineTooLarge)):
         return 409
     if isinstance(exc, NotAReadableFile):
         return 404

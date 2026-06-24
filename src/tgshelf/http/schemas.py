@@ -16,6 +16,7 @@ def node_to_dict(node: Node) -> dict[str, Any]:
         "channel_id": node.channel_id,
         "state": node.state,
         "size": node.size,
+        "inline": bool(node.inline),
         "ctime": node.ctime.isoformat() if node.ctime else None,
         "mtime": node.mtime.isoformat() if node.mtime else None,
         "info": node.info,

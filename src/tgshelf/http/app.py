@@ -7,7 +7,6 @@ open. IPv6 / missing remote are handled gracefully (the legacy crashed on them).
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import binascii
 import ipaddress
@@ -17,6 +16,7 @@ from typing import Any
 from aiohttp import web
 
 from tgshelf.config import HttpConfig
+from tgshelf.log import CLIENT_DISCONNECT, describe_exc
 
 log = logging.getLogger("tgshelf.http")
 
@@ -107,8 +107,10 @@ def _domain_status(exc: Exception) -> int | None:
 
 # a client closing the connection mid-response (very common for the interrupted
 # range requests of a streaming player) surfaces as one of these; it is not a
-# server fault, so it must not produce a 500 stacktrace.
-_CLIENT_GONE = (ConnectionResetError, ConnectionError, asyncio.CancelledError)
+# server fault, so it must not produce a 500 stacktrace. See CLIENT_DISCONNECT:
+# it pointedly excludes ConnectionRefusedError (an unreachable DB) so that is no
+# longer mistaken for a client disconnect and silently swallowed.
+_CLIENT_GONE = CLIENT_DISCONNECT
 
 
 @web.middleware
@@ -128,8 +130,14 @@ async def error_middleware(request: web.Request, handler):
     except Exception as exc:  # noqa: BLE001
         status = _domain_status(exc)
         if status is not None:
+            # an expected, mapped condition (4xx/5xx). One INFO line, no stacktrace.
+            log.info("%s %s -> %d: %s", request.method, request.path, status, describe_exc(exc))
             return web.json_response({"error": str(exc)}, status=status)
-        log.exception("unhandled error serving %s %s", request.method, request.path)
+        # a genuine server fault: ALWAYS one ERROR line naming the exception
+        # chain (so an unreachable DB reads as 'OperationalError <- ConnectionRefusedError:
+        # Connection refused', not a bare 500), plus the full stacktrace.
+        log.error("unhandled error serving %s %s: %s",
+                  request.method, request.path, describe_exc(exc), exc_info=exc)
         return web.json_response({"error": str(exc)}, status=500)
 
 

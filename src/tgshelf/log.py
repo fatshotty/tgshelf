@@ -24,6 +24,38 @@ LEVELS = {
 
 NOISY_LOGGERS = ("telethon", "aiohttp.access", "sqlalchemy.engine", "alembic")
 
+# Exceptions that mean "the peer we are writing to went away", never a server
+# fault: a reset/aborted/broken socket, or the cooperative cancellation aiohttp
+# raises (handler_cancellation) when the client disconnects mid-stream. These
+# are logged quietly (no stacktrace) wherever they surface.
+#
+# Deliberately EXCLUDES the broad `ConnectionError`: `ConnectionRefusedError`,
+# DNS `gaierror`, `TimeoutError` etc. are OUTBOUND connect failures (the DB or an
+# upstream is down/misconfigured) and MUST surface as real errors — they used to
+# be swallowed here, hiding a dead-DB 500 with no log at all.
+CLIENT_DISCONNECT = (
+    ConnectionResetError,
+    ConnectionAbortedError,
+    BrokenPipeError,
+    asyncio.CancelledError,
+)
+
+
+def describe_exc(exc: BaseException) -> str:
+    """A compact one-line ``Type: message`` chain following ``__cause__`` /
+    ``__context__``. A SQLAlchemy error wrapping an asyncpg/OS error shows the
+    underlying driver cause too, so the real reason ('Connection refused', name
+    resolution, …) is visible without expanding the stacktrace."""
+    parts: list[str] = []
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        message = str(cur).strip()
+        parts.append(f"{type(cur).__name__}: {message}" if message else type(cur).__name__)
+        cur = cur.__cause__ or cur.__context__
+    return "  <-  ".join(parts)
+
 # request/stream correlation id: set once per HTTP stream or per CLI download
 # file, it tags EVERY log line emitted while serving it (handler + streamer
 # workers, which inherit the context via asyncio.create_task). Grep one id to
@@ -55,14 +87,16 @@ class _RequestIdFilter(logging.Filter):
 
 
 class _DropConnectionErrors(logging.Filter):
-    """Drop records whose exception is a client-disconnect (ConnectionError /
-    reset / cancellation). aiohttp's server logger reports these as "Error
+    """Drop records whose exception is a client-disconnect (socket reset /
+    aborted / cancellation). aiohttp's server logger reports these as "Error
     handling request" with a stacktrace when a streaming client goes away mid
-    response — noise, not a server fault. Real errors keep their stacktrace."""
+    response — noise, not a server fault. Real errors (incl. an unreachable DB,
+    which is a ConnectionRefusedError, NOT a client disconnect) keep their
+    stacktrace — see CLIENT_DISCONNECT."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         exc = record.exc_info[1] if record.exc_info else None
-        return not isinstance(exc, (ConnectionError, asyncio.CancelledError))
+        return not isinstance(exc, CLIENT_DISCONNECT)
 
 
 # telethon WARNING prefixes that are benign chatter, not faults: the server

@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Callable
 
 from tgshelf.config import Config
 from tgshelf.core.fs import FileSystem
@@ -77,12 +78,50 @@ async def _do_ls(fs: FileSystem, path: str) -> int:
     return 0
 
 
-async def _do_du(fs: FileSystem, path: str) -> int:
+def _make_confirm(assume_yes: bool) -> Callable[[object], bool]:
+    """Build the `cat` confirmation gate. `--yes` auto-confirms. Otherwise the
+    prompt is written to stderr and the answer read from stdin, so `cat > file`
+    keeps stdout clean for the bytes; a non-interactive/empty answer declines."""
+    def confirm(node) -> bool:
+        if assume_yes:
+            return True
+        print(
+            f"'{node.name}' is {_human(node.size)} ({node.size} bytes), over the inline "
+            "limit — print raw bytes to stdout? [y/N] ",
+            end="", file=sys.stderr, flush=True,
+        )
+        return sys.stdin.readline().strip().lower() in ("y", "yes")
+    return confirm
+
+
+async def _do_cat(
+    fs: FileSystem, path: str, *, min_size: int, confirm: Callable[[object], bool], out=None
+) -> int:
+    """Print a file's bytes to `out` (default: stdout, binary). A file larger than
+    the inline DB limit (min_size) is Telegram-backed and may be huge, so dumping
+    it is gated behind `confirm(node)`; if declined no bytes are written."""
+    node = await fs.resolve(path)
+    if node is None:
+        return _err(f"path not found: {path}")
+    if node.is_folder:
+        return _err(f"path is a folder, not a file: {path}")
+    if node.size > min_size and not confirm(node):
+        print("aborted", file=sys.stderr)
+        return 0
+    buffer = out if out is not None else sys.stdout.buffer
+    async for chunk in fs.open_read(node.id):
+        buffer.write(chunk)
+    buffer.flush()
+    return 0
+
+
+async def _do_du(fs: FileSystem, path: str, *, human: bool = False) -> int:
     node = await fs.resolve(path)
     if node is None:
         return _err(f"path not found: {path}")
     total = await fs.total_size(node.id)
-    print(f"{total}\t{_human(total)}\t{path}")
+    size = _human(total) if human else str(total)
+    print(f"{size}\t{path}")
     return 0
 
 
@@ -192,6 +231,22 @@ async def run(config: Config, args) -> int:
     if cmd == "ls":
         async with _db_fs(config) as fs:
             return await _do_ls(fs, args.path)
+    if cmd == "cat":
+        min_size = config.telegram.upload.min_size
+        # peek over Postgres: inline (DB-stored) files print straight from the DB
+        # with no Telegram connection; only a Telegram-backed file needs the streamer.
+        async with _db_fs(config) as fs:
+            node = await fs.resolve(args.path)
+            if node is None:
+                return _err(f"path not found: {args.path}")
+            if node.is_folder:
+                return _err(f"path is a folder, not a file: {args.path}")
+            if await fs.repo.content_of(node.id) is not None:
+                return await _do_cat(fs, args.path, min_size=min_size,
+                                     confirm=_make_confirm(args.yes))
+        async with _telegram_fs(config) as tfs:
+            return await _do_cat(tfs, args.path, min_size=min_size,
+                                 confirm=_make_confirm(args.yes))
     if cmd == "du":
         async with _db_fs(config) as fs:
             return await _do_du(fs, args.path, human=args.human)

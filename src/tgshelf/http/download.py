@@ -23,7 +23,7 @@ from urllib.parse import quote
 from aiohttp import web
 
 from tgshelf.http.api import open_fs
-from tgshelf.log import new_request_id
+from tgshelf.log import CLIENT_DISCONNECT, new_request_id
 from tgshelf.telegram.errors import ChannelUnavailable, FloodCooldown, PartMissing
 
 log = logging.getLogger("tgshelf.http.download")
@@ -31,7 +31,7 @@ log = logging.getLogger("tgshelf.http.download")
 # A streaming client closing mid-transfer surfaces here as one of these while
 # writing to the socket. It is not a server fault: swallow it where it happens
 # so nothing escapes to be logged with a stacktrace (by us OR by aiohttp.server).
-_CLIENT_GONE = (ConnectionResetError, ConnectionError, asyncio.CancelledError)
+_CLIENT_GONE = CLIENT_DISCONNECT
 
 # the streamer exhausted its failover (every bot flooding/unavailable) or the
 # part is gone from Telegram: an expected backend condition, not a server bug.

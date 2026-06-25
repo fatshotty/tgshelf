@@ -19,8 +19,9 @@ from tgshelf.config import Config, RateLimitConfig
 from tgshelf.constants import PART_SIZE
 from tgshelf.core.executor import FsExecutor
 from tgshelf.core.uploader import Uploader
-from tgshelf.db.engine import create_engine, create_session_factory
+from tgshelf.db.engine import check_connection, create_engine, create_session_factory
 from tgshelf.http.app import make_app
+from tgshelf.log import describe_exc
 from tgshelf.looplag import start_loop_lag_monitor, stop_loop_lag_monitor
 from tgshelf.telegram.pool import BotPool, ClientPool, PoolMember
 from tgshelf.telegram.ratelimit import InMemoryRateLimiter
@@ -171,12 +172,27 @@ async def start_clients(config: Config, rate_limiter) -> list[tuple[Any, Any]]:
     return clients
 
 
+async def _verify_db(engine) -> None:
+    """Ping the DB at startup so an unreachable/misconfigured one fails fast with
+    the driver's real error, instead of surfacing only on the first request."""
+    url = engine.url.render_as_string(hide_password=True)  # never log credentials
+    log.info("checking database connection (%s)", url)
+    try:
+        await check_connection(engine)
+    except Exception as exc:  # noqa: BLE001 - surface ANY connect failure clearly
+        raise ServeError(
+            f"cannot connect to the database {url}: {describe_exc(exc)}"
+        ) from exc
+    log.info("database connection ok")
+
+
 async def run_server(config: Config) -> None:
     if not config.http.enabled:
         raise ServeError("http.enabled is false; nothing to serve")
 
     engine = create_engine(config.db)
     session_factory = create_session_factory(engine)
+    await _verify_db(engine)  # fail fast on a dead/misconfigured DB
     rate_limiter = make_rate_limiter(config.telegram.rate_limit)
 
     clients = await start_clients(config, rate_limiter)

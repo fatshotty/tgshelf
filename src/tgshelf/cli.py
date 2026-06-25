@@ -26,6 +26,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "bots": ("check/repair bot membership on all channels in use", "C4"),
     "mkdir": ("create a folder (with parents) in the virtual filesystem", "C2"),
     "ls": ("list a folder of the virtual filesystem", "C2"),
+    "cat": ("print a file's contents to stdout", "C2"),
     "du": ("total size of a file or folder (recursive)", "C2"),
     "cp": ("copy files/folders", "C2"),
     "mv": ("move files/folders", "C2"),
@@ -53,6 +54,10 @@ def build_parser() -> argparse.ArgumentParser:
             _add_accounts_subparsers(cmd)
         elif name in ("ls", "rm", "purge", "mkdir"):
             cmd.add_argument("path", help="path of a folder or file")
+        elif name == "cat":
+            cmd.add_argument("path", help="path of the file to print")
+            cmd.add_argument("-y", "--yes", action="store_true",
+                             help="skip the confirmation when the file exceeds the inline limit")
         elif name == "du":
             cmd.add_argument("path", help="path of a folder or file")
             cmd.add_argument("-H", "--human", action="store_true",
@@ -135,7 +140,7 @@ def _dispatch(config: Config, args: argparse.Namespace) -> int:
 
         return asyncio.run(accounts.run(config, args))
 
-    if args.command in ("mkdir", "ls", "du", "cp", "mv", "rm", "purge"):
+    if args.command in ("mkdir", "ls", "cat", "du", "cp", "mv", "rm", "purge"):
         from tgshelf.commands import fsops
 
         return asyncio.run(fsops.run(config, args))

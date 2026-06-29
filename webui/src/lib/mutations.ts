@@ -37,5 +37,15 @@ export function useTreeActions(folderId: string | undefined, path: string) {
     copy: (id: string, destId: string) => api.copyNode(id, destId).then((r) => afterMoveCopy(r, 'Copy')),
     setContent: (id: string, data: string | Blob, force = false) =>
       api.setContent(id, data, force).then(invalidate),
+    mergeParts: (id: string, donorIds: string[]) =>
+      api.mergeNode(id, donorIds).then(() => {
+        invalidate()
+        qc.invalidateQueries({ queryKey: ['parts', id] })
+      }),
+    reorderParts: (id: string, order: number[]) =>
+      api.reorderParts(id, order).then(() => {
+        invalidate()
+        qc.invalidateQueries({ queryKey: ['parts', id] })
+      }),
   }
 }

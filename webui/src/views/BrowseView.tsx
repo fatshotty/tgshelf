@@ -9,6 +9,7 @@ import { FileEditDialog } from '../components/FileEditDialog'
 import { FolderPicker } from '../components/FolderPicker'
 import { NodeList } from '../components/NodeList'
 import type { NodeAction } from '../components/NodeMenu'
+import { PartsDialog } from '../components/PartsDialog'
 import { useToast } from '../components/Toast'
 import { useTreeActions } from '../lib/mutations'
 import { browseUrl, fsPath, pathSegments } from '../lib/path'
@@ -17,6 +18,7 @@ import { browseUrl, fsPath, pathSegments } from '../lib/path'
 type Dialog =
   | { kind: 'newFolder' }
   | { kind: 'edit'; node: FsNode }
+  | { kind: 'parts'; node: FsNode }
   | { kind: 'rename'; node: FsNode }
   | { kind: 'setChannel'; node: FsNode }
   | { kind: 'delete'; node: FsNode }
@@ -55,6 +57,7 @@ export default function BrowseView() {
   const onAction = (node: FsNode, a: NodeAction) => {
     if (a === 'size') setDialog({ kind: 'size', node })
     else if (a === 'edit') setDialog({ kind: 'edit', node })
+    else if (a === 'parts') setDialog({ kind: 'parts', node })
     else if (a === 'rename') setDialog({ kind: 'rename', node })
     else if (a === 'setChannel') setDialog({ kind: 'setChannel', node })
     else if (a === 'move') setDialog({ kind: 'move', node })
@@ -133,6 +136,15 @@ export default function BrowseView() {
           node={dialog.node}
           onClose={() => setDialog(null)}
           onSave={(data, force) => actions.setContent(dialog.node.id, data, force)}
+        />
+      )}
+      {dialog?.kind === 'parts' && (
+        <PartsDialog
+          node={dialog.node}
+          candidates={nodes}
+          onClose={() => setDialog(null)}
+          onMerge={(donorIds) => actions.mergeParts(dialog.node.id, donorIds)}
+          onReorder={(order) => actions.reorderParts(dialog.node.id, order)}
         />
       )}
       {dialog?.kind === 'rename' && (

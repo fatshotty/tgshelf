@@ -123,6 +123,6 @@ When reviewing code in this project, prioritize:
 ## Current Direction
 
 At the time this file was created, documented next areas include Web UI upload,
-Web UI parts management, Docker/compose runbook work, and several future
-hardening items called out in `AGENTS.md` and `docs/PLAN.md`. Re-check those
-documents before starting evolutionary work because they are the source of truth.
+Docker/compose runbook work, and several future hardening items called out in
+`AGENTS.md` and `docs/PLAN.md`. Re-check those documents before starting
+evolutionary work because they are the source of truth.

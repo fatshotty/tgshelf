@@ -213,9 +213,17 @@ The Web UI lives in `webui/` and is served from
 - browse/search;
 - stats via SSE metrics;
 - tree management;
-- inline editing for DB-inline files.
+- inline editing for DB-inline files;
+- parts management for Telegram-backed files: list/reorder parts and merge donor
+  files from the current folder.
 
-Planned next areas are upload and parts management.
+The backend and OpenAPI already expose file-parts management primitives:
+`POST /api/v1/nodes/{id}/merge`, `GET /api/v1/nodes/{id}/parts`, and
+`PUT /api/v1/nodes/{id}/parts`. The Web UI API client has matching
+`mergeNode`, `listParts`, and `reorderParts` methods, and the browse view exposes
+them through a Parts dialog on Telegram-backed files.
+
+Planned next area is upload.
 
 ## rclone Integration
 
@@ -252,7 +260,7 @@ New engines or operational flows should add similarly clear markers.
 ## Current Known Gaps
 
 - Complete Docker/compose/cutover documentation is still pending.
-- Web UI upload and parts management are pending.
+- Web UI upload is pending.
 - Full notifier event catalog coverage is incremental.
 - Explicit recovery notifications for pool recovery are still pending.
 - Automatic watcher reconciliation after downtime is still future work.

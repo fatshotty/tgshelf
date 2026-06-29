@@ -1,37 +1,37 @@
 # tgshelf
 
-Cloud storage su Telegram con un vero filesystem virtuale.
+Telegram as real cloud storage: a virtual filesystem backed by Telegram
+channels, with HTTP upload/download endpoints for files of any size. Multi-GB
+files are split into parts and reassembled transparently.
 
-`tgshelf` salva i payload dei file nei canali Telegram e mantiene i metadati del
-filesystem in PostgreSQL. Espone cartelle e file tramite CLI Python, API aiohttp,
-endpoint HTTP per download, WebDAV/rclone e una Web UI React.
+`tgshelf` stores file payloads in Telegram channels and keeps filesystem
+metadata in PostgreSQL. It exposes folders and files through the Python CLI,
+aiohttp APIs, HTTP download endpoints, WebDAV/rclone, and a React Web UI.
 
+## Features
 
-## Cosa offre
-
-- Metadati in PostgreSQL per un albero virtuale con node id stabili da 10
-  caratteri.
-- Canali Telegram come layer di storage fisico, con ereditarietà opzionale del
-  canale per cartella.
-- Storage inline nel DB per file piccoli e storage multipart su Telegram per file
-  più grandi.
-- Download HTTP `/download/{file_id}` con supporto Range, parità HEAD/GET,
-  ETag, 304 e 416.
-- Download parallelo tramite più bot o account utente, con failover,
-  cooldown e fallback opzionale sugli utenti.
-- Operazioni filesystem: creazione cartelle, rename, move, copy, soft delete,
-  restore, purge, search, size ricorsiva, merge parts, split parts e reorder
+- PostgreSQL metadata for a virtual tree with stable 10-character node IDs.
+- Telegram channels as the physical storage layer, with optional per-folder
+  channel inheritance.
+- Inline DB storage for small files and multipart Telegram storage for larger
+  files.
+- HTTP downloads through `/download/{file_id}` with Range support, HEAD/GET
+  parity, ETag, 304, and 416 handling.
+- Parallel downloads through multiple bots or user accounts, with failover,
+  cooldowns, and optional user-account fallback.
+- Filesystem operations: create folders, rename, move, copy, soft delete,
+  restore, purge, search, recursive size, merge parts, split parts, and reorder
   parts.
-- Workflow CLI per account/sessioni, operazioni filesystem, sync, download,
-  generazione `.strm`, controllo bot.
-- Web UI per browse, ricerca, metriche, gestione tree, editing inline di testi e
-  gestione delle parti dei file Telegram-backed.
-- Endpoint WebDAV per rclone, più invalidazione opzionale della cache rc di
-  rclone tramite changes feed PostgreSQL.
-- Watcher live opzionale per importare file pubblicati nel canale master mentre
-  il server è in esecuzione.
-- Osservabilità tramite `/status`, `/metrics`, `/metrics.txt`, metriche SSE per
-  Web UI, log strutturati e notifiche Telegram opzionali.
+- CLI workflows for accounts/sessions, filesystem operations, sync, download,
+  `.strm` generation, and bot checks.
+- Web UI for browsing, search, metrics, tree management, inline text editing,
+  and Telegram-backed file-part management.
+- WebDAV endpoint for rclone, plus optional rclone rc cache invalidation through
+  the PostgreSQL changes feed.
+- Optional live watcher that imports files posted to the master channel while
+  the server is running.
+- Observability through `/status`, `/metrics`, `/metrics.txt`, Web UI SSE
+  metrics, structured logs, and optional Telegram notifications.
 
 ## Stack
 
@@ -42,16 +42,16 @@ endpoint HTTP per download, WebDAV/rclone e una Web UI React.
 - aiohttp
 - Vite + React
 
-## Note sulle performance
+## Performance Notes
 
-Il throughput Telegram dipende da tipo di account, datacenter, rete del server e
-limiti lato Telegram. Nei test locali, il download parallelo può aggregare più
-bot/account per aumentare il throughput effettivo finché il deployment non
-raggiunge i limiti di Telegram o della rete.
+Telegram throughput depends on account type, datacenter, server network, and
+Telegram-side limits. In local testing, parallel downloads can aggregate multiple
+bots/accounts to increase effective throughput until the deployment reaches
+Telegram or network limits.
 
-## Setup di sviluppo
+## Development Setup
 
-Crea una virtualenv e installa il pacchetto Python in modalità editable:
+Create a virtual environment and install the Python package in editable mode:
 
 ```sh
 python3 -m venv .venv
@@ -59,19 +59,19 @@ python3 -m venv .venv
 python -m pip install -e ".[dev]"
 ```
 
-Crea e modifica la configurazione runtime:
+Create and edit the runtime configuration:
 
 ```sh
 cp config.example.yaml config.yaml
 ```
 
-Prepara il database:
+Prepare the database:
 
 ```sh
 alembic upgrade head
 ```
 
-Compila la Web UI quando vuoi servire gli asset statici dall'app Python:
+Build the Web UI when you want the Python app to serve the static assets:
 
 ```sh
 cd webui
@@ -79,13 +79,13 @@ npm install
 npm run build
 ```
 
-Avvia il server:
+Start the server:
 
 ```sh
 tgshelf --config config.yaml serve
 ```
 
-## Verifica
+## Verification
 
 Python:
 
@@ -101,32 +101,32 @@ npm run typecheck
 npm run build
 ```
 
-## Configurazione
+## Configuration
 
 ```yaml
-# Configurazione di esempio: tutti i valori sensibili sono dummy.
-# Non usare api_id, api_hash, bot_token o channel così come sono.
+# Example configuration: all sensitive values are dummy values.
+# Do not use api_id, api_hash, bot_token, or channel as-is.
 
-data: ./data            # directory locale per sessioni file e stato runtime
+data: ./data            # local directory for file sessions and runtime state
 
-# DSN PostgreSQL. La variabile d'ambiente DB sovrascrive questo valore.
+# PostgreSQL DSN. The DB environment variable overrides this value.
 db: postgresql+asyncpg://DB_USER:DB_PASS@DB_HOST:DB_PORT/DB_NAME
 
 logger: info            # no | error | warn | info | debug
 
-# Dove salvare le sessioni Telegram:
-#   db   = tabella tg_sessions, consigliato per istanze singole
-#   file = {data}/{name}.session, utile quando ogni istanza ha sessioni proprie
+# Where Telegram sessions are stored:
+#   db   = tg_sessions table, recommended for single-instance deployments
+#   file = {data}/{name}.session, useful when each instance owns its sessions
 session_storage: db
 
-# Numero di connessioni TCP per client Telegram sul data path.
-# 0 o 1 = comportamento standard; 2 = valore prudente; sopra 3 è sconsigliato.
+# TCP connections per Telegram client on the data path.
+# 0 or 1 = standard behavior; 2 = conservative boost; above 3 is discouraged.
 concurrent_tcp_connections: 1
 
 telegram:
-  users:                # account utente e bot; i bot hanno bot_token
+  users:                # user accounts and bots; bots include bot_token
     - name: main
-      api_id: 123456    # dummy: sostituisci con il tuo api_id Telegram
+      api_id: 123456    # dummy: replace with your Telegram api_id
       api_hash: "0123456789abcdef0123456789abcdef"  # dummy
     - name: bot01
       api_id: 123456    # dummy
@@ -134,29 +134,29 @@ telegram:
       bot_token: "123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"  # dummy
 
   upload:
-    # I file <= min_size byte restano inline nel DB, non su Telegram.
-    # Deve essere un multiplo di 524288, la dimensione parte Telegram.
+    # Files <= min_size bytes stay inline in the DB, not on Telegram.
+    # Must be a multiple of 524288, the Telegram part size.
     min_size: 2097152
-    # Canale master mappato alla root "/". Dummy: sostituisci con il tuo -100...
+    # Master channel mapped to root "/". Dummy: replace with your -100...
     channel: -1001234567890
 
-  # Watcher opzionale: bot dedicato, diverso dai bot in telegram.users.
-  # Deve essere admin del canale master. Importa solo i file pubblicati mentre
-  # `serve` è in esecuzione.
+  # Optional watcher: a dedicated bot, separate from telegram.users bots.
+  # It must be an admin of the master channel. It only imports files posted
+  # while `serve` is running.
   main_bot:
     api_id: 123456      # dummy
     api_hash: "0123456789abcdef0123456789abcdef"  # dummy
     bot_token: "987654321:AAyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"  # dummy
 
   notify:
-    # Bot HTTP API opzionale per notifiche CRITICAL/ERROR.
-    # Vuoto = solo log locali.
-    bot_token:          # opzionale, dummy se valorizzato
-    # Destinazione opzionale: id numerico (-100.../-...) o @username.
-    # Vuoto = canale master configurato sopra.
+    # Optional Bot HTTP API sender for CRITICAL/ERROR notifications.
+    # Empty = local logs only.
+    bot_token:          # optional; dummy if set
+    # Optional destination: numeric ID (-100.../-...) or @username.
+    # Empty = the master channel configured above.
     channel:
-    # Template opzionale delle notifiche. Ogni riga con placeholder senza valore
-    # viene omessa, così puoi riordinare o togliere campi senza label vuote.
+    # Optional notification template. Lines with placeholders that have no value
+    # are omitted, so fields can be reordered or removed without empty labels.
     template: |
       [tgshelf:{severity}] {title}
 
@@ -174,95 +174,94 @@ telegram:
       Key: {key}
     warning_window: 300
 
-  # Rate limit proattivo per account. calls=0 disabilita.
-  # coordination=redis è una estensione prevista, non ancora implementata.
+  # Proactive per-account rate limit. calls=0 disables it.
+  # coordination=redis is a planned extension, not implemented yet.
   rate_limit:
     calls: 0
     window: 1.0
     coordination: memory
 
 download:
-  multi_bot_download: 3         # bot paralleli per download; 1 = sequenziale
-  allow_user_fallback: false    # usa account utente se il pool bot è esaurito
-  chunk_timeout: 6              # secondi senza chunk prima di sostituire il bot
-  # Soglia soft dei buffer stimati. 0 = disabilitata.
+  multi_bot_download: 3         # parallel bots per download; 1 = sequential
+  allow_user_fallback: false    # use user accounts if the bot pool is exhausted
+  chunk_timeout: 6              # seconds without a chunk before replacing a bot
+  # Estimated buffer soft threshold. 0 = disabled.
   memory_soft_limit: 0
 
-operations:             # throttling per move/copy/delete massivi su Telegram
+operations:             # throttling for large Telegram move/copy/delete jobs
   concurrent: 3
-  sleep: 1              # pausa in secondi tra batch
-  batch: 10             # operazioni per batch
+  sleep: 1              # pause in seconds between batches
+  batch: 10             # operations per batch
 
 http:
   enabled: true
   host: 127.0.0.1
   port: 3000
-  user: ""              # vuoto = niente basic auth
+  user: ""              # empty = no basic auth
   pass: ""
-  ignore_auth_for: []   # CIDR senza basic auth, es. ["192.168.1.0/24"]
+  ignore_auth_for: []   # CIDRs without basic auth, e.g. ["192.168.1.0/24"]
 
 strm:
-  destination: ./strm-folder   # cartella locale dentro cui generare i file .strm
-  source: /             # cartella virtuale da cui partire per generare i file .strm
-  # Template arbitrario per il contenuto dei file .strm.
-  # Il path deve iniziare con /download/{file_id}; il resto è decorativo.
-  # Placeholder utili: {file_id}, {filename}, {channel_id}, {parts_dash},
+  destination: ./strm-folder   # local directory where .strm files are generated
+  source: /             # virtual folder used as the .strm generation root
+  # Arbitrary template for .strm file content.
+  # The path must start with /download/{file_id}; the rest is decorative.
+  # Useful placeholders: {file_id}, {filename}, {channel_id}, {parts_dash},
   # {size}, {mime}.
   template: "http://127.0.0.1:3000/download/{file_id}/{filename}"
-  clear_folder: false   # forza la pulizia dell'intera cartella locale prima di generare l'albero .strm
+  clear_folder: false   # wipe the local directory before generating the .strm tree
 
 changes_feed:
-  enabled: false        # trigger PostgreSQL + LISTEN/NOTIFY
+  enabled: false        # PostgreSQL trigger + LISTEN/NOTIFY
   retention_days: 7
 
-# Integrazione rclone: WebDAV data-plane e bridge rc per invalidare la cache.
+# rclone integration: WebDAV data plane and rc bridge for cache invalidation.
 rclone:
-  webdav_enabled: false   # espone WebDAV read-write su /dav
+  webdav_enabled: false   # expose read-write WebDAV at /dav
   bridge_enabled: false   # LISTEN changes_feed -> vfs/forget
-  # Segreto condiviso per registrare l'endpoint rc via header X-Tgshelf-Token.
-  # Vuoto = self-registration disabilitata.
+  # Shared secret used to register the rc endpoint through X-Tgshelf-Token.
+  # Empty = self-registration disabled.
   register_token: "secret"
-  # CIDR aggiuntivi ammessi per host rc dichiarati dai client rclone.
+  # Additional CIDRs allowed for rc hosts declared by rclone clients.
   allowed_rc_networks: []
-  registry_ttl: 600       # secondi prima di rimuovere un mount inattivo
+  registry_ttl: 600       # seconds before an idle mount is removed
 ```
 
-I valori obbligatori sono la DSN PostgreSQL e `telegram.upload.channel`. Serve
-almeno un account utente per upload e operazioni di gestione. Gli account bot
-sono opzionali, ma sono la parte che rende utile il download parallelo.
+Required values are the PostgreSQL DSN and `telegram.upload.channel`. At least
+one user account is required for uploads and management operations. Bot accounts
+are optional, but they are what make parallel downloads useful.
 
-`telegram.main_bot` è un bot dedicato al watcher, non uno degli account in
-`telegram.users`. Importa solo i file pubblicati nel canale master mentre
-`serve` è in esecuzione.
+`telegram.main_bot` is a dedicated watcher bot, not one of the accounts under
+`telegram.users`. It imports only files posted to the master channel while
+`serve` is running.
 
-La variabile d'ambiente `DB` sovrascrive la chiave `db`, utile per URL database
-specifici del deployment.
+The `DB` environment variable overrides the `db` key, which is useful for
+deployment-specific database URLs.
 
-## Esempi CLI
+## CLI Examples
 
-Tutti i comandi accettano `--config`; il default è `./config.yaml`.
+All commands accept `--config`; the default is `./config.yaml`.
 
 ```sh
-# Ispeziona account configurati e sessioni salvate.
+# Inspect configured accounts and saved sessions.
 tgshelf --config config.yaml accounts list
 
-# Login interattivo di un account utente definito in telegram.users.
+# Interactive login for a user account defined in telegram.users.
 tgshelf --config config.yaml accounts login main
 
-# Registra un bot il cui bot_token è già presente in config.yaml.
+# Register a bot whose bot_token is already present in config.yaml.
 tgshelf --config config.yaml accounts add-bot bot01
 
-# Avvia API HTTP, Web UI, watcher, metriche e superfici WebDAV
-# abilitate dalla configurazione.
+# Start the HTTP API, Web UI, watcher, metrics, and enabled WebDAV surfaces.
 tgshelf --config config.yaml serve
 
-# Crea cartelle nel filesystem virtuale.
+# Create folders in the virtual filesystem.
 tgshelf --config config.yaml mkdir /folder/sub-folder
 
-# Carica un albero locale nel filesystem virtuale.
+# Upload a local tree into the virtual filesystem.
 tgshelf --config config.yaml sync ./folder-to-up --dest /folder/sub-folder [--concurrent 3] [--delete-source]
 
-# Lista, misura, stampa, copia, sposta, soft-delete e purge dei nodi.
+# List, search, measure, print, copy, move, soft-delete, and purge nodes.
 tgshelf --config config.yaml ls /folder
 tgshelf --config config.yaml search readme
 tgshelf --config config.yaml du -H /folder/sub-folder
@@ -272,18 +271,18 @@ tgshelf --config config.yaml mv /archive/readme.txt /folder/sub-folder
 tgshelf --config config.yaml rm /notes/readme.txt
 tgshelf --config config.yaml purge /notes/readme.txt
 
-# Scarica un file o una cartella. I file parziali esistenti vengono ripresi,
-# salvo uso esplicito di --overwrite.
+# Download a file or folder. Existing partial files are resumed unless
+# --overwrite is used explicitly.
 tgshelf --config config.yaml download /archive/big-file.bin --dest ./restore [--concurrent 4]
 
-# Genera file .strm a partire dall'albero virtuale.
+# Generate .strm files from the virtual tree.
 tgshelf --config config.yaml strm --source /folder --destination ./strm [--clear]
 
-# Verifica o ripara la membership dei bot sui canali usati dal filesystem.
+# Verify or repair bot membership on channels used by the filesystem.
 tgshelf --config config.yaml bots check
 ```
 
-Esempio di remote WebDAV per rclone:
+Example rclone WebDAV remote:
 
 ```sh
 rclone config create tgshelf webdav \

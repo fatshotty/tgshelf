@@ -9,13 +9,17 @@ network.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
+import socket
+import string
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 import aiohttp
 
+from tgshelf.config import NOTIFY_TEMPLATE
 from tgshelf.telegram.errors import Severity
 
 log = logging.getLogger("tgshelf.notify")
@@ -27,8 +31,10 @@ _LEVEL = {
 }
 
 _STOP = object()
+_FORMATTER = string.Formatter()
 
 Sender = Callable[[str, int | str, str], Awaitable[None]]
+AlertPayload = str | Mapping[str, Any]
 
 
 async def _send_via_bot_api(bot_token: str, chat_id: int | str, text: str) -> None:
@@ -46,7 +52,7 @@ class Notifier:
         *,
         bot_token: str | None = None,
         channel: int | str | None = None,
-        template: str = "[{severity}] {message}",
+        template: str = NOTIFY_TEMPLATE,
         warning_window: float = 300.0,
         sender: Sender = _send_via_bot_api,
     ):
@@ -78,13 +84,15 @@ class Notifier:
 
     async def notify(
         self,
-        message: str,
+        message: AlertPayload,
         *,
         severity: Severity = Severity.ERROR,
         key: str | None = None,
     ) -> None:
         """Log and optionally deliver an alert. This method never raises."""
-        log.log(_LEVEL.get(severity, logging.ERROR), "[notify] %s", message)
+        log.log(
+            _LEVEL.get(severity, logging.ERROR), "[notify] %s", self._summary(message)
+        )
         text = self._message_for_delivery(message, severity=severity, key=key)
         if text is None or not self._bot_token or self._channel is None:
             return
@@ -96,7 +104,7 @@ class Notifier:
         await queue.put((self._channel, text))
 
     def _message_for_delivery(
-        self, message: str, *, severity: Severity, key: str | None
+        self, message: AlertPayload, *, severity: Severity, key: str | None
     ) -> str | None:
         suppressed = 0
         if severity is Severity.WARNING and key:
@@ -108,17 +116,50 @@ class Notifier:
             suppressed = count
             self._warning_state[key] = (now, 0)
 
-        text = self._render(message, severity)
+        text = self._render(message, severity=severity, key=key)
         if suppressed:
             text = f"{text} (+{suppressed} similar suppressed)"
         return text
 
-    def _render(self, message: str, severity: Severity) -> str:
+    def _render(self, message: AlertPayload, *, severity: Severity, key: str | None) -> str:
+        fields = self._fields(message, severity=severity, key=key)
         try:
-            return self._template.format(message=message, severity=severity.value)
+            return _render_template(self._template, fields)
         except Exception:  # noqa: BLE001 - alerts must keep working with bad templates
             log.exception("[notify] invalid alert template; using fallback text")
-            return f"[{severity.value}] {message}"
+            return f"[tgshelf:{severity.value}] {fields.get('title') or fields.get('message')}"
+
+    def _fields(
+        self, message: AlertPayload, *, severity: Severity, key: str | None
+    ) -> dict[str, Any]:
+        if isinstance(message, Mapping):
+            fields = {str(k): v for k, v in message.items() if _present(v)}
+        else:
+            text = str(message)
+            fields = {"message": text, "title": text}
+
+        if _present(fields.get("message")) and not _present(fields.get("title")):
+            fields["title"] = fields["message"]
+        if _present(fields.get("title")) and not _present(fields.get("message")):
+            fields["message"] = fields["title"]
+
+        fields["severity"] = severity.value
+        if key:
+            fields["key"] = key
+        fields.setdefault(
+            "time", dt.datetime.now().astimezone().isoformat(timespec="seconds")
+        )
+        fields.setdefault("host", socket.gethostname())
+        return fields
+
+    def _summary(self, message: AlertPayload) -> str:
+        if isinstance(message, Mapping):
+            for field in ("title", "message", "cause"):
+                value = message.get(field)
+                if _present(value):
+                    return str(value)
+            return str(dict(message))
+        return str(message)
 
     async def _run(self, queue: asyncio.Queue[tuple[int | str, str] | object]) -> None:
         while True:
@@ -138,3 +179,34 @@ class Notifier:
             await self._sender(self._bot_token, channel, text)
         except Exception:  # noqa: BLE001 - a failed alert path must never propagate
             log.exception("[notify] could not send alert to channel %s", channel)
+
+
+def _render_template(template: str, fields: Mapping[str, Any]) -> str:
+    rendered: list[str] = []
+    for raw_line in template.splitlines():
+        if raw_line == "":
+            if rendered and rendered[-1] != "":
+                rendered.append("")
+            continue
+
+        names = _field_names(raw_line)
+        if any(not _present(fields.get(name)) for name in names):
+            continue
+        rendered.append(raw_line.format_map(fields))
+
+    while rendered and rendered[-1] == "":
+        rendered.pop()
+    return "\n".join(rendered)
+
+
+def _field_names(template_line: str) -> set[str]:
+    names: set[str] = set()
+    for _, field_name, _, _ in _FORMATTER.parse(template_line):
+        if field_name:
+            root = field_name.split(".", 1)[0].split("[", 1)[0]
+            names.add(root)
+    return names
+
+
+def _present(value: Any) -> bool:
+    return value is not None and str(value) != ""

@@ -21,6 +21,20 @@ from tgshelf.constants import PART_SIZE
 LOG_LEVELS = ("no", "error", "warn", "info", "debug")
 SESSION_STORAGES = ("db", "file")
 STRM_PLACEHOLDERS = ("file_id", "filename", "channel_id", "parts", "parts_dash", "size", "mime")
+NOTIFY_TEMPLATE = """[tgshelf:{severity}] {title}
+
+Impact: {impact}
+Scope: {scope}
+File: {file_path}
+Node: {node_id}
+Part: {part_idx}
+Channel: {channel_id}
+Account: {account}
+Cause: {cause}
+Action: {action}
+Time: {time}
+Host: {host}
+Key: {key}"""
 
 
 class ConfigError(Exception):
@@ -49,7 +63,7 @@ class UploadConfig:
 class NotifyConfig:
     bot_token: str | None = None
     channel: int | str | None = None
-    template: str = "[{severity}] {message}"
+    template: str = NOTIFY_TEMPLATE
     warning_window: float = 300.0
 
 

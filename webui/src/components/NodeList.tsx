@@ -16,10 +16,14 @@ function ordering(a: FsNode, b: FsNode): number {
 // entries. Each row carries a ⋯ actions menu; DELETED rows are dimmed.
 export function NodeList({
   nodes,
+  selectedIds,
+  onToggleSelect,
   onOpenFolder,
   onAction,
 }: {
   nodes: FsNode[]
+  selectedIds?: Set<string>
+  onToggleSelect?: (node: FsNode, selected: boolean) => void
   onOpenFolder: (name: string) => void
   onAction: (node: FsNode, a: NodeAction) => void
 }) {
@@ -31,8 +35,20 @@ export function NodeList({
       data={sorted}
       itemContent={(_, node) => {
         const deleted = node.state === 'DELETED'
+        const selectable = node.state === 'ACTIVE' && !node.is_folder && !node.inline
         return (
           <div className={`row ${node.is_folder ? 'folder' : 'file'}${deleted ? ' deleted' : ''}`}>
+            {selectable ? (
+              <input
+                className="row-select"
+                type="checkbox"
+                checked={selectedIds?.has(node.id) ?? false}
+                onClick={(e) => e.stopPropagation()}
+                onChange={(e) => onToggleSelect?.(node, e.target.checked)}
+              />
+            ) : (
+              <span className="row-select-spacer" />
+            )}
             {node.is_folder ? (
               <button
                 className="rowmain"

@@ -2,7 +2,7 @@
 // auth (whole-origin) automatically — see auth/credentials.ts. Kept free of React
 // so it (and types.ts) can be reused by a future react-native app.
 import { authHeaders } from '../auth/credentials'
-import type { AcceptedOp, FilePart, FsNode, MetricsSnapshot, NodeSize } from './types'
+import type { AcceptedOp, FilePart, FilePartRef, FsNode, MetricsSnapshot, NodeSize, SplitPartsResult } from './types'
 
 export class ApiError extends Error {
   status: number
@@ -65,10 +65,12 @@ export const api = {
     request<{ ok: boolean; purged: boolean }>('DELETE', `/api/v1/nodes/${id(nodeId)}`, { query: { purge } }),
   restoreNode: (nodeId: string) => request<FsNode>('POST', `/api/v1/nodes/${id(nodeId)}/restore`),
 
-  // -- parts: merge + reorder
-  mergeNode: (targetId: string, donorIds: string[]) =>
-    request<FsNode>('POST', `/api/v1/nodes/${id(targetId)}/merge`, { body: { donor_ids: donorIds } }),
+  // -- parts: merge + split + reorder
+  mergeNode: (targetId: string, donorIds: string[], name?: string, parts?: FilePartRef[]) =>
+    request<FsNode>('POST', `/api/v1/nodes/${id(targetId)}/merge`, { body: { donor_ids: donorIds, name, parts } }),
   listParts: (nodeId: string) => request<FilePart[]>('GET', `/api/v1/nodes/${id(nodeId)}/parts`),
+  splitParts: (nodeId: string, partIndices: number[]) =>
+    request<SplitPartsResult>('POST', `/api/v1/nodes/${id(nodeId)}/parts/split`, { body: { part_indices: partIndices } }),
   reorderParts: (nodeId: string, order: number[]) =>
     request<FsNode>('PUT', `/api/v1/nodes/${id(nodeId)}/parts`, { body: { order } }),
 

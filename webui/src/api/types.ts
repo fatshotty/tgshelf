@@ -28,6 +28,16 @@ export interface FilePart {
   original_filename: string | null
 }
 
+export interface FilePartRef {
+  file_id: string
+  idx: number
+}
+
+export interface SplitPartsResult {
+  source: FsNode
+  extracted: FsNode[]
+}
+
 // move/copy on a folder answers 202 with this instead of a node
 export interface AcceptedOp {
   status: 'accepted'

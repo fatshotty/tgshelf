@@ -88,6 +88,8 @@ body {
 .row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row .meta { color: var(--muted); font-size: 0.85em; white-space: nowrap; }
 .row .dl { color: var(--accent); text-decoration: none; padding: 0 0.4rem; font-size: 1.1em; }
+.row-select, .row-select-spacer { width: 1rem; height: 1rem; flex: none; }
+.row-select { margin: 0; }
 
 .empty, .info, .error { padding: 1rem; color: var(--muted); }
 .error { color: #d33; }
@@ -227,10 +229,13 @@ body {
   padding: 0.45rem 0.6rem; border-bottom: 1px solid var(--border);
 }
 .part-row { grid-template-columns: 3.5rem minmax(0, 1fr) 5.5rem auto auto; }
+.part-row.merge-row { grid-template-columns: 3.5rem minmax(0, 1.4fr) minmax(0, 1fr) 5.5rem auto auto; }
 .donor-row { grid-template-columns: auto minmax(0, 1fr) 5.5rem; }
+.donor-row.split-row { grid-template-columns: auto 3.5rem minmax(0, 1fr) 5.5rem; }
 .part-row:last-child, .donor-row:last-child { border-bottom: 0; }
-.part-index, .part-size { color: var(--muted); font-size: 0.85em; white-space: nowrap; }
-.part-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.part-index, .part-source, .part-size { color: var(--muted); font-size: 0.85em; white-space: nowrap; }
+.part-name, .part-source { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.part-name { white-space: nowrap; }
 .part-row button {
   border: 1px solid var(--border); background: var(--panel); color: var(--text);
   border-radius: 6px; padding: 0.2rem 0.5rem; font: inherit; cursor: pointer;

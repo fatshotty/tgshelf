@@ -10,7 +10,7 @@ import { isTextMime } from '../lib/format'
 export type NodeAction =
   | 'size'
   | 'edit'
-  | 'parts'
+  | 'split'
   | 'rename'
   | 'setChannel'
   | 'move'
@@ -50,7 +50,7 @@ export function NodeMenu({ node, onAction }: { node: FsNode; onAction: (a: NodeA
           ...(!node.is_folder && node.inline
             ? [{ a: 'edit' as NodeAction, label: isTextMime(node.mime) ? 'Edit' : 'View' }]
             : []),
-          ...(!node.is_folder && !node.inline ? [{ a: 'parts' as NodeAction, label: 'Parts' }] : []),
+          ...(!node.is_folder && !node.inline ? [{ a: 'split' as NodeAction, label: 'Split' }] : []),
           { a: 'rename', label: 'Rename' },
           ...(node.is_folder ? [{ a: 'setChannel' as NodeAction, label: 'Set channel' }] : []),
           { a: 'move', label: 'Move…' },

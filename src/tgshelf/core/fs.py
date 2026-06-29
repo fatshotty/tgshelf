@@ -183,6 +183,21 @@ class FileSystem:
         children = await self.repo.children(parent_id, folders_only=True)
         return next((n for n in children if n.name.lower() == segment.lower()), None)
 
+    async def _available_child_name(
+        self, parent_id: str, desired: str, *, excluding: set[str] | None = None
+    ) -> str:
+        excluding = excluding or set()
+        siblings = await self.repo.children(parent_id, state="ACTIVE")
+        taken = {n.name.lower() for n in siblings if n.id not in excluding}
+        if desired.lower() not in taken:
+            return desired
+
+        for i in range(1, 10000):
+            candidate = f"{desired} ({i})"
+            if candidate.lower() not in taken:
+                return candidate
+        raise DuplicateNameError(f"cannot allocate a unique name for {desired!r}")
+
     async def rename(self, node_id: str, new_name: str) -> Node:
         try:
             await self.repo.set_fields(node_id, name=new_name)
@@ -663,19 +678,40 @@ class FileSystem:
         await self.repo.session.commit()
         return await self.repo.get(node.id)
 
-    async def merge_parts(self, target_id: str, donor_ids: Sequence[str]) -> Node:
+    async def merge_parts(
+        self,
+        target_id: str,
+        donor_ids: Sequence[str],
+        *,
+        name: str | None = None,
+        part_refs: Sequence[dict[str, int | str]] | None = None,
+    ) -> Node:
         """Stitch chunked-upload files into one: append the donors' parts to the
         target, re-index 0..n (critical for streaming offsets), hard-delete the
-        donor nodes (their messages are reassigned, not deleted). One transaction.
-        """
+        donor nodes (their messages are reassigned, not deleted). When part_refs
+        is provided, it defines the exact output order as file_id/idx pairs."""
         all_ids = [target_id, *donor_ids]
         for nid in all_ids:
             if await self.repo.content_of(nid) is not None:
                 raise ValueError(f"cannot merge inline (DB-stored) file {nid}")
 
-        gathered: list[Any] = []
+        parts_by_ref: dict[tuple[str, int], Any] = {}
         for nid in all_ids:
-            gathered.extend(await self.repo.parts_of(nid))
+            for part in await self.repo.parts_of(nid):
+                parts_by_ref[(part.file_id, part.idx)] = part
+
+        if not parts_by_ref:
+            raise ValueError("cannot merge files with no parts")
+        if part_refs is None:
+            gathered = list(parts_by_ref.values())
+        else:
+            requested = [
+                (str(ref.get("file_id")), int(ref.get("idx"))) for ref in part_refs
+            ]
+            expected = set(parts_by_ref)
+            if set(requested) != expected or len(requested) != len(expected):
+                raise ValueError("parts must reference each source part exactly once")
+            gathered = [parts_by_ref[ref] for ref in requested]
 
         for nid in all_ids:
             await self.repo.clear_parts(nid)
@@ -686,9 +722,75 @@ class FileSystem:
             )
         for donor_id in donor_ids:
             await self.repo.purge(donor_id)
-        await self.repo.set_fields(target_id, size=sum(p.size for p in gathered))
+        fields: dict[str, Any] = {"size": sum(p.size for p in gathered), "mtime": func.now()}
+        if name is not None:
+            target = await self.repo.get(target_id)
+            if target is None or target.parent_id is None:
+                raise NotAReadableFile(f"node {target_id} not found")
+            fields["name"] = await self._available_child_name(
+                target.parent_id, name, excluding=set(all_ids)
+            )
+        await self.repo.set_fields(target_id, **fields)
         await self.repo.session.commit()
         return await self.repo.get(target_id)
+
+    async def split_parts(self, file_id: str, part_indices: Sequence[int]) -> tuple[Node, list[Node]]:
+        """Extract selected parts from one file into one-part sibling files.
+
+        The source keeps the unselected parts. Extracted files use each part's
+        original filename with active-sibling deduplication. Telegram messages are
+        reassigned in metadata only; no copy/delete operation is performed.
+        """
+        if await self.repo.content_of(file_id) is not None:
+            raise ValueError(f"cannot split an inline (DB-stored) file {file_id}")
+        source = await self.repo.get(file_id)
+        if source is None or source.is_folder or source.parent_id is None:
+            raise NotAReadableFile(f"node {file_id} is not a splittable file")
+
+        current = list(await self.repo.parts_of(file_id))
+        selected = list(part_indices)
+        if not selected:
+            raise ValueError("part_indices must not be empty")
+        if sorted(selected) != sorted(set(selected)):
+            raise ValueError("part_indices must not contain duplicates")
+        if any(i < 0 or i >= len(current) for i in selected):
+            raise ValueError(f"part_indices must be within 0..{len(current) - 1}")
+        if len(selected) == len(current):
+            raise ValueError("cannot extract every part from the source file")
+
+        selected_set = set(selected)
+        kept = [p for pos, p in enumerate(current) if pos not in selected_set]
+        extracted = [p for pos, p in enumerate(current) if pos in selected_set]
+
+        await self.repo.clear_parts(file_id)
+        for i, part in enumerate(kept):
+            await self.repo.add_part(
+                file_id, idx=i, channel_id=part.channel_id, message_id=part.message_id,
+                doc_id=part.doc_id, size=part.size, original_filename=part.original_filename,
+            )
+        await self.repo.set_fields(
+            file_id, size=sum(part.size for part in kept), mtime=func.now()
+        )
+
+        created: list[Node] = []
+        for part in extracted:
+            desired = part.original_filename or f"{source.name}.part-{part.idx}"
+            name = await self._available_child_name(source.parent_id, desired)
+            node = await self.repo.create(
+                name=name, parent_id=source.parent_id, is_folder=False,
+                mime=source.mime, channel_id=part.channel_id, state="ACTIVE",
+                size=part.size,
+            )
+            await self.repo.add_part(
+                node.id, idx=0, channel_id=part.channel_id, message_id=part.message_id,
+                doc_id=part.doc_id, size=part.size, original_filename=part.original_filename,
+            )
+            created.append(node)
+
+        await self.repo.session.commit()
+        refreshed_source = await self.repo.get(file_id)
+        refreshed_created = [await self.repo.get(node.id) for node in created]
+        return refreshed_source, [node for node in refreshed_created if node is not None]
 
     async def reorder_parts(self, file_id: str, order: Sequence[int]) -> Node:
         """Re-sequence the parts of ONE multi-part file: `order` is a permutation

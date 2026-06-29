@@ -266,9 +266,12 @@ async def copy_node(request: web.Request) -> web.Response:
 
 
 async def merge_node(request: web.Request) -> web.Response:
-    """Stitch donor files' parts into the target file (re-indexed), hard-deleting
-    the donors. Target + donors must be non-folder, non-inline files (inline →
-    fs.merge_parts raises ValueError → 400)."""
+    """Stitch donor files' parts into the target file, hard-deleting the donors.
+
+    Body supports the legacy append form `{donor_ids:[...]}` and the Web UI form:
+    `{donor_ids:[...], name?: str, parts?: [{file_id, idx}, ...]}` where `parts`
+    is the exact output order across target and donors.
+    """
     node_id = request.match_info["id"]
     body = await _json_body(request)
     donor_ids = body.get("donor_ids")
@@ -276,6 +279,20 @@ async def merge_node(request: web.Request) -> web.Response:
         return _bad_request("'donor_ids' must be a non-empty list")
     if node_id in donor_ids:
         return _bad_request("a node cannot be a donor of itself")
+    name = body.get("name")
+    if name is not None and (not isinstance(name, str) or not name.strip()):
+        return _bad_request("'name' must be a non-empty string")
+    parts = body.get("parts")
+    if parts is not None:
+        if not isinstance(parts, list) or not parts:
+            return _bad_request("'parts' must be a non-empty list")
+        for part in parts:
+            if (
+                not isinstance(part, dict)
+                or not isinstance(part.get("file_id"), str)
+                or not isinstance(part.get("idx"), int)
+            ):
+                return _bad_request("'parts' entries must contain file_id and idx")
     async with open_fs(request) as fs:
         target = await fs.get(node_id)
         if target is None:
@@ -288,7 +305,12 @@ async def merge_node(request: web.Request) -> web.Response:
                 return _bad_request(f"donor {did} not found")
             if donor.is_folder:
                 return _bad_request(f"donor {did} is a folder")
-        merged = await fs.merge_parts(node_id, donor_ids)
+        merged = await fs.merge_parts(
+            node_id,
+            donor_ids,
+            name=name.strip() if isinstance(name, str) else None,
+            part_refs=parts,
+        )
         log.info("merged %d donor(s) into %s", len(donor_ids), node_id)
         return web.json_response(node_to_dict(merged))
 
@@ -366,6 +388,37 @@ async def reorder_parts_node(request: web.Request) -> web.Response:
         return web.json_response(node_to_dict(updated))
 
 
+async def split_parts_node(request: web.Request) -> web.Response:
+    """Extract selected parts into one-part sibling files.
+
+    Body `{part_indices:[int,...]}` names the current ordered part positions to
+    extract. The source keeps every unselected part.
+    """
+    node_id = request.match_info["id"]
+    body = await _json_body(request)
+    part_indices = body.get("part_indices")
+    if (
+        not isinstance(part_indices, list)
+        or not part_indices
+        or not all(isinstance(i, int) for i in part_indices)
+    ):
+        return _bad_request("'part_indices' must be a non-empty list of integers")
+    async with open_fs(request) as fs:
+        node = await fs.get(node_id)
+        if node is None:
+            return _not_found(f"node {node_id} not found")
+        if node.is_folder:
+            return _bad_request("a folder has no parts to split")
+        source, extracted = await fs.split_parts(node_id, part_indices)
+        log.info("split %d part(s) from %s", len(extracted), node_id)
+        return web.json_response(
+            {
+                "source": node_to_dict(source),
+                "extracted": [node_to_dict(node) for node in extracted],
+            }
+        )
+
+
 def register_routes(app: web.Application) -> None:
     app.router.add_get("/api/v1/nodes/{id}", get_node)
     app.router.add_get("/api/v1/nodes/{id}/children", list_children)
@@ -381,5 +434,6 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/api/v1/nodes/{id}/copy", copy_node)
     app.router.add_post("/api/v1/nodes/{id}/merge", merge_node)
     app.router.add_get("/api/v1/nodes/{id}/parts", list_parts)
+    app.router.add_post("/api/v1/nodes/{id}/parts/split", split_parts_node)
     app.router.add_put("/api/v1/nodes/{id}/parts", reorder_parts_node)
     app.router.add_post("/api/v1/nodes/{id}/strm", strm_node)

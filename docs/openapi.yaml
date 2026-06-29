@@ -360,22 +360,20 @@ paths:
       tags: [tree]
       summary: Merge donor files into this file.
       description: |
-        Stitches the donor files' parts into the target file (re-indexed),
-        hard-deletes the donors, and sets `size` = sum of all parts. Operates on a
-        **file** (not a folder). Target and donors must be non-folder, non-inline
-        files; the target must not appear in `donor_ids`.
+        Stitches the donor files' parts into the target file, hard-deletes the
+        donors, and sets `size` = sum of all parts. Operates on a **file** (not a
+        folder). Target and donors must be non-folder, non-inline files; the
+        target must not appear in `donor_ids`.
+
+        When `parts` is provided, it is the exact output order as `{file_id, idx}`
+        references across the target and donor files, and must reference each
+        source part exactly once. `name` optionally renames the target; the server
+        deduplicates active sibling collisions.
       requestBody:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              required: [donor_ids]
-              properties:
-                donor_ids:
-                  type: array
-                  items: { type: string }
-                  minItems: 1
+            schema: { $ref: "#/components/schemas/MergePartsRequest" }
       responses:
         "200": { $ref: "#/components/responses/NodeResponse" }
         "400": { $ref: "#/components/responses/BadRequest" }
@@ -389,7 +387,7 @@ paths:
       summary: List the ordered parts of a file.
       description: |
         Returns the file's parts in `idx` order: `[{idx, size, original_filename}]`.
-        Folder → 400. For the WebUI reorder view.
+        Folder → 400. Used by the Web UI merge/split/reorder views.
       responses:
         "200":
           description: Ordered parts.
@@ -397,12 +395,7 @@ paths:
             application/json:
               schema:
                 type: array
-                items:
-                  type: object
-                  properties:
-                    idx: { type: integer }
-                    size: { type: integer }
-                    original_filename: { type: string, nullable: true }
+                items: { $ref: "#/components/schemas/FilePart" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
     put:
@@ -429,6 +422,38 @@ paths:
                   minItems: 1
       responses:
         "200": { $ref: "#/components/responses/NodeResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/nodes/{id}/parts/split:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    post:
+      tags: [tree]
+      summary: Extract selected parts into sibling files.
+      description: |
+        Extracts the selected part indices from one Telegram-backed file. The
+        source file keeps all unselected parts; each extracted part becomes a
+        single-part ACTIVE sibling using `original_filename`, with server-side
+        name deduplication. Extracting every part is rejected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [part_indices]
+              properties:
+                part_indices:
+                  type: array
+                  items: { type: integer }
+                  minItems: 1
+      responses:
+        "200":
+          description: Updated source and created sibling files.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SplitPartsResult" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
 
@@ -605,6 +630,40 @@ components:
       required: [parent_id]
       properties:
         parent_id: { type: string }
+    FilePart:
+      type: object
+      properties:
+        idx: { type: integer }
+        size: { type: integer, format: int64 }
+        original_filename: { type: [string, "null"] }
+      required: [idx, size, original_filename]
+    FilePartRef:
+      type: object
+      required: [file_id, idx]
+      properties:
+        file_id: { type: string }
+        idx: { type: integer }
+    MergePartsRequest:
+      type: object
+      required: [donor_ids]
+      properties:
+        donor_ids:
+          type: array
+          items: { type: string }
+          minItems: 1
+        name: { type: string }
+        parts:
+          type: array
+          items: { $ref: "#/components/schemas/FilePartRef" }
+          minItems: 1
+    SplitPartsResult:
+      type: object
+      properties:
+        source: { $ref: "#/components/schemas/Node" }
+        extracted:
+          type: array
+          items: { $ref: "#/components/schemas/Node" }
+      required: [source, extracted]
     Error:
       type: object
       properties:

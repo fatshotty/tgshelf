@@ -121,9 +121,10 @@ Tags:
   legacy UI assumptions forward.
 - **PORT**: preserve core operator workflows: browsing, stats, tree management,
   upload, and parts management.
-- **PORT**: backend parts primitives exist for merge, ordered part listing, and
-  reorder.
-- **PORT**: the Web UI exposes parts management for Telegram-backed files.
+- **PORT**: backend parts primitives exist for ordered merge, ordered part
+  listing, split into sibling files, and reorder.
+- **PORT**: the Web UI exposes parts management for Telegram-backed files through
+  multi-file merge and single-file split flows.
 - **FUTURE**: upload is the next UI area.
 
 ## rclone And Mounting

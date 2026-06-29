@@ -5,7 +5,7 @@
 import { useQueryClient } from '@tanstack/react-query'
 
 import { api, isAccepted } from '../api/client'
-import type { AcceptedOp, FsNode } from '../api/types'
+import type { AcceptedOp, FilePartRef, FsNode } from '../api/types'
 import { useToast } from '../components/Toast'
 
 export function useTreeActions(folderId: string | undefined, path: string) {
@@ -37,8 +37,13 @@ export function useTreeActions(folderId: string | undefined, path: string) {
     copy: (id: string, destId: string) => api.copyNode(id, destId).then((r) => afterMoveCopy(r, 'Copy')),
     setContent: (id: string, data: string | Blob, force = false) =>
       api.setContent(id, data, force).then(invalidate),
-    mergeParts: (id: string, donorIds: string[]) =>
-      api.mergeNode(id, donorIds).then(() => {
+    mergeParts: (id: string, donorIds: string[], name?: string, parts?: FilePartRef[]) =>
+      api.mergeNode(id, donorIds, name, parts).then(() => {
+        invalidate()
+        qc.invalidateQueries({ queryKey: ['parts', id] })
+      }),
+    splitParts: (id: string, partIndices: number[]) =>
+      api.splitParts(id, partIndices).then(() => {
         invalidate()
         qc.invalidateQueries({ queryKey: ['parts', id] })
       }),

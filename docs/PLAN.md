@@ -118,7 +118,7 @@ Important operations:
 - tree writes: `mkdir`, `mkdirs`, `rename`, `set_channel`;
 - content: `open_read`, `write`, `edit_inline_content`;
 - Telegram imports: `import_message`;
-- composition: `merge_parts`;
+- composition: `merge_parts`, ordered part merge, and `split_parts`;
 - mutations: `move`, `copy`, `delete`, `restore`, `purge`.
 
 The facade owns transaction boundaries where practical and delegates Telegram
@@ -214,14 +214,14 @@ The Web UI lives in `webui/` and is served from
 - stats via SSE metrics;
 - tree management;
 - inline editing for DB-inline files;
-- parts management for Telegram-backed files: list/reorder parts and merge donor
-  files from the current folder.
+- parts management for Telegram-backed files: list parts, merge selected files
+  with explicit part ordering, and split selected parts back into sibling files.
 
 The backend and OpenAPI already expose file-parts management primitives:
-`POST /api/v1/nodes/{id}/merge`, `GET /api/v1/nodes/{id}/parts`, and
-`PUT /api/v1/nodes/{id}/parts`. The Web UI API client has matching
-`mergeNode`, `listParts`, and `reorderParts` methods, and the browse view exposes
-them through a Parts dialog on Telegram-backed files.
+`POST /api/v1/nodes/{id}/merge`, `GET /api/v1/nodes/{id}/parts`,
+`POST /api/v1/nodes/{id}/parts/split`, and `PUT /api/v1/nodes/{id}/parts`. The
+Web UI API client has matching methods, and the browse view exposes merge through
+multi-selection plus split through each Telegram-backed file's row menu.
 
 Planned next area is upload.
 

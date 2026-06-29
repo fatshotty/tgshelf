@@ -7,9 +7,10 @@ import type { FsNode } from '../api/types'
 import { ConfirmDialog, PromptDialog, SizeDialog } from '../components/dialogs'
 import { FileEditDialog } from '../components/FileEditDialog'
 import { FolderPicker } from '../components/FolderPicker'
+import { MergePartsDialog } from '../components/MergePartsDialog'
 import { NodeList } from '../components/NodeList'
 import type { NodeAction } from '../components/NodeMenu'
-import { PartsDialog } from '../components/PartsDialog'
+import { SplitPartsDialog } from '../components/SplitPartsDialog'
 import { useToast } from '../components/Toast'
 import { useTreeActions } from '../lib/mutations'
 import { browseUrl, fsPath, pathSegments } from '../lib/path'
@@ -18,7 +19,8 @@ import { browseUrl, fsPath, pathSegments } from '../lib/path'
 type Dialog =
   | { kind: 'newFolder' }
   | { kind: 'edit'; node: FsNode }
-  | { kind: 'parts'; node: FsNode }
+  | { kind: 'mergeParts'; nodes: FsNode[] }
+  | { kind: 'splitParts'; node: FsNode }
   | { kind: 'rename'; node: FsNode }
   | { kind: 'setChannel'; node: FsNode }
   | { kind: 'delete'; node: FsNode }
@@ -53,11 +55,13 @@ export default function BrowseView() {
 
   const actions = useTreeActions(folder?.id, path)
   const [dialog, setDialog] = useState<Dialog>(null)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const selectedFiles = nodes.filter((node) => selectedIds.has(node.id) && node.state === 'ACTIVE' && !node.is_folder && !node.inline)
 
   const onAction = (node: FsNode, a: NodeAction) => {
     if (a === 'size') setDialog({ kind: 'size', node })
     else if (a === 'edit') setDialog({ kind: 'edit', node })
-    else if (a === 'parts') setDialog({ kind: 'parts', node })
+    else if (a === 'split') setDialog({ kind: 'splitParts', node })
     else if (a === 'rename') setDialog({ kind: 'rename', node })
     else if (a === 'setChannel') setDialog({ kind: 'setChannel', node })
     else if (a === 'move') setDialog({ kind: 'move', node })
@@ -93,6 +97,13 @@ export default function BrowseView() {
           <button className="btn" disabled={!folder?.is_folder} onClick={() => setDialog({ kind: 'newFolder' })}>
             New folder
           </button>
+          <button
+            className="btn"
+            disabled={selectedFiles.length < 2}
+            onClick={() => setDialog({ kind: 'mergeParts', nodes: selectedFiles })}
+          >
+            Merge
+          </button>
           <label className="toggle">
             <input type="checkbox" checked={showDeleted} onChange={(e) => setShowDeleted(e.target.checked)} />
             Show deleted
@@ -115,7 +126,20 @@ export default function BrowseView() {
         {folder && !folder.is_folder && <div className="error">Not a folder</div>}
         {folder?.is_folder && activeQ.isLoading && <div className="info">Loading…</div>}
         {folder?.is_folder && activeQ.data && (
-          <NodeList nodes={nodes} onOpenFolder={(name) => navigate(browseUrl([...segments, name]))} onAction={onAction} />
+          <NodeList
+            nodes={nodes}
+            selectedIds={selectedIds}
+            onToggleSelect={(node, selected) =>
+              setSelectedIds((prev) => {
+                const next = new Set(prev)
+                if (selected) next.add(node.id)
+                else next.delete(node.id)
+                return next
+              })
+            }
+            onOpenFolder={(name) => navigate(browseUrl([...segments, name]))}
+            onAction={onAction}
+          />
         )}
       </div>
 
@@ -138,13 +162,20 @@ export default function BrowseView() {
           onSave={(data, force) => actions.setContent(dialog.node.id, data, force)}
         />
       )}
-      {dialog?.kind === 'parts' && (
-        <PartsDialog
-          node={dialog.node}
-          candidates={nodes}
+      {dialog?.kind === 'mergeParts' && (
+        <MergePartsDialog
+          files={dialog.nodes}
           onClose={() => setDialog(null)}
-          onMerge={(donorIds) => actions.mergeParts(dialog.node.id, donorIds)}
-          onReorder={(order) => actions.reorderParts(dialog.node.id, order)}
+          onMerge={(targetId, donorIds, name, parts) =>
+            actions.mergeParts(targetId, donorIds, name, parts).then(() => setSelectedIds(new Set()))
+          }
+        />
+      )}
+      {dialog?.kind === 'splitParts' && (
+        <SplitPartsDialog
+          node={dialog.node}
+          onClose={() => setDialog(null)}
+          onSplit={(partIndices) => actions.splitParts(dialog.node.id, partIndices)}
         />
       )}
       {dialog?.kind === 'rename' && (

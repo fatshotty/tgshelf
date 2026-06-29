@@ -47,7 +47,10 @@ class UploadConfig:
 
 @dataclass(frozen=True)
 class NotifyConfig:
-    channel: int | None = None
+    bot_token: str | None = None
+    channel: int | str | None = None
+    template: str = "[{severity}] {message}"
+    warning_window: float = 300.0
 
 
 @dataclass(frozen=True)
@@ -101,7 +104,7 @@ class OperationsConfig:
 @dataclass(frozen=True)
 class HttpConfig:
     enabled: bool = True
-    host: str = "127.0.0.1" 
+    host: str = "127.0.0.1"
     port: int = 3000
     user: str = ""
     password: str = ""
@@ -199,6 +202,19 @@ def _str(section: Mapping[str, Any], key: str, default: str, *, path: str) -> st
     return value
 
 
+def _notify_channel(value: Any, *, master_channel: int) -> int | str | None:
+    if value in (None, ""):
+        return master_channel
+    if isinstance(value, str) and value.startswith("@"):
+        return value
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ConfigError(
+            f"'telegram.notify.channel' must be an integer channel id or @username, got {value!r}"
+        ) from None
+
+
 def _parse_accounts(raw_users: Any) -> tuple[AccountConfig, ...]:
     if raw_users is None:
         return ()
@@ -244,12 +260,11 @@ def _parse_telegram(raw: Mapping[str, Any]) -> TelegramConfig:
         )
 
     notify = _section(section, "notify")
-    # optional: absent OR empty -> no alert channel (notifications stay log-only)
-    notify_channel = (
-        _int(notify, "channel", 0, path="telegram.notify")
-        if notify.get("channel") not in (None, "")
-        else None
+    notify_window = _float(
+        notify, "warning_window", NotifyConfig.warning_window, path="telegram.notify"
     )
+    if notify_window <= 0:
+        raise ConfigError("'telegram.notify.warning_window' must be > 0")
 
     rl = _section(section, "rate_limit")
     coordination = _str(rl, "coordination", RateLimitConfig.coordination, path="telegram.rate_limit")
@@ -285,7 +300,18 @@ def _parse_telegram(raw: Mapping[str, Any]) -> TelegramConfig:
 
     return TelegramConfig(
         upload=UploadConfig(channel=channel, min_size=min_size),
-        notify=NotifyConfig(channel=notify_channel),
+        notify=NotifyConfig(
+            bot_token=(
+                str(notify["bot_token"])
+                if notify.get("bot_token") not in (None, "")
+                else None
+            ),
+            channel=_notify_channel(notify.get("channel"), master_channel=channel),
+            template=_str(
+                notify, "template", NotifyConfig.template, path="telegram.notify"
+            ),
+            warning_window=notify_window,
+        ),
         users=users,
         rate_limit=rate_limit,
         main_bot=main_bot,

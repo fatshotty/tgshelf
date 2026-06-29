@@ -200,19 +200,18 @@ async def run_server(config: Config) -> None:
 
     from tgshelf.core.notify import Notifier
 
-    # the alert channel writer: a user client pushes grave conditions (watcher
-    # failures, critical move-cleanup failures) to telegram.notify.channel. Built
-    # once here and shared by the executor (folder moves), per-request FS (file
-    # moves) and the watcher. (Which account writes is still open — see PLAN.md.)
     user_gateway = (
         runtime["client_pool"].members[0].client
         if runtime["client_pool"].members
         else None
     )
     notifier = Notifier(
-        client=getattr(user_gateway, "_client", None),
+        bot_token=config.telegram.notify.bot_token,
         channel=config.telegram.notify.channel,
+        template=config.telegram.notify.template,
+        warning_window=config.telegram.notify.warning_window,
     )
+    await notifier.start()
     runtime["executor"]._notifier = notifier
 
     from tgshelf.http.api import register_routes
@@ -319,6 +318,7 @@ async def run_server(config: Config) -> None:
         await runner.cleanup()
         if watcher_client is not None:
             await watcher_client.disconnect()
+        await notifier.aclose()
         for _account, client in clients:
             aclose = getattr(client, "aclose", None)
             if aclose is not None:

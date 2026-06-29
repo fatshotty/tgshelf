@@ -3,7 +3,7 @@
 `GET /download/{file_id}` and `GET /download/{file_id}/{tail:.*}` map to the
 same handler: the node is resolved SOLELY by `file_id` (the first path segment);
 the rest of the path and the entire query string are accepted and IGNORED
-(decisione utente — the .strm template is free to decorate the URL for players).
+(user decision: the .strm template is free to decorate the URL for players).
 
 Serves a single Range (206 + Content-Range), 416 with `Content-Range: bytes
 */size` on an unsatisfiable one, an ETag with If-None-Match -> 304, and HEAD

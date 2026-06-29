@@ -1,6 +1,6 @@
 """Standalone integrity check for tgshelf (NOT a `tgshelf` subcommand).
 
-Two complementary levels (see docs/PLAN.md "Integrità della size"):
+Two complementary levels (see docs/PLAN.md size-integrity section):
 
   - **DB-level** (default, cheap, no network): for every ACTIVE file, the expected
     size (`node.size`, frozen at upload/merge) must equal the effective size

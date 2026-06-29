@@ -43,7 +43,7 @@ async def open_fs(request: web.Request):
 
 def _spawn_background(app: web.Application, coro) -> None:
     """Fire-and-forget a background task, keeping a reference so it is not GC'd.
-    No job tracking (decisione utente): a crash/restart loses pending work, but
+    No job tracking (user decision): a crash/restart loses pending work, but
     everything committed so far is durable (per-file commits are crash-safe)."""
     rt = app[RUNTIME]
     tasks = rt.setdefault("_bg_tasks", set())

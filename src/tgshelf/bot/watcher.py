@@ -7,7 +7,7 @@ pool (pool clients are receive_updates=False to share sessions across instances;
 the watcher needs updates). It reacts ONLY to live messages in the master channel
 that carry a file → `fs.import_message(master, msg_id, root)`.
 
-Scope limits (decisione utente):
+Scope limits (user decision):
 - only the master channel, only messages with a file attached;
 - files posted while the watcher is DOWN are NOT recovered automatically — run
   `tgshelf import-channel`. Startup auto-reconciliation is a future point (PLAN.md).
@@ -42,7 +42,7 @@ async def start_watcher(
     client (so serve can disconnect it on shutdown), or None when the watcher is
     not configured/usable or fails to start.
 
-    The watcher is NEVER fatal to `serve` (decisione utente): a missing config is
+    The watcher is NEVER fatal to `serve` (user decision): a missing config is
     a log warning; a real startup failure is logged AND pushed to the notify
     channel, and serve keeps running without live cataloging (`import-channel`
     backfills). `user_gateway` is a connected USER client used to fetch the doc.

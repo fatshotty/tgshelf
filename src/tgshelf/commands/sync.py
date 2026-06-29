@@ -3,7 +3,7 @@
 Mirrors a local folder under a drive folder, creating the tree and uploading the
 files concurrently (up to `operations.concurrent`). A file already present with
 the **same size** is skipped (so a re-run resumes naturally); a size **mismatch**
-is logged and skipped — sync never overwrites an existing file (decisione utente,
+is logged and skipped — sync never overwrites an existing file (user decision,
 legacy-knowledge §11).
 
 Uploads do NOT go through the FsExecutor: the Uploader already leases an account

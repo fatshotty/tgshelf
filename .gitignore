@@ -26,6 +26,6 @@ tests/
 .vscode/
 .idea/
 
-docs/
+docs/dev/
 .claude/
 scripts/migrate_mongo.py

@@ -13,12 +13,12 @@ React Web UI.
 Before changing behavior, read these files:
 
 - `README.md` for the short project overview.
-- `docs/CLAUDE.md` for current status, implementation conventions, and open work.
+- `AGENTS.md` for current status, implementation conventions, and open work.
 - `docs/PLAN.md` for approved architecture and domain decisions.
 - The relevant `docs/dev/*.md`, `docs/specs/*.md`, or `docs/plans/*.md` file for
   the area you are touching.
 
-Treat the decisions in `docs/PLAN.md` and `docs/CLAUDE.md` as binding unless the
+Treat the decisions in `docs/PLAN.md` and `AGENTS.md` as binding unless the
 user explicitly approves a change.
 
 ## Boundaries
@@ -124,5 +124,5 @@ When reviewing code in this project, prioritize:
 
 At the time this file was created, documented next areas include Web UI upload,
 Web UI parts management, Docker/compose runbook work, and several future
-hardening items called out in `docs/CLAUDE.md` and `docs/PLAN.md`. Re-check those
+hardening items called out in `AGENTS.md` and `docs/PLAN.md`. Re-check those
 documents before starting evolutionary work because they are the source of truth.

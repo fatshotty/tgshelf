@@ -1,0 +1,702 @@
+openapi: 3.1.0
+info:
+  title: tgshelf HTTP API
+  version: "1.0.0"
+  description: |
+    HTTP API for tgshelf — Telegram-as-cloud-storage. Two surfaces:
+
+    - **`/api/v1`** — clean JSON metadata + tree operations (no byte transfer).
+    - **root** — the streaming `GET /download/{file_id}` (the .strm target) plus
+      the operational `GET /ping` / `GET /status` / `GET /metrics`.
+
+    **Auth**: HTTP Basic on every route except `/ping`. A configurable CIDR
+    whitelist (`http.ignore_auth_for`) bypasses auth for trusted networks.
+    Auth can also be disabled by configuration for private deployments.
+
+servers:
+  - url: http://127.0.0.1:3000
+    description: Default local bind
+
+security:
+  - basicAuth: []
+
+tags:
+  - name: tree
+    description: Metadata and tree operations (JSON).
+  - name: files
+    description: Byte transfer — upload and streaming download.
+  - name: ops
+    description: Health and observability.
+
+paths:
+  /ping:
+    get:
+      tags: [ops]
+      summary: Liveness probe (no auth).
+      security: []
+      responses:
+        "200":
+          description: Service is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+
+  /status:
+    get:
+      tags: [ops]
+      summary: Pool health snapshot.
+      description: |
+        Read-only health of the user-client and download-bot pools: per-account
+        in_flight / load / cooldown / quarantine / per-channel ineligibility,
+        plus a per-pool summary. No DB access.
+      responses:
+        "200":
+          description: Health snapshot.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  clients: { $ref: "#/components/schemas/PoolStatus" }
+                  bots: { $ref: "#/components/schemas/PoolStatus" }
+
+  /metrics:
+    get:
+      tags: [ops]
+      summary: Runtime metrics (JSON).
+      description: |
+        JSON for the WebUI: `{pools:{clients,bots}, stream:{...}}` — full pool
+        health (same member shape as `/status`) plus streamer counters/gauges
+        (`active_streams`, `buffered_bytes`, `memory_soft_limit`, `streams_total`,
+        `bytes_total`, `degraded_total`, `configured_k`). Prometheus text is at
+        `/metrics.txt`.
+      responses:
+        "200":
+          description: Metrics as JSON.
+          content:
+            application/json:
+              schema: { type: object }
+
+  /metrics.txt:
+    get:
+      tags: [ops]
+      summary: Runtime metrics (Prometheus text).
+      description: |
+        Prometheus text exposition (version 0.0.4): `tgshelf_pool_*{pool="clients|bots"}`
+        gauges and `tgshelf_stream_*` gauges/counters. The `.txt` URL suffix is
+        the text opt-in; the default JSON form is at `/metrics`.
+      responses:
+        "200":
+          description: Metrics in Prometheus text format.
+          content:
+            text/plain:
+              schema: { type: string }
+
+  /api/v1/metrics/stream:
+    get:
+      tags: [ops]
+      summary: Runtime metrics live stream (SSE).
+      description: |
+        Server-Sent Events (`text/event-stream`): pushes a metrics snapshot (same
+        JSON shape as `GET /metrics`) ~once a second for the live WebUI dashboard.
+        The connection stays open until the client disconnects.
+      responses:
+        "200":
+          description: "An event stream of `data: <metrics-json>` messages."
+          content:
+            text/event-stream:
+              schema: { type: string }
+
+  /download/{file_id}:
+    parameters:
+      - $ref: "#/components/parameters/FileId"
+    get:
+      tags: [files]
+      summary: Stream a file (the single byte-serving endpoint).
+      description: |
+        Resolves the node **solely** by `file_id` (the first path segment). See
+        `/download/{file_id}/{tail}` for the decorated form — same handler.
+      parameters:
+        - $ref: "#/components/parameters/RangeHeader"
+        - $ref: "#/components/parameters/IfNoneMatch"
+      responses:
+        "200": { $ref: "#/components/responses/FullContent" }
+        "206": { $ref: "#/components/responses/PartialContent" }
+        "304": { description: Not modified (ETag matched If-None-Match). }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "416": { $ref: "#/components/responses/RangeNotSatisfiable" }
+    head:
+      tags: [files]
+      summary: Stream headers only (size, type) without the body.
+      parameters:
+        - $ref: "#/components/parameters/RangeHeader"
+      responses:
+        "200": { description: Headers only (Content-Length = full size). }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /download/{file_id}/{tail}:
+    parameters:
+      - $ref: "#/components/parameters/FileId"
+      - name: tail
+        in: path
+        required: true
+        description: |
+          Free decoration (extra path segments). **Accepted and IGNORED** by the
+          server — together with the entire query string — so the .strm template
+          can embed `{filename}`, `{parts_dash}`, etc. for the client/player. The
+          server resolves only by `file_id`. (Prefer `{parts_dash}` over the
+          comma-joined `{parts}` in the path: Emby/ffmpeg reject a raw comma.)
+        schema: { type: string }
+    get:
+      tags: [files]
+      summary: Stream a file (decorated URL form).
+      parameters:
+        - $ref: "#/components/parameters/RangeHeader"
+        - $ref: "#/components/parameters/IfNoneMatch"
+      responses:
+        "200": { $ref: "#/components/responses/FullContent" }
+        "206": { $ref: "#/components/responses/PartialContent" }
+        "304": { description: Not modified. }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "416": { $ref: "#/components/responses/RangeNotSatisfiable" }
+    head:
+      tags: [files]
+      summary: Stream headers only (decorated URL form).
+      responses:
+        "200": { description: Headers only. }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/nodes/{id}:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    get:
+      tags: [tree]
+      summary: Get a node by id.
+      responses:
+        "200": { $ref: "#/components/responses/NodeResponse" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [tree]
+      summary: Update a node (rename / mime / channel).
+      description: |
+        - **File**: `name` and/or `mime` only. An empty `mime` is deduced from the
+          name. Sending `channel_id` for a file → 400 (a file's channel changes
+          only via move).
+        - **Folder**: `name` and/or `channel_id` (`null` = inherit from ancestors).
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                mime: { type: string, description: "File only. Empty → deduced from name." }
+                channel_id:
+                  type: [integer, "null"]
+                  description: "Folder only. null = inherit."
+      responses:
+        "200": { $ref: "#/components/responses/NodeResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      tags: [tree]
+      summary: Delete a node (soft, or purge).
+      parameters:
+        - name: purge
+          in: query
+          schema: { type: boolean, default: false }
+          description: "true = hard delete (also removes the Telegram messages)."
+      responses:
+        "200":
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  purged: { type: boolean }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/nodes/{id}/content:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    put:
+      tags: [tree]
+      summary: Replace an inline file's body in place.
+      description: |
+        Overwrite the body of an **inline** (DB-stored) file with the raw request
+        body. Only inline files are editable — a Telegram-backed file → 400. A body
+        within `min_size` keeps the file inline; a larger body needs `force=true`
+        to convert the file to Telegram-backed, otherwise → 409.
+      parameters:
+        - name: force
+          in: query
+          schema: { type: boolean, default: false }
+          description: "Allow a body over min_size (file becomes Telegram-backed)."
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200": { $ref: "#/components/responses/NodeResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/nodes/{id}/children:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    get:
+      tags: [tree]
+      summary: List a folder's children.
+      parameters:
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [ACTIVE, DELETED, TEMP]
+            default: ACTIVE
+          description: Which lifecycle state to list. Default ACTIVE.
+      responses:
+        "200": { $ref: "#/components/responses/NodeList" }
+
+  /api/v1/nodes/{id}/size:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    get:
+      tags: [tree]
+      summary: Total byte size of a node.
+      description: |
+        A **file** returns its own size; a **folder** returns the recursive sum of
+        all ACTIVE files in its subtree (folders contribute nothing).
+      responses:
+        "200":
+          description: Total size.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  is_folder: { type: boolean }
+                  size: { type: integer, format: int64 }
+                required: [id, is_folder, size]
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/nodes/{id}/restore:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    post:
+      tags: [tree]
+      summary: Restore a soft-deleted node (DELETED → ACTIVE).
+      responses:
+        "200": { $ref: "#/components/responses/NodeResponse" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/nodes/{id}/move:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    post:
+      tags: [tree]
+      summary: Move a node to another folder.
+      description: |
+        A **file** moves synchronously (200) — cross-channel forwards its parts on
+        the leased account. A **folder** may take hours, so it is **fire-and-forget**:
+        a background task starts and the call returns **202** immediately (no job
+        tracking).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ParentRef" }
+      responses:
+        "200":
+          description: File moved.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Node" }
+        "202": { $ref: "#/components/responses/OperationAccepted" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/nodes/{id}/copy:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    post:
+      tags: [tree]
+      summary: Copy a node into another folder.
+      description: |
+        A **file** copies synchronously (201) — its Telegram messages are
+        duplicated so the copy owns its own messages. A **folder** is
+        fire-and-forget (**202**), like move. Name collisions are auto-renamed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ParentRef" }
+      responses:
+        "201":
+          description: File copied.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Node" }
+        "202": { $ref: "#/components/responses/OperationAccepted" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/nodes/{id}/merge:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    post:
+      tags: [tree]
+      summary: Merge donor files into this file.
+      description: |
+        Stitches the donor files' parts into the target file (re-indexed),
+        hard-deletes the donors, and sets `size` = sum of all parts. Operates on a
+        **file** (not a folder). Target and donors must be non-folder, non-inline
+        files; the target must not appear in `donor_ids`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [donor_ids]
+              properties:
+                donor_ids:
+                  type: array
+                  items: { type: string }
+                  minItems: 1
+      responses:
+        "200": { $ref: "#/components/responses/NodeResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/nodes/{id}/parts:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    get:
+      tags: [tree]
+      summary: List the ordered parts of a file.
+      description: |
+        Returns the file's parts in `idx` order: `[{idx, size, original_filename}]`.
+        Folder → 400. For the WebUI reorder view.
+      responses:
+        "200":
+          description: Ordered parts.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    idx: { type: integer }
+                    size: { type: integer }
+                    original_filename: { type: string, nullable: true }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [tree]
+      summary: Reorder the parts of a file.
+      description: |
+        Re-sequences the parts of one multi-part file. `order` is a **permutation**
+        of the current part indices (e.g. `[2,0,1]`) giving the new order; the parts
+        are re-indexed 0..n. The total `size` is unchanged but the byte layout served
+        by `/download` changes (the ETag folds in `mtime`, which is bumped). Operates
+        on a **file** (not a folder); inline files, no parts, or a non-permutation →
+        400.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [order]
+              properties:
+                order:
+                  type: array
+                  items: { type: integer }
+                  minItems: 1
+      responses:
+        "200": { $ref: "#/components/responses/NodeResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/nodes/{id}/strm:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    post:
+      tags: [tree]
+      summary: Generate .strm for this folder/file (partial in-place regen).
+      description: |
+        Writes .strm (or raw inline) files for the node into the global
+        `strm.destination` tree at the node's correct relative position — a
+        folder regenerates its subtree, a file just itself — without reprocessing
+        the parent. Synchronous (strm is local-only). `clear` (folders only) wipes
+        the node's output subtree first. 400 if the node is not under `strm.source`.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                clear: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Generation stats.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  destination: { type: string }
+                  created: { type: integer }
+                  updated: { type: integer }
+                  skipped: { type: integer }
+                  removed: { type: integer }
+                  inline: { type: integer }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/resolve:
+    get:
+      tags: [tree]
+      summary: Resolve a path to a node.
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema: { type: string, example: "/Movies/dune.mkv" }
+      responses:
+        "200": { $ref: "#/components/responses/NodeResponse" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/search:
+    get:
+      tags: [tree]
+      summary: Case-insensitive substring search by name.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string }
+        - name: root
+          in: query
+          description: Optional subtree root id to scope the search.
+          schema: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/NodeList" }
+
+  /api/v1/folders:
+    post:
+      tags: [tree]
+      summary: Create a folder.
+      description: "Provide `path` (creates intermediate folders) OR `parent_id` + `name`."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                path: { type: string, example: "/Movies/2024" }
+                parent_id: { type: string }
+                name: { type: string }
+      responses:
+        "201": { $ref: "#/components/responses/NodeResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/folders/{id}/files:
+    parameters:
+      - $ref: "#/components/parameters/NodeId"
+    post:
+      tags: [files]
+      summary: Upload a file into a folder.
+      description: |
+        The filename is **never** taken from the URL path (a name may legally
+        contain `* _ { } [ ]` and the separator `/`). It comes from the request:
+
+        - **multipart/form-data**: the file part's `filename`.
+        - **raw body**: the `?filename=` query (URL-encoded) or the
+          `Content-Disposition` header (`filename` / RFC 5987 `filename*`).
+
+        `mime` comes from the part / `Content-Type` (a generic
+        `application/octet-stream` is deduced from the name instead). A filename
+        with `/`, `\`, control chars, or `.`/`..` → 400. A same-name ACTIVE
+        sibling → 409.
+      parameters:
+        - name: filename
+          in: query
+          description: Filename for the raw-body mode (URL-encoded).
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        "201": { $ref: "#/components/responses/NodeResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+
+  parameters:
+    NodeId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, description: "10-char node id" }
+    FileId:
+      name: file_id
+      in: path
+      required: true
+      schema: { type: string, description: "10-char node id of the file" }
+    RangeHeader:
+      name: Range
+      in: header
+      description: "Single byte range, e.g. `bytes=0-1023`. Multi-range is ignored (full 200)."
+      schema: { type: string }
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      description: "Conditional GET; a matching ETag yields 304."
+      schema: { type: string }
+
+  schemas:
+    Node:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        is_folder: { type: boolean }
+        mime: { type: [string, "null"] }
+        channel_id: { type: [integer, "null"] }
+        state: { type: string, enum: [ACTIVE, TEMP, DELETED] }
+        size: { type: integer, description: "Expected size (bytes); 0 for folders." }
+        inline: { type: boolean, description: "File stored inline in the DB (editable in place) vs Telegram-backed. Always false for folders." }
+        ctime: { type: [string, "null"], format: date-time }
+        mtime: { type: [string, "null"], format: date-time }
+        info: { type: object, additionalProperties: true }
+      required: [id, name, is_folder, state, size]
+    ParentRef:
+      type: object
+      required: [parent_id]
+      properties:
+        parent_id: { type: string }
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+    PoolStatus:
+      type: object
+      properties:
+        total: { type: integer }
+        available: { type: integer }
+        in_flight: { type: integer }
+        members:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              is_premium: { type: boolean }
+              capacity: { type: integer }
+              in_flight: { type: integer }
+              load: { type: number }
+              quarantined: { type: boolean }
+              cooldown_remaining: { type: number }
+              consecutive_errors: { type: integer }
+              ineligible_channels:
+                type: array
+                items: { type: integer }
+              available: { type: boolean }
+
+  responses:
+    NodeResponse:
+      description: A node.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Node" }
+    NodeList:
+      description: A list of nodes.
+      content:
+        application/json:
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/Node" }
+    OperationAccepted:
+      description: Folder operation accepted; runs in the background (no tracking).
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status: { type: string, example: accepted }
+              operation: { type: string, enum: [move, copy] }
+              node_id: { type: string }
+    FullContent:
+      description: Full content (no Range, or a multi-range that was ignored).
+      headers:
+        Accept-Ranges: { schema: { type: string } }
+        ETag: { schema: { type: string } }
+        Content-Disposition: { schema: { type: string } }
+      content:
+        application/octet-stream:
+          schema: { type: string, format: binary }
+    PartialContent:
+      description: Partial content for a satisfied Range.
+      headers:
+        Content-Range:
+          schema: { type: string }
+          description: "e.g. `bytes 0-1023/123456`"
+        Accept-Ranges: { schema: { type: string } }
+        ETag: { schema: { type: string } }
+      content:
+        application/octet-stream:
+          schema: { type: string, format: binary }
+    NotFound:
+      description: Not found.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    BadRequest:
+      description: Invalid request.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Name collision with an ACTIVE sibling.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RangeNotSatisfiable:
+      description: The requested range cannot be satisfied.
+      headers:
+        Content-Range:
+          schema: { type: string }
+          description: "`bytes */<size>`"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }

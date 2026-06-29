@@ -1,4 +1,4 @@
-"""`tgshelf ls | cp | mv | rm | purge` — thin management wrappers over FileSystem.
+"""`tgshelf ls | search | cp | mv | rm | purge` — thin management wrappers over FileSystem.
 
 Path-addressed (like the rest of the UX). ls/rm touch only Postgres; cp/mv/purge
 also need Telegram (forward parts / delete messages), so they connect the user
@@ -28,6 +28,12 @@ def _fmt(node) -> str:
     kind = "d" if node.is_folder else "-"
     size = "" if node.is_folder else str(node.size)
     return f"{kind} {node.id}  {size:>12}  {node.name}"
+
+
+def _fmt_path(node, path: str) -> str:
+    kind = "d" if node.is_folder else "-"
+    size = "" if node.is_folder else str(node.size)
+    return f"{kind} {node.id}  {size:>12}  {path}"
 
 
 def _human(size: int) -> str:
@@ -122,6 +128,13 @@ async def _do_du(fs: FileSystem, path: str, *, human: bool = False) -> int:
     total = await fs.total_size(node.id)
     size = _human(total) if human else str(total)
     print(f"{size}\t{path}")
+    return 0
+
+
+async def _do_search(fs: FileSystem, term: str) -> int:
+    for node in await fs.search(term):
+        path = await fs.path_of(node.id)
+        print(_fmt_path(node, path or node.name))
     return 0
 
 
@@ -250,6 +263,9 @@ async def run(config: Config, args) -> int:
     if cmd == "du":
         async with _db_fs(config) as fs:
             return await _do_du(fs, args.path, human=args.human)
+    if cmd == "search":
+        async with _db_fs(config) as fs:
+            return await _do_search(fs, args.term)
     if cmd == "mkdir":
         async with _db_fs(config) as fs:
             return await _do_mkdir(fs, args.path)

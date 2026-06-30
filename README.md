@@ -85,6 +85,15 @@ Start the server:
 tgshelf --config config.yaml serve
 ```
 
+Open the Web UI at:
+
+```text
+http://127.0.0.1:3000/webui
+```
+
+The server redirects `/` to `/webui`; older `/b/...`, `/search`, and `/stats`
+Web UI routes redirect to their `/webui/...` equivalents.
+
 ## Verification
 
 Python:

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tgshelf"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Telegram as cloud storage: virtual filesystem on PostgreSQL, files on Telegram channels, HTTP streaming proxy"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -27,6 +27,9 @@ dev = [
 
 [project.scripts]
 tgshelf = "tgshelf.cli:main"
+
+[tool.hatch.version]
+path = "src/tgshelf/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tgshelf"]

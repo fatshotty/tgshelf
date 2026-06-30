@@ -253,7 +253,7 @@ async def run_server(config: Config) -> None:
 
         register_webdav_routes(app)  # rclone WebDAV data-plane at /dav
         log.info("rclone WebDAV data-plane enabled at /dav")
-    register_webui_routes(app)  # React SPA at / — LAST (catch-all fallback)
+    register_webui_routes(app)  # React SPA at /webui — LAST (catch-all fallback)
 
     # start the live channel watcher (no-op if not configured); fetches posted
     # documents through a user client from the pool. The watcher is best-effort:

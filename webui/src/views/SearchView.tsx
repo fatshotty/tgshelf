@@ -13,7 +13,7 @@ function searchOrdering(a: SearchResult, b: SearchResult): number {
 }
 
 function browsePathUrl(path: string): string {
-  return browseUrl(pathSegments(`/b${path}`))
+  return browseUrl(pathSegments(path))
 }
 
 export default function SearchView() {
@@ -41,7 +41,7 @@ export default function SearchView() {
   return (
     <div className="browse">
       <div className="bar">
-        <Link className="crumb" to="/b">← back</Link>
+        <Link className="crumb" to="/">← back</Link>
         <span className="searchlabel">Results for “{q}”</span>
         <form className="search" onSubmit={onSearch}>
           <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search…" />

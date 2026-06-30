@@ -1,8 +1,8 @@
 """`tgshelf accounts` — manage Telegram accounts and their sessions.
 
-Subcommands: list, login (interactive user), add-bot (bot token from config),
-import (legacy .session file). Sessions are persisted via the backend selected
-by `session_storage` (db | file).
+Subcommands: list, setup, login (interactive user), add-bot (bot token from
+config), import (legacy .session file). Sessions are persisted via the backend
+selected by `session_storage` (db | file).
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ def _account(config: Config, name: str) -> AccountConfig | None:
 async def run(config: Config, args) -> int:
     handler = {
         "list": _list,
+        "setup": _setup,
         "login": _login,
         "add-bot": _add_bot,
         "import": _import,
@@ -79,19 +80,94 @@ async def _login(config: Config, args) -> int:
     return 0
 
 
+def _configured_bots(config: Config) -> list[AccountConfig]:
+    return [account for account in config.telegram.users if account.is_bot and account.bot_token]
+
+
+def _bot_accounts(config: Config, args) -> tuple[list[AccountConfig], int]:
+    if getattr(args, "all", False):
+        if getattr(args, "names", []):
+            print("error: use either bot names or --all, not both", file=sys.stderr)
+            return [], 1
+        bots = _configured_bots(config)
+        if not bots:
+            print("error: no bots configured with bot_token", file=sys.stderr)
+            return [], 1
+        return bots, 0
+
+    names = getattr(args, "names", None)
+    if names is None and hasattr(args, "name"):
+        names = [args.name]
+    if not names:
+        print("error: provide at least one bot name or --all", file=sys.stderr)
+        return [], 1
+
+    selected: list[AccountConfig] = []
+    for name in names:
+        account = _account(config, name)
+        if account is None:
+            print(f"error: account '{name}' not found in config", file=sys.stderr)
+            return [], 1
+        if not account.is_bot or not account.bot_token:
+            print(f"error: '{name}' has no bot_token in config", file=sys.stderr)
+            return [], 1
+        selected.append(account)
+    return selected, 0
+
+
+async def _register_bot(account: AccountConfig, store) -> None:
+    assert account.bot_token is not None
+    await auth.login_bot(
+        account.name, account.api_id, account.api_hash, account.bot_token, store
+    )
+
+
 async def _add_bot(config: Config, args) -> int:
-    account = _account(config, args.name)
-    if account is None:
-        print(f"error: account '{args.name}' not found in config", file=sys.stderr)
-        return 1
-    if not account.is_bot or not account.bot_token:
-        print(f"error: '{args.name}' has no bot_token in config", file=sys.stderr)
-        return 1
+    bot_accounts, rc = _bot_accounts(config, args)
+    if rc:
+        return rc
     async with _open_store(config) as store:
-        await auth.login_bot(
-            account.name, account.api_id, account.api_hash, account.bot_token, store
-        )
-    print(f"registered bot '{account.name}'")
+        for account in bot_accounts:
+            await _register_bot(account, store)
+            print(f"registered bot '{account.name}'")
+    return 0
+
+
+async def _setup(config: Config, args) -> int:
+    force = bool(getattr(args, "force", False))
+    user_logins = 0
+    bot_registrations = 0
+    skipped = 0
+    async with _open_store(config) as store:
+        for account in config.telegram.users:
+            if not force and await store.load(account.name):
+                kind = "bot" if account.is_bot else "user"
+                print(f"skipped '{account.name}' ({kind}, session already exists)")
+                skipped += 1
+                continue
+            if account.is_bot:
+                if not account.bot_token:
+                    print(f"error: '{account.name}' has no bot_token in config", file=sys.stderr)
+                    return 1
+                await _register_bot(account, store)
+                print(f"registered bot '{account.name}'")
+                bot_registrations += 1
+                continue
+            caps = await auth.login_user(
+                account.name, account.api_id, account.api_hash, store,
+                code_callback=lambda: input("Telegram code: "),
+            )
+            tier = "premium" if caps.is_premium else "free"
+            print(
+                f"logged in '{account.name}' (user, {tier}, max parts {caps.max_upload_parts})"
+            )
+            user_logins += 1
+    print(
+        "setup complete: "
+        f"{user_logins} user login{'' if user_logins == 1 else 's'}, "
+        f"{bot_registrations} bot registration{'' if bot_registrations == 1 else 's'}, "
+        f"{skipped} skipped"
+    )
     return 0
 
 

@@ -255,11 +255,19 @@ All commands accept `--config`; the default is `./config.yaml`.
 # Inspect configured accounts and saved sessions.
 tgshelf --config config.yaml accounts list
 
-# Interactive login for a user account defined in telegram.users.
+# Create every missing user and bot session from telegram.users.
+tgshelf --config config.yaml accounts setup
+
+# Recreate every user and bot session from telegram.users.
+tgshelf --config config.yaml accounts setup --force
+
+# Interactive login for one user account defined in telegram.users.
 tgshelf --config config.yaml accounts login main
 
-# Register a bot whose bot_token is already present in config.yaml.
+# Register one or more bots whose bot_token is already present in config.yaml.
 tgshelf --config config.yaml accounts add-bot bot01
+tgshelf --config config.yaml accounts add-bot bot01 bot02 bot03
+tgshelf --config config.yaml accounts add-bot --all
 
 # Start the HTTP API, Web UI, watcher, metrics, and enabled WebDAV surfaces.
 tgshelf --config config.yaml serve

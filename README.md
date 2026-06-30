@@ -110,6 +110,26 @@ npm run typecheck
 npm run build
 ```
 
+## Versioning And Releases
+
+The package version is defined in one place:
+
+```python
+src/tgshelf/__init__.py
+```
+
+`pyproject.toml` reads the version dynamically from that file, and
+`tgshelf --version` prints the same value.
+
+Release tags are created only from `main`, which is the official release branch.
+Use semantic versions with a `v` tag prefix:
+
+```text
+v0.1.0
+v0.1.1
+v0.2.0
+```
+
 ## Configuration
 
 ```yaml

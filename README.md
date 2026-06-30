@@ -94,6 +94,60 @@ http://127.0.0.1:3000/webui
 The server redirects `/` to `/webui`; older `/b/...`, `/search`, and `/stats`
 Web UI routes redirect to their `/webui/...` equivalents.
 
+## Docker
+
+The Docker image contains only `tgshelf` and the built Web UI. PostgreSQL is
+external and is configured through the `DB` environment variable.
+
+Build the image:
+
+```sh
+docker build -t tgshelf:local .
+```
+
+Run it against an existing PostgreSQL container or service:
+
+```sh
+docker run -d \
+  --name tgshelf \
+  --restart unless-stopped \
+  -p 3000:3000 \
+  -e DB='postgresql+asyncpg://DB_USER:DB_PASS@DB_HOST:5432/DB_NAME' \
+  -e TGSHELF_CONFIG=/config/config.yaml \
+  -v /opt/tgshelf/config:/config:ro \
+  -v /opt/tgshelf/data:/data \
+  tgshelf:local
+```
+
+For Docker and Portainer deployments, set these values in the mounted
+`config.yaml`:
+
+```yaml
+data: /data
+
+http:
+  enabled: true
+  host: 0.0.0.0
+  port: 3000
+```
+
+On `serve`, the container runs `alembic upgrade head` before starting the HTTP
+server. Set `TGSHELF_RUN_MIGRATIONS=0` if migrations are handled externally.
+
+Interactive account setup can be run with the same image and mounted config:
+
+```sh
+docker run --rm -it \
+  -e DB='postgresql+asyncpg://DB_USER:DB_PASS@DB_HOST:5432/DB_NAME' \
+  -e TGSHELF_CONFIG=/config/config.yaml \
+  -v /opt/tgshelf/config:/config:ro \
+  -v /opt/tgshelf/data:/data \
+  tgshelf:local accounts setup
+```
+
+When using bind mounts, make sure `/opt/tgshelf/data` is writable by container
+UID `10001`.
+
 ## Verification
 
 Python:

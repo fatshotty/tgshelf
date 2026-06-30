@@ -90,6 +90,16 @@ def _truthy(value: str) -> bool:
     return value.lower() in ("1", "true", "yes")
 
 
+def _parent_path(path: str) -> str:
+    parent, _, _name = path.rstrip("/").rpartition("/")
+    return parent or "/"
+
+
+def _search_result_sort_key(result: dict) -> tuple[int, str]:
+    node = result["node"]
+    return (0 if node["is_folder"] else 1, result["path"].casefold())
+
+
 _LIST_STATES = ("ACTIVE", "DELETED", "TEMP")
 
 
@@ -136,7 +146,20 @@ async def search(request: web.Request) -> web.Response:
     root_id = request.query.get("root")
     async with open_fs(request) as fs:
         nodes = await fs.search(term, root_id=root_id)
-        return web.json_response([node_to_dict(n) for n in nodes])
+        results = []
+        for node in nodes:
+            path = await fs.path_of(node.id)
+            if path is None:
+                continue
+            results.append(
+                {
+                    "node": node_to_dict(node),
+                    "path": path,
+                    "parent_path": _parent_path(path),
+                }
+            )
+        results.sort(key=_search_result_sort_key)
+        return web.json_response(results)
 
 
 # -- write: tree --------------------------------------------------------------

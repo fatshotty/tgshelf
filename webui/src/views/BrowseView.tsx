@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { type FormEvent, useState } from 'react'
+import { type FormEvent, useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 
 import { api, ApiError } from '../api/client'
@@ -13,6 +13,7 @@ import type { NodeAction } from '../components/NodeMenu'
 import { SplitPartsDialog } from '../components/SplitPartsDialog'
 import { useToast } from '../components/Toast'
 import { useTreeActions } from '../lib/mutations'
+import { filterNodesByName } from '../lib/nodeFilter'
 import { browseUrl, fsPath, pathSegments } from '../lib/path'
 
 // which modal (if any) is open, and on which node
@@ -56,7 +57,14 @@ export default function BrowseView() {
   const actions = useTreeActions(folder?.id, path)
   const [dialog, setDialog] = useState<Dialog>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
-  const selectedFiles = nodes.filter((node) => selectedIds.has(node.id) && node.state === 'ACTIVE' && !node.is_folder && !node.inline)
+  const [q, setQ] = useState('')
+  const filteredNodes = filterNodesByName(nodes, q)
+  const selectedFiles = filteredNodes.filter((node) => selectedIds.has(node.id) && node.state === 'ACTIVE' && !node.is_folder && !node.inline)
+
+  useEffect(() => {
+    setQ('')
+    setSelectedIds(new Set())
+  }, [path])
 
   const onAction = (node: FsNode, a: NodeAction) => {
     if (a === 'size') setDialog({ kind: 'size', node })
@@ -71,7 +79,6 @@ export default function BrowseView() {
     else if (a === 'restore') actions.restore(node.id).catch((e) => toast(String(e), 'error'))
   }
 
-  const [q, setQ] = useState('')
   const onSearch = (e: FormEvent) => {
     e.preventDefault()
     if (q.trim()) navigate(`/search?q=${encodeURIComponent(q.trim())}`)
@@ -110,7 +117,10 @@ export default function BrowseView() {
           </label>
         </div>
         <form className="search" onSubmit={onSearch}>
-          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search…" />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter or search…" />
+          <button className="btn" type="submit" disabled={!q.trim()}>
+            Search
+          </button>
         </form>
       </div>
 
@@ -127,7 +137,7 @@ export default function BrowseView() {
         {folder?.is_folder && activeQ.isLoading && <div className="info">Loading…</div>}
         {folder?.is_folder && activeQ.data && (
           <NodeList
-            nodes={nodes}
+            nodes={filteredNodes}
             selectedIds={selectedIds}
             onToggleSelect={(node, selected) =>
               setSelectedIds((prev) => {

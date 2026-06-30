@@ -520,7 +520,7 @@ paths:
           description: Optional subtree root id to scope the search.
           schema: { type: string }
       responses:
-        "200": { $ref: "#/components/responses/NodeList" }
+        "200": { $ref: "#/components/responses/SearchResultList" }
 
   /api/v1/folders:
     post:
@@ -664,6 +664,19 @@ components:
           type: array
           items: { $ref: "#/components/schemas/Node" }
       required: [source, extracted]
+    SearchResult:
+      type: object
+      properties:
+        node: { $ref: "#/components/schemas/Node" }
+        path:
+          type: string
+          description: Absolute virtual path for this result.
+          example: /Movies/Inception (2010)/Inception 1.mkv
+        parent_path:
+          type: string
+          description: Absolute virtual path of the containing folder.
+          example: /Movies/Inception (2010)
+      required: [node, path, parent_path]
     Error:
       type: object
       properties:
@@ -705,6 +718,13 @@ components:
           schema:
             type: array
             items: { $ref: "#/components/schemas/Node" }
+    SearchResultList:
+      description: Search results, sorted with folders first and then by path.
+      content:
+        application/json:
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/SearchResult" }
     OperationAccepted:
       description: Folder operation accepted; runs in the background (no tracking).
       content:

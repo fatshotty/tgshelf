@@ -113,8 +113,14 @@ export function MergePartsDialog({
               {ordered.map((row, pos) => (
                 <div className="part-row merge-row" key={row.key}>
                   <span className="part-index">#{row.part.idx}</span>
-                  <span className="part-name">{row.part.original_filename ?? row.fileName}</span>
-                  <span className="part-source">{row.fileName}</span>
+                  <span className="part-file">
+                    <span className="part-name" title={row.part.original_filename ?? row.fileName}>
+                      {row.part.original_filename ?? row.fileName}
+                    </span>
+                    <span className="part-source" title={row.fileName}>
+                      Source: {row.fileName}
+                    </span>
+                  </span>
                   <span className="part-size">{humanBytes(row.part.size)}</span>
                   <button type="button" disabled={pos === 0 || busy} onClick={() => setOrder((v) => swap(v, pos, pos - 1))}>
                     Up

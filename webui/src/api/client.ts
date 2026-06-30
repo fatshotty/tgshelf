@@ -2,7 +2,7 @@
 // auth (whole-origin) automatically — see auth/credentials.ts. Kept free of React
 // so it (and types.ts) can be reused by a future react-native app.
 import { authHeaders } from '../auth/credentials'
-import type { AcceptedOp, FilePart, FilePartRef, FsNode, MetricsSnapshot, NodeSize, SplitPartsResult } from './types'
+import type { AcceptedOp, FilePart, FilePartRef, FsNode, MetricsSnapshot, NodeSize, SearchResult, SplitPartsResult } from './types'
 
 export class ApiError extends Error {
   status: number
@@ -48,7 +48,7 @@ export const api = {
     request<FsNode[]>('GET', `/api/v1/nodes/${id(nodeId)}/children`, { query: { state } }),
   resolve: (path: string) => request<FsNode>('GET', '/api/v1/resolve', { query: { path } }),
   nodeSize: (nodeId: string) => request<NodeSize>('GET', `/api/v1/nodes/${id(nodeId)}/size`),
-  search: (q: string, root?: string) => request<FsNode[]>('GET', '/api/v1/search', { query: { q, root } }),
+  search: (q: string, root?: string) => request<SearchResult[]>('GET', '/api/v1/search', { query: { q, root } }),
 
   // -- tree management
   createFolder: (parentId: string, name: string) =>

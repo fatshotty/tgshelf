@@ -425,3 +425,76 @@ async def test_check_logs_only_folders_with_channel_override(caplog):
     messages = [record.getMessage() for record in caplog.records]
     assert "[check] processing channel folder: /media/movies (channel_id=-1001)" in messages
     assert not any("Inception (2010) (channel_id=" in message for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_check_processes_channel_folders_sequentially(caplog):
+    module = load_check_integrity_module()
+    root = SimpleNamespace(id="root", name="media", is_folder=True, size=0, channel_id=None)
+    animation = SimpleNamespace(id="animation", name="animation", is_folder=True, size=0, channel_id=-1001)
+    movies = SimpleNamespace(id="movies", name="movies", is_folder=True, size=0, channel_id=-1002)
+    animation_file = SimpleNamespace(id="animation-file", name="anim.mkv", is_folder=False, size=10, channel_id=-1001)
+    movies_file = SimpleNamespace(id="movies-file", name="movie.mkv", is_folder=False, size=10, channel_id=-1002)
+    parts = {
+        "animation-file": [SimpleNamespace(
+            idx=1, channel_id=-1001, message_id=11, doc_id=11, size=10,
+            original_filename="anim.mkv.001",
+        )],
+        "movies-file": [SimpleNamespace(
+            idx=1, channel_id=-1002, message_id=22, doc_id=22, size=10,
+            original_filename="movie.mkv.001",
+        )],
+    }
+
+    class FakeRepo:
+        async def children(self, node_id):
+            return {
+                "root": [animation, movies],
+                "animation": [animation_file],
+                "movies": [movies_file],
+            }.get(node_id, [])
+
+        async def content_of(self, node_id):
+            return None
+
+        async def parts_of(self, node_id):
+            return parts[node_id]
+
+        async def path_of(self, node_id):
+            return {
+                "root": "/media",
+                "animation": "/media/animation",
+                "movies": "/media/movies",
+                "animation-file": "/media/animation/anim.mkv",
+                "movies-file": "/media/movies/movie.mkv",
+            }[node_id]
+
+    class Gateway:
+        async def get_document(self, channel_id, message_id):
+            return SimpleNamespace(
+                doc_id=message_id,
+                size=10,
+                caption="filename: anim.mkv.001" if message_id == 11 else "filename: movie.mkv.001",
+            )
+
+    caplog.set_level(logging.INFO, logger="tgshelf.check")
+
+    verdicts, report = await module.check(
+        FakeRepo(),
+        root,
+        probes=[module.TelegramProbe("account_1", Gateway())],
+        deep_telegram=True,
+        concurrent=2,
+        progress_every=1,
+    )
+
+    assert report.checked == 2
+    assert [v.path for v in verdicts] == [
+        "/media/animation/anim.mkv",
+        "/media/movies/movie.mkv",
+    ]
+    messages = [record.getMessage() for record in caplog.records]
+    animation_start = messages.index("[check] processing channel folder: /media/animation (channel_id=-1001)")
+    first_done = messages.index("[check] telegram progress: 1/1 part(s)")
+    movies_start = messages.index("[check] processing channel folder: /media/movies (channel_id=-1002)")
+    assert animation_start < first_done < movies_start

@@ -305,28 +305,16 @@ async def check_file(repo, node, *, probes: list[TelegramProbe] | None = None,
     return verdict
 
 
-async def walk_files(repo, start_node, depth: int, *, log_channel_folders: bool = False):
+async def walk_files(repo, start_node, depth: int):
     """Yield the file nodes under start_node. A file start yields itself. For a
     folder, descend `depth` folder levels (the start folder is level 1, so
     depth=1 = its direct files only); depth=0 = the whole subtree."""
-    async def maybe_log_channel_folder(folder) -> None:
-        channel_id = getattr(folder, "channel_id", None)
-        if not log_channel_folders or channel_id is None:
-            return
-        try:
-            path = await repo.path_of(folder.id)
-        except Exception as exc:  # noqa: BLE001 - progress logging must not abort the check
-            log.exception("[check] cannot resolve path for channel folder '%s': %s", folder.name, exc)
-            path = folder.name
-        log.info("[check] processing channel folder: %s (channel_id=%s)", path or folder.name, channel_id)
-
     if not start_node.is_folder:
         yield start_node
         return
     queue = [(start_node, 1)]
     while queue:
         folder, level = queue.pop(0)
-        await maybe_log_channel_folder(folder)
         for child in await repo.children(folder.id):
             if child.is_folder:
                 if depth == 0 or level < depth:
@@ -335,17 +323,48 @@ async def walk_files(repo, start_node, depth: int, *, log_channel_folders: bool 
                 yield child
 
 
-async def check(repo, start_node, *, depth: int = 0, probes=None,
-                deep_telegram: bool = False, concurrent: int = 1,
-                progress_every: int = 100) -> tuple[list[Verdict], Report]:
-    """Walk every file under start_node and check it. NEVER stops at the first
-    failure: an exception on one file becomes an error verdict and the walk goes
-    on, so the final report covers the whole (sub)tree."""
+async def _log_channel_folder(repo, folder) -> None:
+    channel_id = getattr(folder, "channel_id", None)
+    if channel_id is None:
+        return
+    try:
+        path = await repo.path_of(folder.id)
+    except Exception as exc:  # noqa: BLE001 - progress logging must not abort the check
+        log.exception("[check] cannot resolve path for channel folder '%s': %s", folder.name, exc)
+        path = folder.name
+    log.info("[check] processing channel folder: %s (channel_id=%s)", path or folder.name, channel_id)
+
+
+async def _channel_folders_under(repo, start_node, depth: int) -> list[Any]:
+    """Return channel-root folders to process as sequential work units.
+
+    Once a folder has its own channel_id, its whole subtree belongs to that
+    work unit for check progress purposes. This keeps logs aligned with the
+    operational folders users monitor.
+    """
+    if not start_node.is_folder:
+        return []
+    folders: list[Any] = []
+    queue = [(start_node, 1)]
+    while queue:
+        folder, level = queue.pop(0)
+        if getattr(folder, "channel_id", None) is not None:
+            folders.append(folder)
+            continue
+        for child in await repo.children(folder.id):
+            if child.is_folder and (depth == 0 or level < depth):
+                queue.append((child, level + 1))
+    return folders
+
+
+async def _check_scope(repo, start_node, *, depth: int, probes=None,
+                       deep_telegram: bool, concurrent: int,
+                       progress_every: int) -> list[Verdict]:
+    """Check one sequential work unit and finish its Telegram jobs before returning."""
     verdicts: list[Verdict] = []
     telegram_jobs: list[tuple[Verdict, Any]] = []
-    progress_every = max(1, progress_every)
     log.info("[check] walking files under '%s' depth=%s", start_node.name, depth)
-    async for node in walk_files(repo, start_node, depth, log_channel_folders=True):
+    async for node in walk_files(repo, start_node, depth):
         try:
             v, is_telegram_backed, parts = await _inspect_db_file(repo, node)
             if probes and is_telegram_backed:
@@ -418,6 +437,41 @@ async def check(repo, start_node, *, depth: int = 0, probes=None,
         )
         for verdict, issues in results:
             verdict.issues.extend(issues)
+    return verdicts
+
+
+async def check(repo, start_node, *, depth: int = 0, probes=None,
+                deep_telegram: bool = False, concurrent: int = 1,
+                progress_every: int = 100) -> tuple[list[Verdict], Report]:
+    """Walk every file under start_node and check it. NEVER stops at the first
+    failure: an exception on one file becomes an error verdict and the walk goes
+    on, so the final report covers the whole (sub)tree."""
+    progress_every = max(1, progress_every)
+    channel_folders = await _channel_folders_under(repo, start_node, depth)
+    verdicts: list[Verdict] = []
+
+    if channel_folders:
+        for folder in channel_folders:
+            await _log_channel_folder(repo, folder)
+            verdicts.extend(await _check_scope(
+                repo,
+                folder,
+                depth=0,
+                probes=probes,
+                deep_telegram=deep_telegram,
+                concurrent=concurrent,
+                progress_every=progress_every,
+            ))
+    else:
+        verdicts.extend(await _check_scope(
+            repo,
+            start_node,
+            depth=depth,
+            probes=probes,
+            deep_telegram=deep_telegram,
+            concurrent=concurrent,
+            progress_every=progress_every,
+        ))
 
     for v in verdicts:
         if not v.ok:

@@ -15,3 +15,8 @@ The planned missing-message recovery script should require `--dry-run` only when
 the operator wants a dry run. If `--dry-run` is absent, the command is allowed to
 perform the restore and must keep a resumable ledger before making Telegram or
 database changes.
+
+The recovery caption must follow the existing upload pattern: `fileName:
+<parts.original_filename>`. It should not use the logical node name, because
+uploaded multipart messages are addressed and verified by their physical part
+filename (`.001`, `.002`, etc. when present).

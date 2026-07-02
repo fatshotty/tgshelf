@@ -29,6 +29,7 @@ from tgshelf.db.engine import create_engine, create_session_factory  # noqa: E40
 from tgshelf.db.models import Part  # noqa: E402
 from tgshelf.http.serve import make_rate_limiter, start_clients  # noqa: E402
 from tgshelf.log import setup_logging  # noqa: E402
+from tgshelf.telegram.errors import FloodCooldown  # noqa: E402
 
 log = logging.getLogger("tgshelf.recover")
 
@@ -270,6 +271,25 @@ async def _copy_entry(gateway: Any, entry: RecoveryEntry, caption: str) -> PartR
     return copied[0]
 
 
+async def copy_entry_with_cooldown_retry(
+    gateway: Any,
+    entry: RecoveryEntry,
+    caption: str,
+    *,
+    sleep: Any = asyncio.sleep,
+) -> PartRecord:
+    while True:
+        try:
+            return await _copy_entry(gateway, entry, caption)
+        except FloodCooldown as exc:
+            log.warning(
+                "[recover] Telegram write cooldown for %ss while restoring %s; retrying",
+                exc.seconds,
+                entry.media_path,
+            )
+            await sleep(exc.seconds)
+
+
 async def apply_recovery(config_path: str, entries: list[RecoveryEntry], ledger_path: Path) -> int:
     config = load_config(config_path)
     setup_logging(config.logger)
@@ -304,7 +324,7 @@ async def apply_recovery(config_path: str, entries: list[RecoveryEntry], ledger_
                         entry.main_channel_id,
                         entry.media_path,
                     )
-                    new_part = await _copy_entry(gateway, entry, caption)
+                    new_part = await copy_entry_with_cooldown_retry(gateway, entry, caption)
                     append_ledger(
                         ledger_path,
                         LedgerEvent(

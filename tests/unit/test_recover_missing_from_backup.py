@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def load_recovery_module():
     path = Path(__file__).resolve().parents[2] / "scripts" / "recover_missing_from_backup.py"
@@ -126,3 +128,38 @@ def test_dry_run_is_explicit_and_apply_is_implicit():
 
     assert dry.dry_run is True
     assert apply.dry_run is False
+
+
+@pytest.mark.asyncio
+async def test_copy_entry_with_cooldown_retry_sleeps_and_retries(monkeypatch):
+    module = load_recovery_module()
+    entry = module.RecoveryEntry.from_record(recovery_record())
+    expected = entry.backup_part
+    attempts = 0
+    sleeps = []
+
+    async def fake_copy_entry(gateway, entry_arg, caption):
+        nonlocal attempts
+        attempts += 1
+        assert gateway == "gateway"
+        assert entry_arg is entry
+        assert caption == "fileName: Show_S01E01.mkv"
+        if attempts == 1:
+            raise module.FloodCooldown(3)
+        return expected
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(module, "_copy_entry", fake_copy_entry)
+
+    result = await module.copy_entry_with_cooldown_retry(
+        "gateway",
+        entry,
+        "fileName: Show_S01E01.mkv",
+        sleep=fake_sleep,
+    )
+
+    assert result is expected
+    assert attempts == 2
+    assert sleeps == [3]

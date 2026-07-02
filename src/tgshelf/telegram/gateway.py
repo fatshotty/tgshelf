@@ -59,9 +59,15 @@ class Gateway(Protocol):
         ...
 
     async def copy_message(
-        self, from_channel_id: int, message_id: int, to_channel_id: int
+        self,
+        from_channel_id: int,
+        message_id: int,
+        to_channel_id: int,
+        *,
+        caption: str | None = None,
     ) -> tuple[int, int]:
         """Re-send a message to another channel (no forward header);
+        when `caption` is provided it replaces the source message caption;
         returns the new (message_id, doc_id)."""
         ...
 

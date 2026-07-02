@@ -133,6 +133,24 @@ async def test_copy_message_rate_limits_only_the_send_write():
 
 
 @pytest.mark.asyncio
+async def test_copy_message_can_override_caption():
+    raw = FakeTelethonClient()
+    client = TgClient(raw, name="main")
+
+    await client.copy_message(
+        from_channel_id=-100,
+        message_id=7,
+        to_channel_id=-200,
+        caption="filename: canonical.mkv",
+    )
+
+    send_request = next(
+        req for req in raw.requests if req.__class__.__name__ == "SendMediaRequest"
+    )
+    assert send_request.message == "filename: canonical.mkv"
+
+
+@pytest.mark.asyncio
 async def test_delete_message_rate_limits_the_delete_write():
     raw = FakeTelethonClient()
     limiter = RecordingRateLimiter()

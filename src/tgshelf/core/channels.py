@@ -7,7 +7,7 @@ ONE implementation of each, replacing the legacy's divergent copies
 from __future__ import annotations
 
 import logging
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from tgshelf.core.upload import PartRecord
 from tgshelf.telegram.errors import DocIdMismatch, PartMissing, Severity, TgError
@@ -44,6 +44,7 @@ async def forward_parts(
     dest_channel: int,
     *,
     always_copy: bool = False,
+    caption_factory: Callable[[PartRecord], str | None] | None = None,
 ) -> list[PartRecord]:
     """Copy each part to `dest_channel`, returning the new part records.
 
@@ -55,7 +56,8 @@ async def forward_parts(
 
     For a MOVE, a part already in `dest_channel` is kept as-is (same file, no
     duplicate). For a COPY (`always_copy=True`) every part is duplicated so the
-    new node owns its own messages (no shared-message footgun).
+    new node owns its own messages (no shared-message footgun). `caption_factory`
+    lets recovery flows canonicalize captions on the copied messages.
     """
     new_parts: list[PartRecord] = []
     for part in parts:
@@ -78,8 +80,9 @@ async def forward_parts(
         elif ref.doc_id != part.doc_id:
             raise DocIdMismatch(expected=part.doc_id, found=ref.doc_id)
 
+        caption = caption_factory(part) if caption_factory is not None else None
         message_id, doc_id = await gateway.copy_message(
-            part.channel_id, part.message_id, dest_channel
+            part.channel_id, part.message_id, dest_channel, caption=caption
         )
         new_parts.append(
             PartRecord(

@@ -342,7 +342,12 @@ class TgClient:
         return _extract_sent(result)
 
     async def copy_message(
-        self, from_channel_id: int, message_id: int, to_channel_id: int
+        self,
+        from_channel_id: int,
+        message_id: int,
+        to_channel_id: int,
+        *,
+        caption: str | None = None,
     ) -> tuple[int, int]:
         # fetch the source message once: we need both its document (to re-send
         # server-side, no byte transfer) and its caption (the "fileName: …" set
@@ -369,7 +374,7 @@ class TgClient:
                 media=media,
                 random_id=_random_id(),
                 silent=True,
-                message=message.message or "",  # preserve the original caption
+                message=(message.message or "") if caption is None else caption,
             ),
             rate_limit=True,
         )

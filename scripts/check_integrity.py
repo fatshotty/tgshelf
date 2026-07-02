@@ -95,6 +95,17 @@ def _expected_caption(original_filename: str | None) -> str | None:
     return f"filename: {original_filename}"
 
 
+def _caption_filename(caption: str | None) -> str | None:
+    if not isinstance(caption, str):
+        return None
+    for line in caption.splitlines():
+        key, sep, value = line.partition(":")
+        if sep and key.strip().lower() == "filename":
+            filename = value.strip()
+            return filename or None
+    return None
+
+
 def _rotate_probes(probes: list[TelegramProbe], offset: int) -> list[TelegramProbe]:
     if not probes:
         return []
@@ -198,6 +209,7 @@ async def verify_telegram_part(
         expected = _expected_caption(part.original_filename)
         actual = getattr(ref, "caption", None)
         actual_stripped = actual.strip() if isinstance(actual, str) else ""
+        actual_filename = _caption_filename(actual)
         if expected is None:
             issues.append(Issue(
                 code="caption_original_filename_missing",
@@ -234,7 +246,7 @@ async def verify_telegram_part(
                 clients_tried=clients_tried,
                 recoverability="message_exists_but_metadata_is_incomplete",
             ))
-        elif actual_stripped != expected:
+        elif actual_filename != part.original_filename:
             issues.append(Issue(
                 code="caption_mismatch",
                 severity="error",

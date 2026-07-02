@@ -212,6 +212,39 @@ async def test_deep_telegram_report_captures_part_repair_details(capsys, tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_deep_telegram_accepts_filename_line_in_multiline_caption():
+    module = load_check_integrity_module()
+    part = SimpleNamespace(
+        idx=1,
+        channel_id=-100,
+        message_id=101,
+        doc_id=1001,
+        size=10,
+        original_filename="Inception (2010) - WebDL 1080p AC3 10.1 GB.mkv.001",
+    )
+
+    class FakeGateway:
+        async def get_document(self, channel_id, message_id):
+            return SimpleNamespace(
+                doc_id=1001,
+                size=10,
+                caption=(
+                    "fileName: Inception (2010) - WebDL 1080p AC3 10.1 GB.mkv.001\n"
+                    "season: 0\n"
+                    "part: 1/3"
+                ),
+            )
+
+    issues = await module.verify_telegram_part(
+        [module.TelegramProbe("user_main", FakeGateway())],
+        part,
+        deep=True,
+    )
+
+    assert issues == []
+
+
+@pytest.mark.asyncio
 async def test_telegram_part_checks_respect_concurrency_and_spread_probe_starts():
     module = load_check_integrity_module()
     active = 0
@@ -425,6 +458,52 @@ async def test_check_logs_only_folders_with_channel_override(caplog):
     messages = [record.getMessage() for record in caplog.records]
     assert "[check] processing channel folder: /media/movies (channel_id=-1001)" in messages
     assert not any("Inception (2010) (channel_id=" in message for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_check_skips_folders_that_only_repeat_inherited_channel(caplog):
+    module = load_check_integrity_module()
+    root = SimpleNamespace(id="root", name="media", is_folder=True, size=0, channel_id=None)
+    movies = SimpleNamespace(id="movies", name="movies", is_folder=True, size=0, channel_id=-1001)
+    inherited = SimpleNamespace(id="inherited", name="Inception (2010)", is_folder=True, size=0, channel_id=-1001)
+    file_node = SimpleNamespace(id="file1", name="movie.mkv", is_folder=False, size=3, channel_id=-1001)
+
+    class FakeRepo:
+        async def children(self, node_id):
+            return {
+                "root": [movies],
+                "movies": [inherited],
+                "inherited": [file_node],
+            }.get(node_id, [])
+
+        async def content_of(self, node_id):
+            return b"abc"
+
+        async def parts_of(self, node_id):
+            return []
+
+        async def path_of(self, node_id):
+            return {
+                "root": "/media",
+                "movies": "/media/movies",
+                "inherited": "/media/movies/Inception (2010)",
+                "file1": "/media/movies/Inception (2010)/movie.mkv",
+            }[node_id]
+
+    caplog.set_level(logging.INFO, logger="tgshelf.check")
+
+    verdicts, report = await module.check(
+        FakeRepo(),
+        root,
+        depth=0,
+        progress_every=1,
+    )
+
+    assert report.checked == 1
+    assert [v.path for v in verdicts] == ["/media/movies/Inception (2010)/movie.mkv"]
+    messages = [record.getMessage() for record in caplog.records]
+    assert "[check] processing channel folder: /media/movies (channel_id=-1001)" in messages
+    assert not any("processing channel folder: /media/movies/Inception (2010)" in message for message in messages)
 
 
 @pytest.mark.asyncio

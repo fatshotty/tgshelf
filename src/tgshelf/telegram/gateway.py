@@ -23,6 +23,7 @@ class DocRef:
     size: int
     mime: str | None = None
     filename: str | None = None
+    caption: str | None = None
 
 
 @runtime_checkable

@@ -85,6 +85,7 @@ async def test_get_document_does_not_rate_limit_read_calls():
     doc = await client.get_document(channel_id=-100, message_id=7)
 
     assert doc is not None
+    assert doc.caption == "caption"
     assert limiter.accounts == []
 
 

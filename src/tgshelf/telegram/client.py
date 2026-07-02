@@ -166,6 +166,7 @@ class TgClient:
                 size=doc.size,
                 mime=getattr(doc, "mime_type", None),
                 filename=_filename_of(doc),
+                caption=getattr(message, "message", None),
             )
         # any other media (photo, …) normalized through telethon's input file
         return None

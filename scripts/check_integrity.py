@@ -16,8 +16,9 @@ is injected) so it is testable with a fake; `main()` wires Postgres and, for
 `--verify-telegram`, real clients from config.
 
 Usage:
-  python scripts/check_integrity.py [--db <DSN>] [--root <id>]
-  python scripts/check_integrity.py --verify-telegram --config ./config.yaml
+  python scripts/check_integrity.py /media --config ./config.yaml
+  python scripts/check_integrity.py /media --verify-telegram --config ./config.yaml
+  python scripts/check_integrity.py /media --db <DSN> --verify-telegram --config ./config.yaml
 """
 
 from __future__ import annotations
@@ -125,14 +126,14 @@ async def check(repo, start_node, *, depth: int = 0, gateway=None) -> tuple[list
 
 
 async def run(db_dsn: str, path: str, *, depth: int, verify_telegram: bool,
-              config_path: str) -> tuple[list[Verdict], Report]:
+              config_path: str, runtime_config=None) -> tuple[list[Verdict], Report]:
     from tgshelf.db.engine import create_engine, create_session_factory
     from tgshelf.db.repo import NodeRepo
 
     gateway = None
     clients = []
     if verify_telegram:
-        gateway, clients = await _build_gateway(config_path)
+        gateway, clients = await _build_gateway(config_path, runtime_config=runtime_config)
 
     engine = create_engine(db_dsn)
     try:
@@ -152,13 +153,13 @@ async def run(db_dsn: str, path: str, *, depth: int, verify_telegram: bool,
     return verdicts, report
 
 
-async def _build_gateway(config_path: str):
+async def _build_gateway(config_path: str, *, runtime_config=None):
     """Connect the configured accounts and return (gateway, clients). The gateway
     is one connected USER client (it must be a member of the channels to read)."""
     from tgshelf.config import load_config
     from tgshelf.http.serve import make_rate_limiter, start_clients
 
-    config = load_config(config_path)
+    config = runtime_config or load_config(config_path)
     rl = make_rate_limiter(config.telegram.rate_limit)
     pairs = await start_clients(config, rl)
     clients = [client for _account, client in pairs]
@@ -177,28 +178,52 @@ def _print_report(verdicts: list[Verdict], report: Report) -> None:
                 print(f"      - {issue}")
 
 
+def _load_runtime_config(config_path: str):
+    from tgshelf.config import load_config
+
+    return load_config(config_path)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check tgshelf file integrity (DB + optional Telegram).")
     parser.add_argument("path", nargs="?", default="/",
                         help="path of a folder or file to check (default: / = whole tree)")
-    parser.add_argument("--db", default=os.environ.get("DB"), help="Postgres DSN (or env DB)")
+    parser.add_argument("--db", default=os.environ.get("DB"),
+                        help="Postgres DSN override (default: env DB, then config db)")
     parser.add_argument("--depth", type=int, default=0,
                         help="folder navigation depth from the start folder; 0 = infinite (whole subtree)")
     parser.add_argument("--verify-telegram", action="store_true",
                         help="also verify each part still exists on Telegram (doc_id/size)")
-    parser.add_argument("--config", default="./config.yaml", help="config for --verify-telegram")
+    parser.add_argument("--allow-unlimited-telegram", action="store_true",
+                        help="allow --verify-telegram even when telegram.rate_limit.calls is 0")
+    parser.add_argument("--config", default="./config.yaml",
+                        help="runtime config for db fallback and --verify-telegram")
     parser.add_argument("--log", default="info", help="log level")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=args.log.upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    if not args.db:
-        parser.error("--db (or env DB) is required")
+    runtime_config = None
+    if not args.db or args.verify_telegram:
+        runtime_config = _load_runtime_config(args.config)
+    db_dsn = args.db or runtime_config.db
+    if not db_dsn:
+        parser.error("--db (or env DB, or config db) is required")
+    if (
+        args.verify_telegram
+        and runtime_config.telegram.rate_limit.calls <= 0
+        and not args.allow_unlimited_telegram
+    ):
+        parser.error(
+            "--verify-telegram requires telegram.rate_limit.calls > 0; "
+            "set it in config.yaml or pass --allow-unlimited-telegram"
+        )
     if args.depth < 0:
         parser.error("--depth must be >= 0 (0 = infinite)")
 
     verdicts, report = asyncio.run(run(
-        args.db, args.path, depth=args.depth,
+        db_dsn, args.path, depth=args.depth,
         verify_telegram=args.verify_telegram, config_path=args.config,
+        runtime_config=runtime_config,
     ))
     _print_report(verdicts, report)
     return 1 if report.bad else 0

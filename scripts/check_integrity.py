@@ -110,6 +110,14 @@ async def _get_document_from_any_probe(probes: list[TelegramProbe], part, *, off
         try:
             ref = await probe.gateway.get_document(part.channel_id, part.message_id)
         except Exception as exc:  # noqa: BLE001 - keep trying other accounts/bots
+            log.warning(
+                "[check] telegram probe '%s' failed for channel_id=%s message_id=%s: %s",
+                probe.name,
+                part.channel_id,
+                part.message_id,
+                exc,
+                exc_info=log.isEnabledFor(logging.DEBUG),
+            )
             client_errors[probe.name] = str(exc)
             continue
         if ref is not None:
@@ -297,16 +305,28 @@ async def check_file(repo, node, *, probes: list[TelegramProbe] | None = None,
     return verdict
 
 
-async def walk_files(repo, start_node, depth: int):
+async def walk_files(repo, start_node, depth: int, *, log_channel_folders: bool = False):
     """Yield the file nodes under start_node. A file start yields itself. For a
     folder, descend `depth` folder levels (the start folder is level 1, so
     depth=1 = its direct files only); depth=0 = the whole subtree."""
+    async def maybe_log_channel_folder(folder) -> None:
+        channel_id = getattr(folder, "channel_id", None)
+        if not log_channel_folders or channel_id is None:
+            return
+        try:
+            path = await repo.path_of(folder.id)
+        except Exception as exc:  # noqa: BLE001 - progress logging must not abort the check
+            log.exception("[check] cannot resolve path for channel folder '%s': %s", folder.name, exc)
+            path = folder.name
+        log.info("[check] processing channel folder: %s (channel_id=%s)", path or folder.name, channel_id)
+
     if not start_node.is_folder:
         yield start_node
         return
     queue = [(start_node, 1)]
     while queue:
         folder, level = queue.pop(0)
+        await maybe_log_channel_folder(folder)
         for child in await repo.children(folder.id):
             if child.is_folder:
                 if depth == 0 or level < depth:
@@ -316,13 +336,16 @@ async def walk_files(repo, start_node, depth: int):
 
 
 async def check(repo, start_node, *, depth: int = 0, probes=None,
-                deep_telegram: bool = False, concurrent: int = 1) -> tuple[list[Verdict], Report]:
+                deep_telegram: bool = False, concurrent: int = 1,
+                progress_every: int = 100) -> tuple[list[Verdict], Report]:
     """Walk every file under start_node and check it. NEVER stops at the first
     failure: an exception on one file becomes an error verdict and the walk goes
     on, so the final report covers the whole (sub)tree."""
     verdicts: list[Verdict] = []
     telegram_jobs: list[tuple[Verdict, Any]] = []
-    async for node in walk_files(repo, start_node, depth):
+    progress_every = max(1, progress_every)
+    log.info("[check] walking files under '%s' depth=%s", start_node.name, depth)
+    async for node in walk_files(repo, start_node, depth, log_channel_folders=True):
         try:
             v, is_telegram_backed, parts = await _inspect_db_file(repo, node)
             if probes and is_telegram_backed:
@@ -340,15 +363,55 @@ async def check(repo, start_node, *, depth: int = 0, probes=None,
             )
             log.exception("[check] %s '%s' raised", node.id, node.name)
         verdicts.append(v)
+        if len(verdicts) % progress_every == 0:
+            log.info(
+                "[check] db scan progress: %s file(s), %s telegram part(s)",
+                len(verdicts),
+                len(telegram_jobs),
+            )
+
+    log.info(
+        "[check] db scan complete: %s file(s), %s telegram part(s)",
+        len(verdicts),
+        len(telegram_jobs),
+    )
 
     if probes and telegram_jobs:
         sem = asyncio.Semaphore(max(1, concurrent))
+        total_parts = len(telegram_jobs)
+        completed_parts = 0
+        log.info(
+            "[check] telegram verification started: %s part(s), concurrency=%s, probes=%s",
+            total_parts,
+            max(1, concurrent),
+            len(probes),
+        )
 
         async def run_part(job_idx: int, verdict: Verdict, part) -> tuple[Verdict, list[Issue]]:
+            nonlocal completed_parts
             async with sem:
-                return verdict, await verify_telegram_part(
+                issues = await verify_telegram_part(
                     probes, part, deep=deep_telegram, offset=job_idx
                 )
+                for issue in issues:
+                    logger = log.error if issue.severity == "error" else log.warning
+                    logger(
+                        "[check] telegram issue: path=%s part=%s channel_id=%s message_id=%s code=%s message=%s",
+                        verdict.path,
+                        issue.part_idx,
+                        issue.channel_id,
+                        issue.message_id,
+                        issue.code,
+                        issue.message,
+                    )
+                completed_parts += 1
+                if completed_parts % progress_every == 0 or completed_parts == total_parts:
+                    log.info(
+                        "[check] telegram progress: %s/%s part(s)",
+                        completed_parts,
+                        total_parts,
+                    )
+                return verdict, issues
 
         results = await asyncio.gather(
             *(run_part(i, verdict, part) for i, (verdict, part) in enumerate(telegram_jobs))
@@ -365,6 +428,7 @@ async def check(repo, start_node, *, depth: int = 0, probes=None,
                 "; ".join(issue.message for issue in v.issues if issue.severity == "error"),
             )
     report = Report(checked=len(verdicts), bad=sum(1 for v in verdicts if not v.ok))
+    log.info("[check] complete: %s", report)
     return verdicts, report
 
 
@@ -373,7 +437,7 @@ async def check(repo, start_node, *, depth: int = 0, probes=None,
 
 async def run(db_dsn: str, path: str, *, depth: int, verify_telegram: bool,
               deep_telegram: bool, include_bots: bool, concurrent: int, config_path: str,
-              runtime_config=None) -> tuple[list[Verdict], Report]:
+              runtime_config=None, progress_every: int = 100) -> tuple[list[Verdict], Report]:
     from tgshelf.db.engine import create_engine, create_session_factory
     from tgshelf.db.repo import NodeRepo
 
@@ -393,6 +457,7 @@ async def run(db_dsn: str, path: str, *, depth: int, verify_telegram: bool,
             verdicts, report = await check(
                 NodeRepo(session), start, depth=depth, probes=probes,
                 deep_telegram=deep_telegram, concurrent=concurrent,
+                progress_every=progress_every,
             )
     finally:
         await engine.dispose()
@@ -424,6 +489,11 @@ async def _build_gateways(config_path: str, *, include_bots: bool, runtime_confi
     )
     if not selected:
         raise SystemExit("no usable user account; run `tgshelf accounts login <name>`")
+    log.info(
+        "[check] telegram probes ready: %s selected, %s connected",
+        len(selected),
+        len(pairs),
+    )
     return [TelegramProbe(account.name, client) for account, client in selected], clients
 
 
@@ -511,6 +581,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--report-jsonl", help="write a machine-readable issue report as JSONL")
     parser.add_argument("--concurrent", type=int,
                         help="parallel Telegram checks (default: env CONCURRENCY, then config operations.concurrent)")
+    parser.add_argument("--progress-every", type=int, default=100,
+                        help="log progress every N files/Telegram parts (default: 100)")
     parser.add_argument("--allow-unlimited-telegram", action="store_true",
                         help=argparse.SUPPRESS)
     parser.add_argument("--config", default="./config.yaml",
@@ -519,6 +591,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=args.log.upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    logging.getLogger("telethon").setLevel(logging.WARNING)
     runtime_config = None
     if args.deep_telegram:
         args.verify_telegram = True
@@ -533,10 +606,20 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--db (or env DB, or config db) is required")
     if args.depth < 0:
         parser.error("--depth must be >= 0 (0 = infinite)")
+    if args.progress_every < 1:
+        parser.error("--progress-every must be >= 1")
     try:
         concurrent = resolve_concurrent(runtime_config, cli_value=getattr(args, "concurrent", None))
     except ValueError as exc:
         parser.error(str(exc))
+    log.info(
+        "[check] starting path=%s verify_telegram=%s deep_telegram=%s include_bots=%s concurrency=%s",
+        args.path,
+        args.verify_telegram,
+        args.deep_telegram,
+        args.include_bots,
+        concurrent,
+    )
 
     verdicts, report = asyncio.run(run(
         db_dsn, args.path, depth=args.depth,
@@ -546,6 +629,7 @@ def main(argv: list[str] | None = None) -> int:
         concurrent=concurrent,
         config_path=args.config,
         runtime_config=runtime_config,
+        progress_every=args.progress_every,
     ))
     _print_report(verdicts, report)
     if args.report_jsonl:

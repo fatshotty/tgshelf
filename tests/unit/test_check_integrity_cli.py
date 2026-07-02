@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import asyncio
+import logging
 import sys
 import time
 from pathlib import Path
@@ -55,6 +56,7 @@ operations:
         concurrent,
         config_path,
         runtime_config,
+        progress_every,
     ):
         calls["db_dsn"] = db_dsn
         calls["path"] = path
@@ -65,6 +67,7 @@ operations:
         calls["concurrent"] = concurrent
         calls["config_path"] = config_path
         calls["runtime_config"] = runtime_config
+        calls["progress_every"] = progress_every
         return [], module.Report()
 
     monkeypatch.setattr(module, "run", fake_run)
@@ -78,6 +81,7 @@ operations:
     assert calls["deep_telegram"] is False
     assert calls["include_bots"] is False
     assert calls["concurrent"] == 7
+    assert calls["progress_every"] == 100
     assert calls["runtime_config"].telegram.rate_limit.calls == 7
     assert calls["runtime_config"].telegram.rate_limit.window == 2.5
     assert "integrity report: 0 file(s) checked, 0 with issues" in capsys.readouterr().out
@@ -314,3 +318,110 @@ async def test_check_concurrency_applies_across_files_not_only_parts():
     assert [v.ok for v in verdicts] == [True, True]
     assert max_active == 2
     assert time.perf_counter() - started < 0.04
+
+
+@pytest.mark.asyncio
+async def test_check_logs_walk_and_telegram_progress(caplog):
+    module = load_check_integrity_module()
+    root = SimpleNamespace(id="root", name="media", is_folder=True, size=0)
+    files = [
+        SimpleNamespace(id="file1", name="one.mkv", is_folder=False, size=10),
+        SimpleNamespace(id="file2", name="two.mkv", is_folder=False, size=10),
+    ]
+    parts = {
+        "file1": [SimpleNamespace(
+            idx=1, channel_id=-100, message_id=1, doc_id=1, size=10,
+            original_filename="one.mkv.001",
+        )],
+        "file2": [SimpleNamespace(
+            idx=1, channel_id=-100, message_id=2, doc_id=2, size=10,
+            original_filename="two.mkv.001",
+        )],
+    }
+
+    class FakeRepo:
+        async def children(self, node_id):
+            return files if node_id == "root" else []
+
+        async def content_of(self, node_id):
+            return None
+
+        async def parts_of(self, node_id):
+            return parts[node_id]
+
+        async def path_of(self, node_id):
+            return f"/media/{node_id}.mkv"
+
+    class Gateway:
+        async def get_document(self, channel_id, message_id):
+            return SimpleNamespace(
+                doc_id=message_id,
+                size=10,
+                caption=f"filename: {'one' if message_id == 1 else 'two'}.mkv.001",
+            )
+
+    caplog.set_level(logging.INFO, logger="tgshelf.check")
+
+    verdicts, report = await module.check(
+        FakeRepo(),
+        root,
+        probes=[module.TelegramProbe("account_1", Gateway())],
+        deep_telegram=True,
+        concurrent=1,
+        progress_every=1,
+    )
+
+    assert report.checked == 2
+    assert [v.ok for v in verdicts] == [True, True]
+    messages = [record.getMessage() for record in caplog.records]
+    assert "[check] walking files under 'media' depth=0" in messages
+    assert "[check] db scan complete: 2 file(s), 2 telegram part(s)" in messages
+    assert "[check] telegram progress: 1/2 part(s)" in messages
+    assert "[check] telegram progress: 2/2 part(s)" in messages
+    assert "[check] complete: 2 file(s) checked, 0 with issues" in messages
+
+
+@pytest.mark.asyncio
+async def test_check_logs_only_folders_with_channel_override(caplog):
+    module = load_check_integrity_module()
+    root = SimpleNamespace(id="root", name="media", is_folder=True, size=0, channel_id=None)
+    movies = SimpleNamespace(id="movies", name="movies", is_folder=True, size=0, channel_id=-1001)
+    inception = SimpleNamespace(id="inception", name="Inception (2010)", is_folder=True, size=0, channel_id=None)
+    file_node = SimpleNamespace(id="file1", name="movie.mkv", is_folder=False, size=3, channel_id=-1001)
+
+    class FakeRepo:
+        async def children(self, node_id):
+            return {
+                "root": [movies],
+                "movies": [inception],
+                "inception": [file_node],
+            }.get(node_id, [])
+
+        async def content_of(self, node_id):
+            return b"abc"
+
+        async def parts_of(self, node_id):
+            return []
+
+        async def path_of(self, node_id):
+            return {
+                "root": "/media",
+                "movies": "/media/movies",
+                "inception": "/media/movies/Inception (2010)",
+                "file1": "/media/movies/Inception (2010)/movie.mkv",
+            }[node_id]
+
+    caplog.set_level(logging.INFO, logger="tgshelf.check")
+
+    verdicts, report = await module.check(
+        FakeRepo(),
+        root,
+        depth=0,
+        progress_every=1,
+    )
+
+    assert report.checked == 1
+    assert [v.path for v in verdicts] == ["/media/movies/Inception (2010)/movie.mkv"]
+    messages = [record.getMessage() for record in caplog.records]
+    assert "[check] processing channel folder: /media/movies (channel_id=-1001)" in messages
+    assert not any("Inception (2010) (channel_id=" in message for message in messages)

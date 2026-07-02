@@ -245,6 +245,53 @@ async def test_deep_telegram_accepts_filename_line_in_multiline_caption():
 
 
 @pytest.mark.asyncio
+async def test_deep_telegram_accepts_logical_filename_for_legacy_part_names():
+    module = load_check_integrity_module()
+    node = SimpleNamespace(
+        id="file1",
+        name="I Griffin presentano - It's a Trap! (2010) - 1080p h264 AAC 2ch 2,80 G.mkv",
+        size=2802423554,
+    )
+    parts = [
+        SimpleNamespace(
+            idx=0,
+            channel_id=-1001609217041,
+            message_id=1621,
+            doc_id=5983334685407713011,
+            size=2802423554,
+            original_filename="I_Griffin_presentano_It's_a_Trap!_2010_1080p_h264_AAC_2ch_2,80_G.mkv",
+        )
+    ]
+
+    class FakeRepo:
+        async def content_of(self, node_id):
+            return None
+
+        async def parts_of(self, node_id):
+            return parts
+
+        async def path_of(self, node_id):
+            return "/media/animation/I Griffin presentano - It's a Trap! (2010)/" + node.name
+
+    class FakeGateway:
+        async def get_document(self, channel_id, message_id):
+            return SimpleNamespace(
+                doc_id=5983334685407713011,
+                size=2802423554,
+                caption="fileName: I Griffin presentano - It's a Trap! (2010) - 1080p h264 AAC 2ch 2,80 G.mkv",
+            )
+
+    verdict = await module.check_file(
+        FakeRepo(),
+        node,
+        probes=[module.TelegramProbe("user_main", FakeGateway())],
+        deep_telegram=True,
+    )
+
+    assert verdict.issues == []
+
+
+@pytest.mark.asyncio
 async def test_telegram_part_checks_respect_concurrency_and_spread_probe_starts():
     module = load_check_integrity_module()
     active = 0

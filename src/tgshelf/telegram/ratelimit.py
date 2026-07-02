@@ -1,9 +1,9 @@
-"""Per-account proactive rate limiting.
+"""Per-account proactive write rate limiting.
 
-A sliding window of "N Telegram API calls per M seconds" per account. The count
-point is TgClient.invoke (the single choke point of every raw call): when the
-window is full the client cools the account down BEFORE Telegram floods it,
-reusing the existing cooldown/failover machinery.
+A sliding window of "N Telegram write calls per M seconds" per account. Callers
+opt in before Telegram write operations that are flood-sensitive (send/copy,
+delete, admin edits). Reads, downloads, and SaveBigFilePart upload chunks are not
+proactively limited; they still handle Telegram's real FloodWait responses.
 
 The backend is pluggable behind `RateLimiter`: `InMemoryRateLimiter` (per
 instance) now; a shared backend (Redis, keyed on Postgres now()) can be added
@@ -20,7 +20,7 @@ from typing import Callable, Protocol, runtime_checkable
 @runtime_checkable
 class RateLimiter(Protocol):
     def acquire(self, account: str) -> float:
-        """Record one call for `account`. Return 0.0 if allowed, else the
+        """Record one write for `account`. Return 0.0 if allowed, else the
         seconds until a slot frees (the caller should cool the account down)."""
         ...
 

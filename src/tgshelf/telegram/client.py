@@ -3,7 +3,9 @@
 Every raw call goes through `_with_middleware`: a per-client semaphore bounds
 concurrent transmissions, short FloodWaits are slept-and-retried inline, long
 ones surface as FloodCooldown for the pool, transient server errors get a
-bounded exponential backoff, and the rest become typed domain errors. The raw
+bounded exponential backoff, and the rest become typed domain errors. The
+proactive rate limiter is opt-in for Telegram write operations only; reads,
+downloads, and SaveBigFilePart upload chunks must stay unlimited. The raw
 upload/download/forward methods implement the Gateway protocol so engines never
 touch telethon — they are exercised by manual smoke tests (real Telegram).
 """
@@ -89,17 +91,23 @@ class TgClient:
 
     # -- middleware --------------------------------------------------------
 
-    async def invoke(self, request: Any) -> Any:
-        return await self._with_middleware(lambda: self._client(request))
+    async def invoke(self, request: Any, *, rate_limit: bool = False) -> Any:
+        return await self._with_middleware(
+            lambda: self._client(request), rate_limit=rate_limit
+        )
 
-    async def _with_middleware(self, do_call: Callable[[], Awaitable[Any]]) -> Any:
+    async def _with_middleware(
+        self, do_call: Callable[[], Awaitable[Any]], *, rate_limit: bool = False
+    ) -> Any:
         async with self._sem:
             transient = 0
             floods = 0
             while True:
-                # proactive per-account rate limit: bench the account before
-                # Telegram floods it (reuses the FloodCooldown failover path)
-                if self._rate_limiter is not None:
+                # Proactive per-account write limit: bench the account before
+                # Telegram floods it (reuses the FloodCooldown failover path).
+                # Read/download calls and SaveBigFilePart upload chunks are not
+                # proactively limited; they still handle real FloodWait errors.
+                if rate_limit and self._rate_limiter is not None:
                     wait = self._rate_limiter.acquire(self.name)
                     if wait > 0:
                         log.debug("[ratelimit] '%s' window full; backing off %.1fs", self.name, wait)
@@ -327,7 +335,8 @@ class TgClient:
                 random_id=_random_id(),
                 silent=True,
                 message=caption,
-            )
+            ),
+            rate_limit=True,
         )
         return _extract_sent(result)
 
@@ -360,14 +369,16 @@ class TgClient:
                 random_id=_random_id(),
                 silent=True,
                 message=message.message or "",  # preserve the original caption
-            )
+            ),
+            rate_limit=True,
         )
         return _extract_sent(result)
 
     async def delete_message(self, channel_id: int, message_id: int) -> bool:
         entity = await self._client.get_input_entity(channel_id)
         result = await self._with_middleware(
-            lambda: self._client.delete_messages(entity, [message_id])
+            lambda: self._client.delete_messages(entity, [message_id]),
+            rate_limit=True,
         )
         # telethon returns AffectedMessages; pts_count 0 = nothing deleted
         affected = result[0] if isinstance(result, list) else result

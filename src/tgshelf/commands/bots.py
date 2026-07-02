@@ -140,6 +140,8 @@ async def send_and_wait(
     timeout: float = 15.0,
     poll: float = 2.0,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    rate_limiter=None,
+    account_name: str = "",
 ) -> str:
     """Send `text` to BotFather and poll the chat for its reply (there is no
     request/response API). Remembers the last message id, sends (sleeping through
@@ -150,6 +152,7 @@ async def send_and_wait(
 
     while True:
         try:
+            await _wait_write_slot(rate_limiter, account_name, sleep=sleep)
             await client.send_message(BOTFATHER, text)
             break
         except tg_errors.FloodWaitError as exc:
@@ -181,11 +184,14 @@ async def promote_bot(
     bot: str | int,
     *,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    rate_limiter=None,
+    account_name: str = "",
 ) -> None:
     channel = utils.get_input_channel(await client.get_input_entity(channel_id))
     user = utils.get_input_user(await client.get_input_entity(bot))
 
     async def _promote() -> None:
+        await _wait_write_slot(rate_limiter, account_name, sleep=sleep)
         await client(
             EditAdminRequest(channel=channel, user_id=user, admin_rights=_READONLY_ADMIN, rank="")
         )
@@ -196,6 +202,17 @@ async def promote_bot(
         await _promote()
     except Exception as exc:  # noqa: BLE001 - second pass is best-effort
         log.warning("could not re-apply @%s rights in %s: %s", bot, channel_id, exc)
+
+
+async def _wait_write_slot(rate_limiter, account_name: str, *, sleep) -> None:
+    if rate_limiter is None or not account_name:
+        return
+    while True:
+        wait = rate_limiter.acquire(account_name)
+        if wait <= 0:
+            return
+        log.debug("[ratelimit] '%s' write window full; waiting %.1fs", account_name, wait)
+        await sleep(wait)
 
 
 # -- shared wiring: sessions, connected client, channel set -----------------
@@ -342,9 +359,18 @@ async def run_create(config: Config, args) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
+    from tgshelf.http.serve import make_rate_limiter
+
+    rate_limiter = make_rate_limiter(config.telegram.rate_limit)
     failures = 0
     async with _connect_user(config, account) as client:
-        say = lambda text, timeout=15.0: send_and_wait(client, text, timeout=timeout)  # noqa: E731
+        say = lambda text, timeout=15.0: send_and_wait(  # noqa: E731
+            client,
+            text,
+            timeout=timeout,
+            rate_limiter=rate_limiter,
+            account_name=account.name,
+        )
         for i in range(count):
             n = start + i
             username = bot_username(prefix, n)
@@ -359,7 +385,13 @@ async def run_create(config: Config, args) -> int:
 
             for channel_id in selected:
                 try:
-                    await promote_bot(client, channel_id, f"@{username}")
+                    await promote_bot(
+                        client,
+                        channel_id,
+                        f"@{username}",
+                        rate_limiter=rate_limiter,
+                        account_name=account.name,
+                    )
                     log.info("@%s added to channel %s", username, channel_id)
                 except Exception as exc:  # noqa: BLE001 - one channel never aborts the batch
                     log.error("FAILED to add @%s to %s: %s", username, channel_id, exc)
@@ -401,6 +433,9 @@ async def run_check(config: Config, args) -> int:
         log.info("no channels in use; nothing to check")
         return 0
 
+    from tgshelf.http.serve import make_rate_limiter
+
+    rate_limiter = make_rate_limiter(config.telegram.rate_limit)
     repaired = failed = 0
     async with _connect_user(config, account) as client:
         for channel_id in channels:
@@ -418,7 +453,13 @@ async def run_check(config: Config, args) -> int:
                     continue
                 log.warning("[repair] @%s missing from %s; promoting", bot.name, channel_id)
                 try:
-                    await promote_bot(client, channel_id, f"@{bot.name}")
+                    await promote_bot(
+                        client,
+                        channel_id,
+                        f"@{bot.name}",
+                        rate_limiter=rate_limiter,
+                        account_name=account.name,
+                    )
                     repaired += 1
                 except Exception as exc:  # noqa: BLE001 - report and keep going
                     log.error("FAILED to add @%s to %s: %s", bot.name, channel_id, exc)

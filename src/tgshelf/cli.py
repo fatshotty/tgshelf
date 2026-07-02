@@ -75,7 +75,10 @@ def build_parser() -> argparse.ArgumentParser:
         elif name == "sync":
             cmd.add_argument("local_dir", help="local directory to upload")
             cmd.add_argument("--dest", help="drive destination folder (default: /)")
-            cmd.add_argument("--concurrent", type=int, help="parallel uploads (default: config operations.concurrent)")
+            cmd.add_argument(
+                "--concurrent", type=int,
+                help="parallel uploads (default: env CONCURRENCY, then config operations.concurrent)",
+            )
             cmd.add_argument("--delete-source", action="store_true", dest="delete_source",
                              help="delete each uploaded file from disk (+ prune emptied dirs, not the root)")
             cmd.add_argument("--overwrite", action="store_true",
@@ -86,7 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
             cmd.add_argument("path", help="drive path of a file or folder to download")
             cmd.add_argument("--dest", help="local destination dir (default: cwd)")
             cmd.add_argument("--concurrent", type=int,
-                             help="parallel files (default: config operations.concurrent)")
+                             help="parallel files (default: env CONCURRENCY, then config operations.concurrent)")
             cmd.add_argument("--overwrite", action="store_true",
                              help="re-download from scratch (ignore skip/resume)")
             cmd.add_argument("--log-file", dest="log_file",

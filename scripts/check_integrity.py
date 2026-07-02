@@ -95,10 +95,17 @@ def _expected_caption(original_filename: str | None) -> str | None:
     return f"filename: {original_filename}"
 
 
-async def _get_document_from_any_probe(probes: list[TelegramProbe], part):
+def _rotate_probes(probes: list[TelegramProbe], offset: int) -> list[TelegramProbe]:
+    if not probes:
+        return []
+    pivot = offset % len(probes)
+    return probes[pivot:] + probes[:pivot]
+
+
+async def _get_document_from_any_probe(probes: list[TelegramProbe], part, *, offset: int = 0):
     clients_tried: list[str] = []
     client_errors: dict[str, str] = {}
-    for probe in probes:
+    for probe in _rotate_probes(probes, offset):
         clients_tried.append(probe.name)
         try:
             ref = await probe.gateway.get_document(part.channel_id, part.message_id)
@@ -110,136 +117,152 @@ async def _get_document_from_any_probe(probes: list[TelegramProbe], part):
     return None, None, clients_tried, client_errors
 
 
-async def verify_telegram_parts(probes: list[TelegramProbe], parts, *, deep: bool) -> list[Issue]:
+async def verify_telegram_part(
+    probes: list[TelegramProbe], part, *, deep: bool, offset: int = 0
+) -> list[Issue]:
     """Per-part Telegram verification: message exists + doc_id/size/caption match."""
     issues: list[Issue] = []
-    for p in parts:
-        ref, verified_by, clients_tried, client_errors = await _get_document_from_any_probe(probes, p)
-        if ref is None:
-            code = "unreachable" if client_errors and len(client_errors) == len(clients_tried) else "missing_message"
-            recoverability = (
-                "cannot_confirm_message_state"
-                if code == "unreachable"
-                else "cannot_rebuild_part_from_telegram"
-            )
+    ref, verified_by, clients_tried, client_errors = await _get_document_from_any_probe(
+        probes, part, offset=offset
+    )
+    if ref is None:
+        code = "unreachable" if client_errors and len(client_errors) == len(clients_tried) else "missing_message"
+        recoverability = (
+            "cannot_confirm_message_state"
+            if code == "unreachable"
+            else "cannot_rebuild_part_from_telegram"
+        )
+        issues.append(Issue(
+            code=code,
+            severity="error",
+            message=f"part {part.idx}: message {part.channel_id}/{part.message_id} {code}",
+            part_idx=part.idx,
+            channel_id=part.channel_id,
+            message_id=part.message_id,
+            doc_id_db=part.doc_id,
+            size_db=part.size,
+            original_filename_db=part.original_filename,
+            caption_expected=_expected_caption(part.original_filename),
+            clients_tried=clients_tried,
+            recoverability=recoverability,
+            details={"client_errors": client_errors} if client_errors else {},
+        ))
+        return issues
+    if part.doc_id is not None and ref.doc_id is not None and ref.doc_id != part.doc_id:
+        issues.append(Issue(
+            code="doc_id_mismatch",
+            severity="error",
+            message=f"part {part.idx}: doc_id mismatch (db {part.doc_id} != tg {ref.doc_id})",
+            part_idx=part.idx,
+            channel_id=part.channel_id,
+            message_id=part.message_id,
+            doc_id_db=part.doc_id,
+            doc_id_tg=ref.doc_id,
+            size_db=part.size,
+            size_tg=ref.size,
+            original_filename_db=part.original_filename,
+            caption_expected=_expected_caption(part.original_filename),
+            caption_actual=getattr(ref, "caption", None),
+            verified_by=verified_by,
+            clients_tried=clients_tried,
+            recoverability="message_exists_but_identity_is_suspicious",
+        ))
+    if ref.size != part.size:
+        issues.append(Issue(
+            code="part_size_mismatch",
+            severity="error",
+            message=f"part {part.idx}: size mismatch (db {part.size} != tg {ref.size})",
+            part_idx=part.idx,
+            channel_id=part.channel_id,
+            message_id=part.message_id,
+            doc_id_db=part.doc_id,
+            doc_id_tg=ref.doc_id,
+            size_db=part.size,
+            size_tg=ref.size,
+            original_filename_db=part.original_filename,
+            caption_expected=_expected_caption(part.original_filename),
+            caption_actual=getattr(ref, "caption", None),
+            verified_by=verified_by,
+            clients_tried=clients_tried,
+            recoverability="message_exists_but_size_is_suspicious",
+        ))
+    if deep:
+        expected = _expected_caption(part.original_filename)
+        actual = getattr(ref, "caption", None)
+        actual_stripped = actual.strip() if isinstance(actual, str) else ""
+        if expected is None:
             issues.append(Issue(
-                code=code,
-                severity="error",
-                message=f"part {p.idx}: message {p.channel_id}/{p.message_id} {code}",
-                part_idx=p.idx,
-                channel_id=p.channel_id,
-                message_id=p.message_id,
-                doc_id_db=p.doc_id,
-                size_db=p.size,
-                original_filename_db=p.original_filename,
-                caption_expected=_expected_caption(p.original_filename),
-                clients_tried=clients_tried,
-                recoverability=recoverability,
-                details={"client_errors": client_errors} if client_errors else {},
-            ))
-            continue
-        if p.doc_id is not None and ref.doc_id is not None and ref.doc_id != p.doc_id:
-            issues.append(Issue(
-                code="doc_id_mismatch",
-                severity="error",
-                message=f"part {p.idx}: doc_id mismatch (db {p.doc_id} != tg {ref.doc_id})",
-                part_idx=p.idx,
-                channel_id=p.channel_id,
-                message_id=p.message_id,
-                doc_id_db=p.doc_id,
+                code="caption_original_filename_missing",
+                severity="warning",
+                message=f"part {part.idx}: original filename missing in db; caption cannot be verified",
+                part_idx=part.idx,
+                channel_id=part.channel_id,
+                message_id=part.message_id,
+                doc_id_db=part.doc_id,
                 doc_id_tg=ref.doc_id,
-                size_db=p.size,
+                size_db=part.size,
                 size_tg=ref.size,
-                original_filename_db=p.original_filename,
-                caption_expected=_expected_caption(p.original_filename),
-                caption_actual=getattr(ref, "caption", None),
+                caption_actual=actual,
                 verified_by=verified_by,
                 clients_tried=clients_tried,
-                recoverability="message_exists_but_identity_is_suspicious",
+                recoverability="cannot_verify_caption_without_db_original_filename",
             ))
-        if ref.size != p.size:
+        elif not actual_stripped:
             issues.append(Issue(
-                code="part_size_mismatch",
+                code="caption_missing",
                 severity="error",
-                message=f"part {p.idx}: size mismatch (db {p.size} != tg {ref.size})",
-                part_idx=p.idx,
-                channel_id=p.channel_id,
-                message_id=p.message_id,
-                doc_id_db=p.doc_id,
+                message=f"part {part.idx}: caption missing",
+                part_idx=part.idx,
+                channel_id=part.channel_id,
+                message_id=part.message_id,
+                doc_id_db=part.doc_id,
                 doc_id_tg=ref.doc_id,
-                size_db=p.size,
+                size_db=part.size,
                 size_tg=ref.size,
-                original_filename_db=p.original_filename,
-                caption_expected=_expected_caption(p.original_filename),
-                caption_actual=getattr(ref, "caption", None),
+                original_filename_db=part.original_filename,
+                caption_expected=expected,
+                caption_actual=actual,
                 verified_by=verified_by,
                 clients_tried=clients_tried,
-                recoverability="message_exists_but_size_is_suspicious",
+                recoverability="message_exists_but_metadata_is_incomplete",
             ))
-        if deep:
-            expected = _expected_caption(p.original_filename)
-            actual = getattr(ref, "caption", None)
-            actual_stripped = actual.strip() if isinstance(actual, str) else ""
-            if expected is None:
-                issues.append(Issue(
-                    code="caption_original_filename_missing",
-                    severity="warning",
-                    message=f"part {p.idx}: original filename missing in db; caption cannot be verified",
-                    part_idx=p.idx,
-                    channel_id=p.channel_id,
-                    message_id=p.message_id,
-                    doc_id_db=p.doc_id,
-                    doc_id_tg=ref.doc_id,
-                    size_db=p.size,
-                    size_tg=ref.size,
-                    caption_actual=actual,
-                    verified_by=verified_by,
-                    clients_tried=clients_tried,
-                    recoverability="cannot_verify_caption_without_db_original_filename",
-                ))
-            elif not actual_stripped:
-                issues.append(Issue(
-                    code="caption_missing",
-                    severity="error",
-                    message=f"part {p.idx}: caption missing",
-                    part_idx=p.idx,
-                    channel_id=p.channel_id,
-                    message_id=p.message_id,
-                    doc_id_db=p.doc_id,
-                    doc_id_tg=ref.doc_id,
-                    size_db=p.size,
-                    size_tg=ref.size,
-                    original_filename_db=p.original_filename,
-                    caption_expected=expected,
-                    caption_actual=actual,
-                    verified_by=verified_by,
-                    clients_tried=clients_tried,
-                    recoverability="message_exists_but_metadata_is_incomplete",
-                ))
-            elif actual_stripped != expected:
-                issues.append(Issue(
-                    code="caption_mismatch",
-                    severity="error",
-                    message=f"part {p.idx}: caption mismatch",
-                    part_idx=p.idx,
-                    channel_id=p.channel_id,
-                    message_id=p.message_id,
-                    doc_id_db=p.doc_id,
-                    doc_id_tg=ref.doc_id,
-                    size_db=p.size,
-                    size_tg=ref.size,
-                    original_filename_db=p.original_filename,
-                    caption_expected=expected,
-                    caption_actual=actual,
-                    verified_by=verified_by,
-                    clients_tried=clients_tried,
-                    recoverability="message_exists_but_metadata_is_suspicious",
-                ))
+        elif actual_stripped != expected:
+            issues.append(Issue(
+                code="caption_mismatch",
+                severity="error",
+                message=f"part {part.idx}: caption mismatch",
+                part_idx=part.idx,
+                channel_id=part.channel_id,
+                message_id=part.message_id,
+                doc_id_db=part.doc_id,
+                doc_id_tg=ref.doc_id,
+                size_db=part.size,
+                size_tg=ref.size,
+                original_filename_db=part.original_filename,
+                caption_expected=expected,
+                caption_actual=actual,
+                verified_by=verified_by,
+                clients_tried=clients_tried,
+                recoverability="message_exists_but_metadata_is_suspicious",
+            ))
     return issues
 
 
-async def check_file(repo, node, *, probes: list[TelegramProbe] | None = None,
-                     deep_telegram: bool = False) -> Verdict:
+async def verify_telegram_parts(
+    probes: list[TelegramProbe], parts, *, deep: bool, concurrent: int
+) -> list[Issue]:
+    """Verify all parts with a global concurrency cap for this file."""
+    sem = asyncio.Semaphore(max(1, concurrent))
+
+    async def run_one(job_idx: int, part) -> list[Issue]:
+        async with sem:
+            return await verify_telegram_part(probes, part, deep=deep, offset=job_idx)
+
+    batches = await asyncio.gather(*(run_one(i, part) for i, part in enumerate(parts)))
+    return [issue for batch in batches for issue in batch]
+
+
+async def _inspect_db_file(repo, node) -> tuple[Verdict, bool, Any]:
     content = await repo.content_of(node.id)
     parts = await repo.parts_of(node.id)
     path = await repo.path_of(node.id) or node.name
@@ -254,10 +277,24 @@ async def check_file(repo, node, *, probes: list[TelegramProbe] | None = None,
             size_tg=effective,
             recoverability="database_parts_do_not_match_node_size",
         ))
+    return (
+        Verdict(node.id, node.name, path, node.size, effective, len(parts), issues),
+        content is None,
+        parts,
+    )
+
+
+async def check_file(repo, node, *, probes: list[TelegramProbe] | None = None,
+                     deep_telegram: bool = False, concurrent: int = 1) -> Verdict:
+    verdict, is_telegram_backed, parts = await _inspect_db_file(repo, node)
     # Telegram-level only for on-Telegram files (inline has no parts)
-    if probes and content is None:
-        issues.extend(await verify_telegram_parts(probes, parts, deep=deep_telegram))
-    return Verdict(node.id, node.name, path, node.size, effective, len(parts), issues)
+    if probes and is_telegram_backed:
+        verdict.issues.extend(
+            await verify_telegram_parts(
+                probes, parts, deep=deep_telegram, concurrent=concurrent
+            )
+        )
+    return verdict
 
 
 async def walk_files(repo, start_node, depth: int):
@@ -279,14 +316,17 @@ async def walk_files(repo, start_node, depth: int):
 
 
 async def check(repo, start_node, *, depth: int = 0, probes=None,
-                deep_telegram: bool = False) -> tuple[list[Verdict], Report]:
+                deep_telegram: bool = False, concurrent: int = 1) -> tuple[list[Verdict], Report]:
     """Walk every file under start_node and check it. NEVER stops at the first
     failure: an exception on one file becomes an error verdict and the walk goes
     on, so the final report covers the whole (sub)tree."""
     verdicts: list[Verdict] = []
+    telegram_jobs: list[tuple[Verdict, Any]] = []
     async for node in walk_files(repo, start_node, depth):
         try:
-            v = await check_file(repo, node, probes=probes, deep_telegram=deep_telegram)
+            v, is_telegram_backed, parts = await _inspect_db_file(repo, node)
+            if probes and is_telegram_backed:
+                telegram_jobs.extend((v, part) for part in parts)
         except Exception as exc:  # noqa: BLE001 - keep going; record and report
             path = await repo.path_of(node.id) or node.name
             v = Verdict(
@@ -299,6 +339,24 @@ async def check(repo, start_node, *, depth: int = 0, probes=None,
                 [Issue(code="check_error", severity="error", message=f"error: {exc}")],
             )
             log.exception("[check] %s '%s' raised", node.id, node.name)
+        verdicts.append(v)
+
+    if probes and telegram_jobs:
+        sem = asyncio.Semaphore(max(1, concurrent))
+
+        async def run_part(job_idx: int, verdict: Verdict, part) -> tuple[Verdict, list[Issue]]:
+            async with sem:
+                return verdict, await verify_telegram_part(
+                    probes, part, deep=deep_telegram, offset=job_idx
+                )
+
+        results = await asyncio.gather(
+            *(run_part(i, verdict, part) for i, (verdict, part) in enumerate(telegram_jobs))
+        )
+        for verdict, issues in results:
+            verdict.issues.extend(issues)
+
+    for v in verdicts:
         if not v.ok:
             log.warning(
                 "[check] %s '%s': %s",
@@ -306,7 +364,6 @@ async def check(repo, start_node, *, depth: int = 0, probes=None,
                 v.name,
                 "; ".join(issue.message for issue in v.issues if issue.severity == "error"),
             )
-        verdicts.append(v)
     report = Report(checked=len(verdicts), bad=sum(1 for v in verdicts if not v.ok))
     return verdicts, report
 
@@ -315,7 +372,7 @@ async def check(repo, start_node, *, depth: int = 0, probes=None,
 
 
 async def run(db_dsn: str, path: str, *, depth: int, verify_telegram: bool,
-              deep_telegram: bool, include_bots: bool, config_path: str,
+              deep_telegram: bool, include_bots: bool, concurrent: int, config_path: str,
               runtime_config=None) -> tuple[list[Verdict], Report]:
     from tgshelf.db.engine import create_engine, create_session_factory
     from tgshelf.db.repo import NodeRepo
@@ -335,7 +392,7 @@ async def run(db_dsn: str, path: str, *, depth: int, verify_telegram: bool,
                 raise SystemExit(f"path not found: {path}")
             verdicts, report = await check(
                 NodeRepo(session), start, depth=depth, probes=probes,
-                deep_telegram=deep_telegram,
+                deep_telegram=deep_telegram, concurrent=concurrent,
             )
     finally:
         await engine.dispose()
@@ -436,6 +493,8 @@ def _load_runtime_config(config_path: str):
 
 
 def main(argv: list[str] | None = None) -> int:
+    from tgshelf.commands.common import resolve_concurrent
+
     parser = argparse.ArgumentParser(description="Check tgshelf file integrity (DB + optional Telegram).")
     parser.add_argument("path", nargs="?", default="/",
                         help="path of a folder or file to check (default: / = whole tree)")
@@ -450,6 +509,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--include-bots", action="store_true",
                         help="include configured bot accounts in Telegram verification")
     parser.add_argument("--report-jsonl", help="write a machine-readable issue report as JSONL")
+    parser.add_argument("--concurrent", type=int,
+                        help="parallel Telegram checks (default: env CONCURRENCY, then config operations.concurrent)")
     parser.add_argument("--allow-unlimited-telegram", action="store_true",
                         help=argparse.SUPPRESS)
     parser.add_argument("--config", default="./config.yaml",
@@ -465,17 +526,24 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--include-bots requires --verify-telegram or --deep-telegram")
     if not args.db or args.verify_telegram:
         runtime_config = _load_runtime_config(args.config)
+    if runtime_config is None:
+        runtime_config = _load_runtime_config(args.config)
     db_dsn = args.db or runtime_config.db
     if not db_dsn:
         parser.error("--db (or env DB, or config db) is required")
     if args.depth < 0:
         parser.error("--depth must be >= 0 (0 = infinite)")
+    try:
+        concurrent = resolve_concurrent(runtime_config, cli_value=getattr(args, "concurrent", None))
+    except ValueError as exc:
+        parser.error(str(exc))
 
     verdicts, report = asyncio.run(run(
         db_dsn, args.path, depth=args.depth,
         verify_telegram=args.verify_telegram,
         deep_telegram=args.deep_telegram,
         include_bots=args.include_bots,
+        concurrent=concurrent,
         config_path=args.config,
         runtime_config=runtime_config,
     ))

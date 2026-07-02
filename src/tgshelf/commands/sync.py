@@ -224,7 +224,14 @@ async def run(config: Config, args) -> int:
         print(f"error: not a directory: {local_dir}", file=sys.stderr)
         return 1
 
+    from tgshelf.commands.common import resolve_concurrent
     from tgshelf.http.serve import build_runtime, make_rate_limiter, start_clients
+
+    try:
+        concurrent = resolve_concurrent(config, cli_value=getattr(args, "concurrent", None))
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
     rate_limiter = make_rate_limiter(config.telegram.rate_limit)
     pairs = await start_clients(config, rate_limiter)
@@ -273,7 +280,7 @@ async def run(config: Config, args) -> int:
             streamer=runtime["streamer"],
             local_dir=local_dir,
             dest=dest,
-            concurrent=getattr(args, "concurrent", None) or config.operations.concurrent,
+            concurrent=concurrent,
             delete_source=getattr(args, "delete_source", False),
             overwrite=getattr(args, "overwrite", False),
             state=state,

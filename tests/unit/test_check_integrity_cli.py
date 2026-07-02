@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import asyncio
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -35,6 +37,8 @@ telegram:
   rate_limit:
     calls: 7
     window: 2.5
+operations:
+  concurrent: 7
 """,
         encoding="utf-8",
     )
@@ -48,6 +52,7 @@ telegram:
         verify_telegram,
         deep_telegram,
         include_bots,
+        concurrent,
         config_path,
         runtime_config,
     ):
@@ -57,6 +62,7 @@ telegram:
         calls["verify_telegram"] = verify_telegram
         calls["deep_telegram"] = deep_telegram
         calls["include_bots"] = include_bots
+        calls["concurrent"] = concurrent
         calls["config_path"] = config_path
         calls["runtime_config"] = runtime_config
         return [], module.Report()
@@ -71,6 +77,7 @@ telegram:
     assert calls["verify_telegram"] is True
     assert calls["deep_telegram"] is False
     assert calls["include_bots"] is False
+    assert calls["concurrent"] == 7
     assert calls["runtime_config"].telegram.rate_limit.calls == 7
     assert calls["runtime_config"].telegram.rate_limit.window == 2.5
     assert "integrity report: 0 file(s) checked, 0 with issues" in capsys.readouterr().out
@@ -198,3 +205,112 @@ async def test_deep_telegram_report_captures_part_repair_details(capsys, tmp_pat
     assert rows[0]["part_idx"] == 1
     assert rows[0]["clients_tried"] == ["user_main"]
     assert rows[1]["caption_expected"] == "filename: Movie Original.mkv.002"
+
+
+@pytest.mark.asyncio
+async def test_telegram_part_checks_respect_concurrency_and_spread_probe_starts():
+    module = load_check_integrity_module()
+    active = 0
+    max_active = 0
+    used = []
+
+    class SlowGateway:
+        def __init__(self, name):
+            self.name = name
+
+        async def get_document(self, channel_id, message_id):
+            nonlocal active, max_active
+            used.append(self.name)
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.02)
+            active -= 1
+            return SimpleNamespace(
+                doc_id=message_id,
+                size=10,
+                caption=f"filename: file.{message_id:03d}",
+            )
+
+    parts = [
+        SimpleNamespace(
+            idx=i,
+            channel_id=-100,
+            message_id=i,
+            doc_id=i,
+            size=10,
+            original_filename=f"file.{i:03d}",
+        )
+        for i in range(1, 5)
+    ]
+    probes = [module.TelegramProbe(f"account_{i}", SlowGateway(f"account_{i}")) for i in range(1, 5)]
+    started = time.perf_counter()
+
+    issues = await module.verify_telegram_parts(probes, parts, deep=True, concurrent=4)
+
+    assert issues == []
+    assert max_active == 4
+    assert time.perf_counter() - started < 0.06
+    assert used == ["account_1", "account_2", "account_3", "account_4"]
+
+
+@pytest.mark.asyncio
+async def test_check_concurrency_applies_across_files_not_only_parts():
+    module = load_check_integrity_module()
+    active = 0
+    max_active = 0
+    root = SimpleNamespace(id="root", name="media", is_folder=True, size=0)
+    files = [
+        SimpleNamespace(id="file1", name="one.mkv", is_folder=False, size=10),
+        SimpleNamespace(id="file2", name="two.mkv", is_folder=False, size=10),
+    ]
+    parts = {
+        "file1": [SimpleNamespace(
+            idx=1, channel_id=-100, message_id=1, doc_id=1, size=10,
+            original_filename="one.mkv.001",
+        )],
+        "file2": [SimpleNamespace(
+            idx=1, channel_id=-100, message_id=2, doc_id=2, size=10,
+            original_filename="two.mkv.001",
+        )],
+    }
+
+    class FakeRepo:
+        async def children(self, node_id):
+            return files if node_id == "root" else []
+
+        async def content_of(self, node_id):
+            return None
+
+        async def parts_of(self, node_id):
+            return parts[node_id]
+
+        async def path_of(self, node_id):
+            return f"/media/{node_id}.mkv"
+
+    class SlowGateway:
+        async def get_document(self, channel_id, message_id):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.02)
+            active -= 1
+            return SimpleNamespace(
+                doc_id=message_id,
+                size=10,
+                caption=f"filename: {'one' if message_id == 1 else 'two'}.mkv.001",
+            )
+
+    started = time.perf_counter()
+    verdicts, report = await module.check(
+        FakeRepo(),
+        root,
+        probes=[module.TelegramProbe("account_1", SlowGateway())],
+        deep_telegram=True,
+        concurrent=2,
+    )
+
+    assert report.checked == 2
+    assert report.bad == 0
+    assert [v.ok for v in verdicts] == [True, True]
+    assert max_active == 2
+    assert time.perf_counter() - started < 0.04

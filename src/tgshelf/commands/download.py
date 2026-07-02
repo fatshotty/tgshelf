@@ -164,10 +164,15 @@ def _write_error_log(path: Path, drive_path: str, total: int,
 
 
 async def run(config: Config, args) -> int:
+    from tgshelf.commands.common import resolve_concurrent
     from tgshelf.http.serve import build_runtime, make_rate_limiter, start_clients
 
     dest = Path(getattr(args, "dest", None) or ".")
-    concurrent = getattr(args, "concurrent", None) or config.operations.concurrent
+    try:
+        concurrent = resolve_concurrent(config, cli_value=getattr(args, "concurrent", None))
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     overwrite = bool(getattr(args, "overwrite", False))
 
     rate_limiter = make_rate_limiter(config.telegram.rate_limit)

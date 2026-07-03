@@ -162,6 +162,20 @@ class NodeRepo:
         )
         return result.scalars().all()
 
+    async def set_part_original_filename(
+        self, file_id: str, idx: int, original_filename: str
+    ) -> None:
+        result = await self.session.execute(
+            update(Part)
+            .where(Part.file_id == file_id, Part.idx == idx)
+            .values(original_filename=original_filename)
+        )
+        if result.rowcount != 1:
+            raise ValueError(
+                f"expected to update one part original_filename for {file_id}:{idx}, "
+                f"updated {result.rowcount}"
+            )
+
     async def parts_size(self, file_id: str) -> int:
         """Effective size = sum of the part sizes (0 if none)."""
         result = await self.session.execute(

@@ -26,6 +26,10 @@ class FakeTelethonClient:
         self.requests.append(("delete_messages", entity, message_ids))
         return [type("Affected", (), {"pts_count": 1})()]
 
+    async def edit_message(self, entity, message_id, text):
+        self.requests.append(("edit_message", entity, message_id, text))
+        return fake_message()
+
 
 def fake_message():
     document = type(
@@ -141,13 +145,13 @@ async def test_copy_message_can_override_caption():
         from_channel_id=-100,
         message_id=7,
         to_channel_id=-200,
-        caption="filename: canonical.mkv",
+        caption="fileName: canonical.mkv",
     )
 
     send_request = next(
         req for req in raw.requests if req.__class__.__name__ == "SendMediaRequest"
     )
-    assert send_request.message == "filename: canonical.mkv"
+    assert send_request.message == "fileName: canonical.mkv"
 
 
 @pytest.mark.asyncio
@@ -160,3 +164,15 @@ async def test_delete_message_rate_limits_the_delete_write():
 
     assert deleted is True
     assert limiter.accounts == ["main"]
+
+
+@pytest.mark.asyncio
+async def test_edit_message_caption_rate_limits_the_write():
+    raw = FakeTelethonClient()
+    limiter = RecordingRateLimiter()
+    client = TgClient(raw, name="main", rate_limiter=limiter)
+
+    await client.edit_message_caption(-100, 7, "fileName: canonical.mkv")
+
+    assert limiter.accounts == ["main"]
+    assert ("edit_message", -100, 7, "fileName: canonical.mkv") in raw.requests

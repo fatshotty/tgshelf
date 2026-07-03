@@ -74,3 +74,9 @@ class Gateway(Protocol):
     async def delete_message(self, channel_id: int, message_id: int) -> bool:
         """Delete a message; False if it was already gone."""
         ...
+
+    async def edit_message_caption(
+        self, channel_id: int, message_id: int, caption: str
+    ) -> None:
+        """Replace the text caption of an existing file message."""
+        ...

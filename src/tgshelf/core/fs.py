@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from tgshelf.constants import ROOT_ID
 from tgshelf.core import channels
 from tgshelf.core.batch import Throttle
+from tgshelf.core.captions import logical_part_caption
 from tgshelf.core.download import RangeNotSatisfiable, StreamPlan
 from tgshelf.core.upload import PartRecord
 from tgshelf.db.models import Node
@@ -205,6 +206,7 @@ class FileSystem:
         except IntegrityError as exc:
             await self.repo.session.rollback()
             raise DuplicateNameError(f"name '{new_name}' already exists") from exc
+        await self._sync_part_captions(node_id)
         return await self.repo.get(node_id)
 
     async def set_channel(self, node_id: str, channel_id: int | None) -> Node:
@@ -335,7 +337,19 @@ class FileSystem:
             await self.repo.session.commit()
             return
 
-        new_parts = await channels.forward_parts(self._gateway, parts, dest)
+        total = len(parts)
+        captions = {
+            (p.channel_id, p.message_id): logical_part_caption(
+                file.name, idx=i, total_parts=total
+            )
+            for i, p in enumerate(parts)
+        }
+        new_parts = await channels.forward_parts(
+            self._gateway,
+            parts,
+            dest,
+            caption_factory=lambda p: captions[(p.channel_id, p.message_id)],
+        )
         await self.repo.clear_parts(file.id)
         for np in new_parts:
             await self.repo.add_part(
@@ -400,8 +414,19 @@ class FileSystem:
             channel_id=dest_channel, state="TEMP",
         )
         await self.repo.session.commit()
+        total = len(src_parts)
+        captions = {
+            (p.channel_id, p.message_id): logical_part_caption(
+                name, idx=i, total_parts=total
+            )
+            for i, p in enumerate(src_parts)
+        }
         new_parts = await channels.forward_parts(
-            self._gateway, src_parts, dest_channel, always_copy=True
+            self._gateway,
+            src_parts,
+            dest_channel,
+            always_copy=True,
+            caption_factory=lambda p: captions[(p.channel_id, p.message_id)],
         )
         for np in new_parts:
             await self.repo.add_part(
@@ -678,6 +703,26 @@ class FileSystem:
         await self.repo.session.commit()
         return await self.repo.get(node.id)
 
+    async def _sync_part_captions(self, file_id: str) -> None:
+        node = await self.repo.get(file_id)
+        if node is None or node.is_folder:
+            return
+        if await self.repo.content_of(file_id) is not None:
+            return
+        parts = list(await self.repo.parts_of(file_id))
+        if not parts:
+            return
+        if self._gateway is None:
+            raise ValueError("gateway unavailable: cannot sync Telegram captions")
+
+        total = len(parts)
+        for pos, part in enumerate(parts):
+            await self._gateway.edit_message_caption(
+                part.channel_id,
+                part.message_id,
+                logical_part_caption(node.name, idx=pos, total_parts=total),
+            )
+
     async def merge_parts(
         self,
         target_id: str,
@@ -732,6 +777,7 @@ class FileSystem:
             )
         await self.repo.set_fields(target_id, **fields)
         await self.repo.session.commit()
+        await self._sync_part_captions(target_id)
         return await self.repo.get(target_id)
 
     async def split_parts(self, file_id: str, part_indices: Sequence[int]) -> tuple[Node, list[Node]]:
@@ -790,7 +836,11 @@ class FileSystem:
         await self.repo.session.commit()
         refreshed_source = await self.repo.get(file_id)
         refreshed_created = [await self.repo.get(node.id) for node in created]
-        return refreshed_source, [node for node in refreshed_created if node is not None]
+        await self._sync_part_captions(file_id)
+        created_nodes = [node for node in refreshed_created if node is not None]
+        for node in created_nodes:
+            await self._sync_part_captions(node.id)
+        return refreshed_source, created_nodes
 
     async def reorder_parts(self, file_id: str, order: Sequence[int]) -> Node:
         """Re-sequence the parts of ONE multi-part file: `order` is a permutation
@@ -824,6 +874,7 @@ class FileSystem:
             file_id, size=sum(p.size for p in reordered), mtime=func.now()
         )
         await self.repo.session.commit()
+        await self._sync_part_captions(file_id)
         return await self.repo.get(file_id)
 
     # -- read ---------------------------------------------------------------

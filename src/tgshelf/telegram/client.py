@@ -390,6 +390,15 @@ class TgClient:
         affected = result[0] if isinstance(result, list) else result
         return getattr(affected, "pts_count", 1) > 0
 
+    async def edit_message_caption(
+        self, channel_id: int, message_id: int, caption: str
+    ) -> None:
+        entity = await self._client.get_input_entity(channel_id)
+        await self._with_middleware(
+            lambda: self._client.edit_message(entity, message_id, text=caption),
+            rate_limit=True,
+        )
+
 
 def _filename_of(doc: Any) -> str | None:
     for attr in getattr(doc, "attributes", []):

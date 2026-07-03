@@ -23,6 +23,17 @@ def load_check_integrity_module():
     return module
 
 
+def load_sanitize_captions_module():
+    path = Path(__file__).resolve().parents[2] / "scripts" / "sanitize_captions.py"
+    spec = importlib.util.spec_from_file_location("sanitize_captions_under_test", path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_main_uses_config_db_and_rate_limits_when_db_env_is_missing(
     tmp_path, monkeypatch, capsys
 ):
@@ -115,6 +126,365 @@ telegram:
 
 
 @pytest.mark.asyncio
+async def test_sanitize_dry_run_reports_caption_and_original_filename_drift():
+    module = load_sanitize_captions_module()
+    node = SimpleNamespace(id="file1", name="Movie.mkv", size=20)
+    parts = [
+        SimpleNamespace(
+            file_id="file1",
+            idx=0,
+            channel_id=-100,
+            message_id=101,
+            doc_id=1001,
+            size=10,
+            original_filename="Old physical.mkv.001",
+        ),
+        SimpleNamespace(
+            file_id="file1",
+            idx=1,
+            channel_id=-100,
+            message_id=102,
+            doc_id=1002,
+            size=10,
+            original_filename="Movie physical.mkv.002",
+        ),
+    ]
+
+    class FakeRepo:
+        def __init__(self):
+            self.renamed = []
+
+        async def content_of(self, node_id):
+            return None
+
+        async def parts_of(self, node_id):
+            return parts
+
+        async def path_of(self, node_id):
+            return "/media/Movie.mkv"
+
+        async def set_part_original_filename(self, file_id, idx, original_filename):
+            self.renamed.append((file_id, idx, original_filename))
+
+    class FakeGateway:
+        def __init__(self):
+            self.edits = []
+
+        async def get_document(self, channel_id, message_id):
+            return SimpleNamespace(
+                doc_id=1000 + message_id - 100,
+                size=10,
+                filename=f"Movie physical.mkv.{message_id - 100:03d}",
+                caption=f"fileName: Old.mkv.{message_id - 100:03d}",
+            )
+
+        async def edit_message_caption(self, channel_id, message_id, caption):
+            self.edits.append((channel_id, message_id, caption))
+
+    repo = FakeRepo()
+    gateway = FakeGateway()
+
+    result = await module.sanitize_file(repo, node, gateway, dry_run=True)
+
+    assert result.checked == 1
+    assert result.parts == 2
+    assert result.caption_updates == 2
+    assert result.original_filename_updates == 1
+    assert result.errors == 0
+    assert gateway.edits == []
+    assert repo.renamed == []
+    assert [record.status for record in result.records] == ["dry_run", "dry_run"]
+    assert result.records[0].caption_expected == "fileName: Movie.mkv.001"
+    assert result.records[0].original_filename_tg == "Movie physical.mkv.001"
+
+
+@pytest.mark.asyncio
+async def test_sanitize_apply_edits_caption_and_updates_original_filename():
+    module = load_sanitize_captions_module()
+    node = SimpleNamespace(id="file1", name="Movie.mkv", size=10)
+    part = SimpleNamespace(
+        file_id="file1",
+        idx=0,
+        channel_id=-100,
+        message_id=101,
+        doc_id=1001,
+        size=10,
+        original_filename="Old physical.mkv",
+    )
+
+    class FakeRepo:
+        def __init__(self):
+            self.renamed = []
+
+        async def content_of(self, node_id):
+            return None
+
+        async def parts_of(self, node_id):
+            return [part]
+
+        async def path_of(self, node_id):
+            return "/media/Movie.mkv"
+
+        async def set_part_original_filename(self, file_id, idx, original_filename):
+            self.renamed.append((file_id, idx, original_filename))
+
+    class FakeGateway:
+        def __init__(self):
+            self.edits = []
+
+        async def get_document(self, channel_id, message_id):
+            return SimpleNamespace(
+                doc_id=1001,
+                size=10,
+                filename="Movie physical.mkv",
+                caption="fileName: Old.mkv",
+            )
+
+        async def edit_message_caption(self, channel_id, message_id, caption):
+            self.edits.append((channel_id, message_id, caption))
+
+    repo = FakeRepo()
+    gateway = FakeGateway()
+
+    result = await module.sanitize_file(repo, node, gateway, dry_run=False)
+
+    assert result.caption_updates == 1
+    assert result.original_filename_updates == 1
+    assert result.errors == 0
+    assert gateway.edits == [(-100, 101, "fileName: Movie.mkv")]
+    assert repo.renamed == [("file1", 0, "Movie physical.mkv")]
+    assert result.records[0].status == "updated"
+
+
+@pytest.mark.asyncio
+async def test_sanitize_skips_writes_when_identity_checks_fail():
+    module = load_sanitize_captions_module()
+    node = SimpleNamespace(id="file1", name="Movie.mkv", size=10)
+    part = SimpleNamespace(
+        file_id="file1",
+        idx=0,
+        channel_id=-100,
+        message_id=101,
+        doc_id=1001,
+        size=10,
+        original_filename="Movie physical.mkv",
+    )
+
+    class FakeRepo:
+        async def content_of(self, node_id):
+            return None
+
+        async def parts_of(self, node_id):
+            return [part]
+
+        async def path_of(self, node_id):
+            return "/media/Movie.mkv"
+
+        async def set_part_original_filename(self, file_id, idx, original_filename):
+            raise AssertionError("must not update suspicious part")
+
+    class FakeGateway:
+        async def get_document(self, channel_id, message_id):
+            return SimpleNamespace(
+                doc_id=9999,
+                size=10,
+                filename="Movie physical.mkv",
+                caption="fileName: Old.mkv",
+            )
+
+        async def edit_message_caption(self, channel_id, message_id, caption):
+            raise AssertionError("must not edit suspicious part")
+
+    result = await module.sanitize_file(FakeRepo(), node, FakeGateway(), dry_run=False)
+
+    assert result.errors == 1
+    assert result.caption_updates == 0
+    assert result.original_filename_updates == 0
+    assert result.records[0].status == "error"
+    assert result.records[0].error == "doc_id_mismatch"
+
+
+def test_sanitize_cli_defaults_to_apply(tmp_path, monkeypatch, capsys):
+    module = load_sanitize_captions_module()
+    monkeypatch.delenv("DB", raising=False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+db: postgresql+asyncpg://cfg-user:cfg-pass@127.0.0.1/tgshelf
+telegram:
+  upload:
+    channel: -100123
+operations:
+  concurrent: 3
+""",
+        encoding="utf-8",
+    )
+    calls = {}
+
+    async def fake_run(
+        db_dsn,
+        path,
+        *,
+        depth,
+        dry_run,
+        concurrent,
+        config_path,
+        runtime_config,
+        progress_every,
+    ):
+        calls["db_dsn"] = db_dsn
+        calls["path"] = path
+        calls["depth"] = depth
+        calls["dry_run"] = dry_run
+        calls["concurrent"] = concurrent
+        calls["config_path"] = config_path
+        calls["runtime_config"] = runtime_config
+        calls["progress_every"] = progress_every
+        return module.SanitizeReport(checked=1, parts=2, caption_updates=1)
+
+    monkeypatch.setattr(module, "run", fake_run)
+
+    rc = module.main(["/media", "--config", str(config_path)])
+
+    assert rc == 0
+    assert calls["db_dsn"] == "postgresql+asyncpg://cfg-user:cfg-pass@127.0.0.1/tgshelf"
+    assert calls["path"] == "/media"
+    assert calls["dry_run"] is False
+    assert calls["concurrent"] == 3
+    assert calls["progress_every"] == 100
+    assert "sanitize report: 1 file(s), 2 part(s), 1 caption update(s)" in capsys.readouterr().out
+
+
+def test_sanitize_cli_accepts_explicit_dry_run(tmp_path, monkeypatch):
+    module = load_sanitize_captions_module()
+    monkeypatch.delenv("DB", raising=False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+db: postgresql+asyncpg://cfg-user:cfg-pass@127.0.0.1/tgshelf
+telegram:
+  upload:
+    channel: -100123
+""",
+        encoding="utf-8",
+    )
+    calls = {}
+
+    async def fake_run(*args, **kwargs):
+        calls["dry_run"] = kwargs["dry_run"]
+        return module.SanitizeReport()
+
+    monkeypatch.setattr(module, "run", fake_run)
+
+    rc = module.main(["/media", "--dry-run", "--config", str(config_path)])
+
+    assert rc == 0
+    assert calls["dry_run"] is True
+
+
+def test_sanitize_writes_jsonl_report(tmp_path):
+    module = load_sanitize_captions_module()
+    report = module.SanitizeReport(
+        checked=1,
+        parts=1,
+        caption_updates=1,
+        records=[
+            module.SanitizeRecord(
+                path="/media/Movie.mkv",
+                node_id="file1",
+                name="Movie.mkv",
+                part_idx=0,
+                channel_id=-100,
+                message_id=101,
+                doc_id_db=1001,
+                caption_expected="fileName: Movie.mkv",
+                caption_actual="fileName: Old.mkv",
+                caption_changed=True,
+                status="updated",
+            )
+        ],
+    )
+    path = tmp_path / "sanitize.jsonl"
+
+    module._write_jsonl_report(report, path)
+
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert rows[0]["path"] == "/media/Movie.mkv"
+    assert rows[0]["caption_changed"] is True
+    assert rows[0]["status"] == "updated"
+
+
+@pytest.mark.asyncio
+async def test_sanitize_logs_scan_and_telegram_progress(caplog):
+    module = load_sanitize_captions_module()
+    root = SimpleNamespace(id="root", name="media", is_folder=True, state="ACTIVE")
+    file_node = SimpleNamespace(
+        id="file1", name="Movie.mkv", is_folder=False, state="ACTIVE", size=10
+    )
+    part = SimpleNamespace(
+        file_id="file1",
+        idx=0,
+        channel_id=-100,
+        message_id=101,
+        doc_id=1001,
+        size=10,
+        original_filename="Movie physical.mkv",
+    )
+
+    class FakeSession:
+        async def commit(self):
+            pass
+
+    class FakeRepo:
+        session = FakeSession()
+
+        async def children(self, node_id, state="ACTIVE"):
+            return [file_node] if node_id == "root" else []
+
+        async def content_of(self, node_id):
+            return None
+
+        async def parts_of(self, node_id):
+            return [part]
+
+        async def path_of(self, node_id):
+            return "/media/Movie.mkv"
+
+        async def set_part_original_filename(self, file_id, idx, original_filename):
+            pass
+
+    class FakeGateway:
+        async def get_document(self, channel_id, message_id):
+            return SimpleNamespace(
+                doc_id=1001,
+                size=10,
+                filename="Movie physical.mkv",
+                caption="fileName: Old.mkv",
+            )
+
+        async def edit_message_caption(self, channel_id, message_id, caption):
+            pass
+
+    caplog.set_level(logging.INFO, logger="tgshelf.sanitize")
+
+    report = await module.sanitize(
+        FakeRepo(),
+        root,
+        FakeGateway(),
+        dry_run=False,
+        progress_every=1,
+    )
+
+    assert report.caption_updates == 1
+    messages = [record.getMessage() for record in caplog.records]
+    assert "[sanitize] walking ACTIVE files under 'media' depth=0 dry_run=False" in messages
+    assert "[sanitize] db scan progress: 1 file(s), 1 telegram part(s)" in messages
+    assert "[sanitize] db scan complete: 1 file(s), 1 telegram part(s)" in messages
+    assert "[sanitize] telegram progress: 1/1 part(s)" in messages
+    assert "[sanitize] complete: 1 file(s), 1 part(s), 1 caption update(s), 0 original filename update(s), 0 error(s)" in messages
+
+
+@pytest.mark.asyncio
 async def test_deep_telegram_report_captures_part_repair_details(capsys, tmp_path):
     module = load_check_integrity_module()
     node = SimpleNamespace(id="file1", name="Movie Renamed.mkv", size=30)
@@ -163,12 +533,12 @@ async def test_deep_telegram_report_captures_part_repair_details(capsys, tmp_pat
                 return SimpleNamespace(
                     doc_id=1002,
                     size=10,
-                    caption="filename: Wrong Name.mkv.002",
+                    caption="fileName: Wrong Name.mkv.002",
                 )
             return SimpleNamespace(
                 doc_id=9999,
                 size=9,
-                caption="filename: Movie Original.mkv.003",
+                caption="fileName: Movie Renamed.mkv.003",
             )
 
     verdict = await module.check_file(
@@ -196,8 +566,8 @@ async def test_deep_telegram_report_captures_part_repair_details(capsys, tmp_pat
     assert "part: 1" in out
     assert "channel_id: -100" in out
     assert "message_id: 101" in out
-    assert "caption_expected: filename: Movie Original.mkv.002" in out
-    assert "caption_actual: filename: Wrong Name.mkv.002" in out
+    assert "caption_expected: fileName: Movie Renamed.mkv.002" in out
+    assert "caption_actual: fileName: Wrong Name.mkv.002" in out
     assert "doc_id_db: 1003" in out
     assert "doc_id_tg: 9999" in out
     assert "size_db: 10" in out
@@ -208,7 +578,7 @@ async def test_deep_telegram_report_captures_part_repair_details(capsys, tmp_pat
     assert rows[0]["path"] == "/media/Movie Renamed.mkv"
     assert rows[0]["part_idx"] == 1
     assert rows[0]["clients_tried"] == ["user_main"]
-    assert rows[1]["caption_expected"] == "filename: Movie Original.mkv.002"
+    assert rows[1]["caption_expected"] == "fileName: Movie Renamed.mkv.002"
 
 
 @pytest.mark.asyncio
@@ -312,7 +682,7 @@ async def test_telegram_part_checks_respect_concurrency_and_spread_probe_starts(
             return SimpleNamespace(
                 doc_id=message_id,
                 size=10,
-                caption=f"filename: file.{message_id:03d}",
+                caption=f"fileName: file.{message_id:03d}",
             )
 
     parts = [
@@ -381,7 +751,7 @@ async def test_check_concurrency_applies_across_files_not_only_parts():
             return SimpleNamespace(
                 doc_id=message_id,
                 size=10,
-                caption=f"filename: {'one' if message_id == 1 else 'two'}.mkv.001",
+                caption=f"fileName: {'one' if message_id == 1 else 'two'}.mkv",
             )
 
     started = time.perf_counter()
@@ -437,7 +807,7 @@ async def test_check_logs_walk_and_telegram_progress(caplog):
             return SimpleNamespace(
                 doc_id=message_id,
                 size=10,
-                caption=f"filename: {'one' if message_id == 1 else 'two'}.mkv.001",
+                caption=f"fileName: {'one' if message_id == 1 else 'two'}.mkv",
             )
 
     caplog.set_level(logging.INFO, logger="tgshelf.check")
@@ -600,7 +970,7 @@ async def test_check_processes_channel_folders_sequentially(caplog):
             return SimpleNamespace(
                 doc_id=message_id,
                 size=10,
-                caption="filename: anim.mkv.001" if message_id == 11 else "filename: movie.mkv.001",
+                caption="fileName: anim.mkv" if message_id == 11 else "fileName: movie.mkv",
             )
 
     caplog.set_level(logging.INFO, logger="tgshelf.check")

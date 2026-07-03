@@ -28,13 +28,14 @@ import asyncio
 import json
 import logging
 import os
-import re
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from tgshelf.core.captions import caption_first_line_filename, logical_part_caption
 
 log = logging.getLogger("tgshelf.check")
 
@@ -90,55 +91,12 @@ class TelegramProbe:
     gateway: Any
 
 
-def _expected_caption(original_filename: str | None) -> str | None:
-    if not original_filename:
+def _expected_caption(
+    logical_filename: str | None, *, position: int = 0, total_parts: int = 1
+) -> str | None:
+    if not logical_filename:
         return None
-    return f"filename: {original_filename}"
-
-
-def _caption_filename(caption: str | None) -> str | None:
-    if not isinstance(caption, str):
-        return None
-    for line in caption.splitlines():
-        key, sep, value = line.partition(":")
-        if sep and key.strip().lower() == "filename":
-            filename = value.strip()
-            return filename or None
-    return None
-
-
-def _normalized_filename(value: str | None) -> str | None:
-    if not value:
-        return None
-    normalized = re.sub(r"[^0-9a-z]+", " ", value.replace("_", " ").casefold())
-    return " ".join(normalized.split()) or None
-
-
-def _caption_filename_candidates(part, logical_filename: str | None = None) -> list[str]:
-    candidates: list[str] = []
-    for candidate in (part.original_filename, logical_filename):
-        if candidate and candidate not in candidates:
-            candidates.append(candidate)
-    if logical_filename and part.original_filename:
-        suffix = re.search(r"(\.\d{3})$", part.original_filename)
-        suffixed_logical = f"{logical_filename}{suffix.group(1)}" if suffix else None
-        if suffixed_logical and suffixed_logical not in candidates:
-            candidates.append(suffixed_logical)
-    return candidates
-
-
-def _caption_filename_matches(
-    actual_filename: str | None, candidates: list[str]
-) -> bool:
-    if actual_filename is None:
-        return False
-    if actual_filename in candidates:
-        return True
-    normalized_actual = _normalized_filename(actual_filename)
-    return any(
-        normalized_actual == _normalized_filename(candidate)
-        for candidate in candidates
-    )
+    return logical_part_caption(logical_filename, idx=position, total_parts=total_parts)
 
 
 def _rotate_probes(probes: list[TelegramProbe], offset: int) -> list[TelegramProbe]:
@@ -173,10 +131,15 @@ async def _get_document_from_any_probe(probes: list[TelegramProbe], part, *, off
 
 async def verify_telegram_part(
     probes: list[TelegramProbe], part, *, deep: bool, offset: int = 0,
-    logical_filename: str | None = None,
+    logical_filename: str | None = None, position: int = 0, total_parts: int = 1,
 ) -> list[Issue]:
     """Per-part Telegram verification: message exists + doc_id/size/caption match."""
     issues: list[Issue] = []
+    expected_caption = _expected_caption(
+        logical_filename or part.original_filename,
+        position=position if logical_filename else 0,
+        total_parts=total_parts if logical_filename else 1,
+    )
     ref, verified_by, clients_tried, client_errors = await _get_document_from_any_probe(
         probes, part, offset=offset
     )
@@ -197,7 +160,7 @@ async def verify_telegram_part(
             doc_id_db=part.doc_id,
             size_db=part.size,
             original_filename_db=part.original_filename,
-            caption_expected=_expected_caption(part.original_filename),
+            caption_expected=expected_caption,
             clients_tried=clients_tried,
             recoverability=recoverability,
             details={"client_errors": client_errors} if client_errors else {},
@@ -216,7 +179,7 @@ async def verify_telegram_part(
             size_db=part.size,
             size_tg=ref.size,
             original_filename_db=part.original_filename,
-            caption_expected=_expected_caption(part.original_filename),
+            caption_expected=expected_caption,
             caption_actual=getattr(ref, "caption", None),
             verified_by=verified_by,
             clients_tried=clients_tried,
@@ -235,23 +198,24 @@ async def verify_telegram_part(
             size_db=part.size,
             size_tg=ref.size,
             original_filename_db=part.original_filename,
-            caption_expected=_expected_caption(part.original_filename),
+            caption_expected=expected_caption,
             caption_actual=getattr(ref, "caption", None),
             verified_by=verified_by,
             clients_tried=clients_tried,
             recoverability="message_exists_but_size_is_suspicious",
         ))
     if deep:
-        expected = _expected_caption(part.original_filename)
         actual = getattr(ref, "caption", None)
         actual_stripped = actual.strip() if isinstance(actual, str) else ""
-        actual_filename = _caption_filename(actual)
-        accepted_filenames = _caption_filename_candidates(part, logical_filename)
-        if expected is None:
+        actual_filename = caption_first_line_filename(actual)
+        expected_filename = (
+            expected_caption.removeprefix("fileName: ") if expected_caption else None
+        )
+        if expected_caption is None:
             issues.append(Issue(
                 code="caption_original_filename_missing",
                 severity="warning",
-                message=f"part {part.idx}: original filename missing in db; caption cannot be verified",
+                message=f"part {part.idx}: logical filename missing; caption cannot be verified",
                 part_idx=part.idx,
                 channel_id=part.channel_id,
                 message_id=part.message_id,
@@ -277,13 +241,13 @@ async def verify_telegram_part(
                 size_db=part.size,
                 size_tg=ref.size,
                 original_filename_db=part.original_filename,
-                caption_expected=expected,
+                caption_expected=expected_caption,
                 caption_actual=actual,
                 verified_by=verified_by,
                 clients_tried=clients_tried,
                 recoverability="message_exists_but_metadata_is_incomplete",
             ))
-        elif not _caption_filename_matches(actual_filename, accepted_filenames):
+        elif actual_filename != expected_filename:
             issues.append(Issue(
                 code="caption_mismatch",
                 severity="error",
@@ -296,12 +260,11 @@ async def verify_telegram_part(
                 size_db=part.size,
                 size_tg=ref.size,
                 original_filename_db=part.original_filename,
-                caption_expected=expected,
+                caption_expected=expected_caption,
                 caption_actual=actual,
                 verified_by=verified_by,
                 clients_tried=clients_tried,
                 recoverability="message_exists_but_metadata_is_suspicious",
-                details={"accepted_filenames": accepted_filenames},
             ))
     return issues
 
@@ -312,12 +275,14 @@ async def verify_telegram_parts(
 ) -> list[Issue]:
     """Verify all parts with a global concurrency cap for this file."""
     sem = asyncio.Semaphore(max(1, concurrent))
+    total_parts = len(parts)
 
     async def run_one(job_idx: int, part) -> list[Issue]:
         async with sem:
             return await verify_telegram_part(
                 probes, part, deep=deep, offset=job_idx,
-                logical_filename=logical_filename,
+                logical_filename=logical_filename, position=job_idx,
+                total_parts=total_parts,
             )
 
     batches = await asyncio.gather(*(run_one(i, part) for i, part in enumerate(parts)))
@@ -417,13 +382,17 @@ async def _check_scope(repo, start_node, *, depth: int, probes=None,
                        progress_every: int) -> list[Verdict]:
     """Check one sequential work unit and finish its Telegram jobs before returning."""
     verdicts: list[Verdict] = []
-    telegram_jobs: list[tuple[Verdict, Any]] = []
+    telegram_jobs: list[tuple[Verdict, Any, int, int]] = []
     log.info("[check] walking files under '%s' depth=%s", start_node.name, depth)
     async for node in walk_files(repo, start_node, depth):
         try:
             v, is_telegram_backed, parts = await _inspect_db_file(repo, node)
             if probes and is_telegram_backed:
-                telegram_jobs.extend((v, part) for part in parts)
+                total_file_parts = len(parts)
+                telegram_jobs.extend(
+                    (v, part, position, total_file_parts)
+                    for position, part in enumerate(parts)
+                )
         except Exception as exc:  # noqa: BLE001 - keep going; record and report
             path = await repo.path_of(node.id) or node.name
             v = Verdict(
@@ -461,12 +430,15 @@ async def _check_scope(repo, start_node, *, depth: int, probes=None,
             len(probes),
         )
 
-        async def run_part(job_idx: int, verdict: Verdict, part) -> tuple[Verdict, list[Issue]]:
+        async def run_part(
+            job_idx: int, verdict: Verdict, part, position: int, total_file_parts: int
+        ) -> tuple[Verdict, list[Issue]]:
             nonlocal completed_parts
             async with sem:
                 issues = await verify_telegram_part(
                     probes, part, deep=deep_telegram, offset=job_idx,
-                    logical_filename=verdict.name,
+                    logical_filename=verdict.name, position=position,
+                    total_parts=total_file_parts,
                 )
                 for issue in issues:
                     logger = log.error if issue.severity == "error" else log.warning
@@ -489,7 +461,11 @@ async def _check_scope(repo, start_node, *, depth: int, probes=None,
                 return verdict, issues
 
         results = await asyncio.gather(
-            *(run_part(i, verdict, part) for i, (verdict, part) in enumerate(telegram_jobs))
+            *(
+                run_part(i, verdict, part, position, total_file_parts)
+                for i, (verdict, part, position, total_file_parts)
+                in enumerate(telegram_jobs)
+            )
         )
         for verdict, issues in results:
             verdict.issues.extend(issues)

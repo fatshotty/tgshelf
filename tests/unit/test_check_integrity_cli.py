@@ -257,6 +257,108 @@ async def test_sanitize_apply_edits_caption_and_updates_original_filename():
 
 
 @pytest.mark.asyncio
+async def test_sanitize_round_robin_gateway_rotates_accounts(caplog):
+    module = load_sanitize_captions_module()
+
+    class FakeGateway:
+        def __init__(self, name):
+            self.name = name
+            self.calls = []
+
+        async def get_document(self, channel_id, message_id):
+            self.calls.append((channel_id, message_id))
+            return self.name
+
+    main = FakeGateway("main")
+    alt = FakeGateway("alt")
+    gateway = module.RoundRobinGateway([
+        ("main", main),
+        ("alt", alt),
+    ])
+    caplog.set_level(logging.INFO, logger="tgshelf.sanitize")
+
+    assert await gateway.get_document(-100, 1) == "main"
+    assert await gateway.get_document(-100, 2) == "alt"
+    assert await gateway.get_document(-100, 3) == "main"
+
+    assert main.calls == [(-100, 1), (-100, 3)]
+    assert alt.calls == [(-100, 2)]
+    messages = [record.getMessage() for record in caplog.records]
+    assert "[sanitize] using account main" in messages
+    assert "[sanitize] using account alt" in messages
+
+
+@pytest.mark.asyncio
+async def test_sanitize_round_robin_gateway_logs_flood_and_tries_next_account(caplog):
+    module = load_sanitize_captions_module()
+    from tgshelf.telegram.errors import FloodCooldown
+
+    class FloodingGateway:
+        def __init__(self):
+            self.calls = 0
+
+        async def get_document(self, channel_id, message_id):
+            self.calls += 1
+            raise FloodCooldown(20)
+
+    class HealthyGateway:
+        def __init__(self):
+            self.calls = []
+
+        async def get_document(self, channel_id, message_id):
+            self.calls.append((channel_id, message_id))
+            return "ok"
+
+    main = FloodingGateway()
+    alt = HealthyGateway()
+    gateway = module.RoundRobinGateway([
+        ("main", main),
+        ("alt", alt),
+    ])
+    caplog.set_level(logging.INFO, logger="tgshelf.sanitize")
+
+    assert await gateway.get_document(-100, 101) == "ok"
+
+    assert main.calls == 1
+    assert alt.calls == [(-100, 101)]
+    messages = [record.getMessage() for record in caplog.records]
+    assert "[sanitize] using account main" in messages
+    assert "[sanitize] account main in flood_wait 20s" in messages
+    assert "[sanitize] using account alt" in messages
+
+
+@pytest.mark.asyncio
+async def test_sanitize_build_gateway_uses_all_user_accounts(monkeypatch):
+    module = load_sanitize_captions_module()
+    import tgshelf.http.serve as serve
+
+    main_gateway = object()
+    bot_gateway = object()
+    alt_gateway = object()
+    pairs = [
+        (SimpleNamespace(name="main", is_bot=False), main_gateway),
+        (SimpleNamespace(name="bot01", is_bot=True), bot_gateway),
+        (SimpleNamespace(name="alt", is_bot=False), alt_gateway),
+    ]
+
+    async def fake_start_clients(config, rate_limiter):
+        return pairs
+
+    monkeypatch.setattr(serve, "make_rate_limiter", lambda rate_limit: "rl")
+    monkeypatch.setattr(serve, "start_clients", fake_start_clients)
+
+    gateway, clients = await module._build_gateway(
+        "unused",
+        runtime_config=SimpleNamespace(
+            telegram=SimpleNamespace(rate_limit=SimpleNamespace())
+        ),
+    )
+
+    assert gateway.account_names == ["main", "alt"]
+    assert clients == [main_gateway, bot_gateway, alt_gateway]
+
+
+@pytest.mark.asyncio
 async def test_sanitize_skips_writes_when_identity_checks_fail():
     module = load_sanitize_captions_module()
     node = SimpleNamespace(id="file1", name="Movie.mkv", size=10)

@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import sys
+import time
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -23,8 +24,64 @@ from typing import Any, AsyncIterator
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from tgshelf.core.captions import caption_first_line_filename, logical_part_caption
+from tgshelf.telegram.errors import FloodCooldown
 
 log = logging.getLogger("tgshelf.sanitize")
+
+
+class RoundRobinGateway:
+    def __init__(self, entries, *, sleep=asyncio.sleep, clock=time.monotonic):
+        if not entries:
+            raise ValueError("at least one account gateway is required")
+        self._entries = list(entries)
+        self._sleep = sleep
+        self._clock = clock
+        self._index = 0
+        self._cooldown_until: dict[str, float] = {}
+        self._current_account: str | None = None
+
+    @property
+    def account_names(self) -> list[str]:
+        return [name for name, _gateway in self._entries]
+
+    async def get_document(self, channel_id: int, message_id: int):
+        return await self._call("get_document", channel_id, message_id)
+
+    async def edit_message_caption(
+        self, channel_id: int, message_id: int, caption: str
+    ) -> None:
+        await self._call("edit_message_caption", channel_id, message_id, caption)
+
+    async def _call(self, method_name: str, *args):
+        while True:
+            name, gateway = await self._next_available()
+            try:
+                method = getattr(gateway, method_name)
+                return await method(*args)
+            except FloodCooldown as exc:
+                seconds = max(0, int(exc.seconds))
+                self._cooldown_until[name] = self._clock() + seconds
+                log.warning("[sanitize] account %s in flood_wait %ss", name, seconds)
+                continue
+
+    async def _next_available(self):
+        while True:
+            now = self._clock()
+            waits: list[float] = []
+            for offset in range(len(self._entries)):
+                idx = (self._index + offset) % len(self._entries)
+                name, gateway = self._entries[idx]
+                until = self._cooldown_until.get(name, 0)
+                if until <= now:
+                    self._index = (idx + 1) % len(self._entries)
+                    if name != self._current_account:
+                        log.info("[sanitize] using account %s", name)
+                        self._current_account = name
+                    return name, gateway
+                waits.append(until - now)
+            wait = max(0.0, min(waits)) if waits else 0.0
+            log.info("[sanitize] all accounts in flood_wait; sleeping %.1fs", wait)
+            await self._sleep(wait)
 
 
 @dataclass
@@ -481,11 +538,14 @@ async def _build_gateway(config_path: str, *, runtime_config=None):
     selected = [(account, client) for account, client in pairs if not account.is_bot]
     if not selected:
         raise SystemExit("no usable user account; run `tgshelf accounts login <name>`")
-    account, gateway = selected[0]
+    gateway = RoundRobinGateway(
+        [(account.name, client) for account, client in selected]
+    )
     log.info(
-        "[sanitize] telegram gateway ready: %s selected from %s connected account(s)",
-        account.name,
+        "[sanitize] telegram gateway ready: %s user account(s) selected from %s connected account(s): %s",
+        len(selected),
         len(pairs),
+        ", ".join(gateway.account_names),
     )
     return gateway, clients
 

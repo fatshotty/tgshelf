@@ -137,6 +137,12 @@ def _caption_expected(name: str, *, position: int, total_parts: int) -> str:
     return logical_part_caption(name, idx=position, total_parts=total_parts)
 
 
+def _progress_percent(done: int, total: int) -> int:
+    if total <= 0:
+        return 100
+    return min(100, int(done * 100 / total))
+
+
 async def sanitize_file(repo, node, gateway, *, dry_run: bool) -> SanitizeReport:
     content = await repo.content_of(node.id)
     if content is not None:
@@ -309,9 +315,10 @@ async def sanitize(
         completed_parts += result.parts
         if completed_parts % progress_every == 0 or completed_parts == total_parts:
             log.info(
-                "[sanitize] telegram progress: %s/%s part(s)",
+                "[sanitize] telegram progress: %s/%s part(s), %s%% completed",
                 completed_parts,
                 total_parts,
+                _progress_percent(completed_parts, total_parts),
             )
         return result
 
@@ -447,9 +454,10 @@ async def apply_report(
 
         if position % progress_every == 0 or position == len(actionable):
             log.info(
-                "[sanitize] apply-report progress: %s/%s part(s)",
+                "[sanitize] apply-report progress: %s/%s part(s), %s%% completed",
                 position,
                 len(actionable),
+                _progress_percent(position, len(actionable)),
             )
 
     log.info("[sanitize] apply-report complete: %s", report)

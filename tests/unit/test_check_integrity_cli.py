@@ -516,8 +516,16 @@ def test_sanitize_writes_jsonl_report(tmp_path):
     assert rows[0]["status"] == "updated"
 
 
+def test_sanitize_progress_percent_uses_integer_completion():
+    module = load_sanitize_captions_module()
+
+    assert module._progress_percent(1, 2) == 50
+    assert module._progress_percent(2, 3) == 66
+    assert module._progress_percent(3, 3) == 100
+
+
 @pytest.mark.asyncio
-async def test_sanitize_apply_report_replays_planned_writes(tmp_path):
+async def test_sanitize_apply_report_replays_planned_writes(tmp_path, caplog):
     module = load_sanitize_captions_module()
     report_path = tmp_path / "dry-run.jsonl"
     record = module.SanitizeRecord(
@@ -578,6 +586,8 @@ async def test_sanitize_apply_report_replays_planned_writes(tmp_path):
     repo = FakeRepo()
     gateway = FakeGateway()
 
+    caplog.set_level(logging.INFO, logger="tgshelf.sanitize")
+
     result = await module.apply_report(
         repo, gateway, report_path, progress_every=1
     )
@@ -590,6 +600,8 @@ async def test_sanitize_apply_report_replays_planned_writes(tmp_path):
     assert repo.renamed == [("file1", 0, "Movie physical.mkv")]
     assert repo.session.commits == 1
     assert result.records[0].status == "updated"
+    messages = [record.getMessage() for record in caplog.records]
+    assert "[sanitize] apply-report progress: 1/1 part(s), 100% completed" in messages
 
 
 @pytest.mark.asyncio
@@ -757,7 +769,7 @@ async def test_sanitize_logs_scan_and_telegram_progress(caplog):
     assert "[sanitize] walking ACTIVE files under 'media' depth=0 dry_run=False" in messages
     assert "[sanitize] db scan progress: 1 file(s), 1 telegram part(s)" in messages
     assert "[sanitize] db scan complete: 1 file(s), 1 telegram part(s)" in messages
-    assert "[sanitize] telegram progress: 1/1 part(s)" in messages
+    assert "[sanitize] telegram progress: 1/1 part(s), 100% completed" in messages
     assert "[sanitize] complete: 1 file(s), 1 part(s), 1 caption update(s), 0 original filename update(s), 0 error(s)" in messages
 
 

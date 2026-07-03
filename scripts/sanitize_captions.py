@@ -16,7 +16,7 @@ import json
 import logging
 import os
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -292,6 +292,113 @@ def _write_jsonl_report(report: SanitizeReport, path: str | Path) -> None:
             fh.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
 
 
+def _read_jsonl_report(path: str | Path) -> list[SanitizeRecord]:
+    records: list[SanitizeRecord] = []
+    with Path(path).open("r", encoding="utf-8") as fh:
+        for line_no, line in enumerate(fh, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            data = json.loads(line)
+            if not isinstance(data, dict):
+                raise ValueError(f"invalid JSONL record at line {line_no}")
+            data.setdefault("details", {})
+            records.append(SanitizeRecord(**data))
+    return records
+
+
+def _record_is_actionable(record: SanitizeRecord) -> bool:
+    return (
+        record.status == "dry_run"
+        and (record.caption_changed or record.original_filename_changed)
+    )
+
+
+async def _matching_report_part(repo, record: SanitizeRecord):
+    for part in await repo.parts_of(record.node_id):
+        if part.idx == record.part_idx:
+            break
+    else:
+        return None
+
+    checks = [
+        part.channel_id == record.channel_id,
+        part.message_id == record.message_id,
+    ]
+    if record.doc_id_db is not None:
+        checks.append(part.doc_id == record.doc_id_db)
+    if record.doc_id_tg is not None:
+        checks.append(part.doc_id == record.doc_id_tg)
+    if record.size_db is not None:
+        checks.append(part.size == record.size_db)
+    if record.size_tg is not None:
+        checks.append(part.size == record.size_tg)
+    return part if all(checks) else None
+
+
+async def apply_report(
+    repo,
+    gateway,
+    source_report: str | Path,
+    *,
+    progress_every: int = 100,
+) -> SanitizeReport:
+    progress_every = max(1, progress_every)
+    source_records = _read_jsonl_report(source_report)
+    actionable = [record for record in source_records if _record_is_actionable(record)]
+    report = SanitizeReport(
+        checked=len({record.node_id for record in actionable}),
+        parts=len(actionable),
+    )
+    log.info(
+        "[sanitize] applying report=%s actionable=%s",
+        source_report,
+        len(actionable),
+    )
+
+    for position, source in enumerate(actionable, start=1):
+        record = replace(source, status="updated", error=None, details=dict(source.details))
+        try:
+            part = await _matching_report_part(repo, record)
+            if part is None:
+                _record_error(report, replace(record), "stale_report")
+                continue
+
+            if record.caption_changed:
+                if not record.caption_expected:
+                    _record_error(report, replace(record), "missing_caption_expected")
+                    continue
+                await gateway.edit_message_caption(
+                    record.channel_id, record.message_id, record.caption_expected
+                )
+                report.caption_updates += 1
+
+            if record.original_filename_changed:
+                if not record.original_filename_tg:
+                    _record_error(report, replace(record), "missing_original_filename_tg")
+                    continue
+                await repo.set_part_original_filename(
+                    part.file_id, part.idx, record.original_filename_tg
+                )
+                await repo.session.commit()
+                report.original_filename_updates += 1
+
+            report.records.append(record)
+        except Exception as exc:  # noqa: BLE001 - keep applying other records
+            record.details["exception"] = str(exc)
+            _record_error(report, record, exc.__class__.__name__)
+
+        if position % progress_every == 0 or position == len(actionable):
+            log.info(
+                "[sanitize] apply-report progress: %s/%s part(s)",
+                position,
+                len(actionable),
+            )
+
+    log.info("[sanitize] apply-report complete: %s", report)
+    return report
+
+
 async def run(
     db_dsn: str,
     path: str,
@@ -321,6 +428,37 @@ async def run(
                 depth=depth,
                 dry_run=dry_run,
                 concurrent=concurrent,
+                progress_every=progress_every,
+            )
+    finally:
+        await engine.dispose()
+        for client in clients:
+            disconnect = getattr(getattr(client, "_client", None), "disconnect", None)
+            if disconnect is not None:
+                await disconnect()
+    return report
+
+
+async def run_apply_report(
+    db_dsn: str,
+    source_report: str,
+    *,
+    config_path: str,
+    runtime_config=None,
+    progress_every: int = 100,
+) -> SanitizeReport:
+    from tgshelf.db.engine import create_engine, create_session_factory
+    from tgshelf.db.repo import NodeRepo
+
+    gateway, clients = await _build_gateway(config_path, runtime_config=runtime_config)
+    engine = create_engine(db_dsn)
+    try:
+        async with create_session_factory(engine)() as session:
+            repo = NodeRepo(session)
+            report = await apply_report(
+                repo,
+                gateway,
+                source_report,
                 progress_every=progress_every,
             )
     finally:
@@ -370,6 +508,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="folder navigation depth from the start folder; 0 = infinite")
     parser.add_argument("--dry-run", action="store_true",
                         help="report planned changes without writing Telegram or DB")
+    parser.add_argument("--apply-report",
+                        help="apply an existing dry-run JSONL report without rescanning Telegram")
     parser.add_argument("--report-jsonl", help="write a machine-readable report as JSONL")
     parser.add_argument("--concurrent", type=int,
                         help="parallel file sanitizers (default: env CONCURRENCY, then config)")
@@ -390,27 +530,39 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--depth must be >= 0 (0 = infinite)")
     if args.progress_every < 1:
         parser.error("--progress-every must be >= 1")
+    if args.apply_report and args.dry_run:
+        parser.error("--dry-run cannot be used with --apply-report")
     try:
         concurrent = resolve_concurrent(runtime_config, cli_value=args.concurrent)
     except ValueError as exc:
         parser.error(str(exc))
 
-    log.info(
-        "[sanitize] starting path=%s dry_run=%s concurrency=%s",
-        args.path,
-        args.dry_run,
-        concurrent,
-    )
-    report = asyncio.run(run(
-        db_dsn,
-        args.path,
-        depth=args.depth,
-        dry_run=args.dry_run,
-        concurrent=concurrent,
-        config_path=args.config,
-        runtime_config=runtime_config,
-        progress_every=args.progress_every,
-    ))
+    if args.apply_report:
+        log.info("[sanitize] starting apply-report=%s", args.apply_report)
+        report = asyncio.run(run_apply_report(
+            db_dsn,
+            args.apply_report,
+            config_path=args.config,
+            runtime_config=runtime_config,
+            progress_every=args.progress_every,
+        ))
+    else:
+        log.info(
+            "[sanitize] starting path=%s dry_run=%s concurrency=%s",
+            args.path,
+            args.dry_run,
+            concurrent,
+        )
+        report = asyncio.run(run(
+            db_dsn,
+            args.path,
+            depth=args.depth,
+            dry_run=args.dry_run,
+            concurrent=concurrent,
+            config_path=args.config,
+            runtime_config=runtime_config,
+            progress_every=args.progress_every,
+        ))
     _print_report(report)
     if args.report_jsonl:
         _write_jsonl_report(report, args.report_jsonl)

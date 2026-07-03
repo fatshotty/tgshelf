@@ -415,6 +415,181 @@ def test_sanitize_writes_jsonl_report(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_sanitize_apply_report_replays_planned_writes(tmp_path):
+    module = load_sanitize_captions_module()
+    report_path = tmp_path / "dry-run.jsonl"
+    record = module.SanitizeRecord(
+        path="/media/Movie.mkv",
+        node_id="file1",
+        name="Movie.mkv",
+        part_idx=0,
+        channel_id=-100,
+        message_id=101,
+        doc_id_db=1001,
+        doc_id_tg=1001,
+        size_db=10,
+        size_tg=10,
+        caption_expected="fileName: Movie.mkv",
+        caption_actual="fileName: Old.mkv",
+        original_filename_db="Old physical.mkv",
+        original_filename_tg="Movie physical.mkv",
+        caption_changed=True,
+        original_filename_changed=True,
+        status="dry_run",
+    )
+    module._write_jsonl_report(module.SanitizeReport(records=[record]), report_path)
+    part = SimpleNamespace(
+        file_id="file1",
+        idx=0,
+        channel_id=-100,
+        message_id=101,
+        doc_id=1001,
+        size=10,
+        original_filename="Old physical.mkv",
+    )
+
+    class FakeSession:
+        def __init__(self):
+            self.commits = 0
+
+        async def commit(self):
+            self.commits += 1
+
+    class FakeRepo:
+        def __init__(self):
+            self.session = FakeSession()
+            self.renamed = []
+
+        async def parts_of(self, file_id):
+            return [part] if file_id == "file1" else []
+
+        async def set_part_original_filename(self, file_id, idx, original_filename):
+            self.renamed.append((file_id, idx, original_filename))
+
+    class FakeGateway:
+        def __init__(self):
+            self.edits = []
+
+        async def edit_message_caption(self, channel_id, message_id, caption):
+            self.edits.append((channel_id, message_id, caption))
+
+    repo = FakeRepo()
+    gateway = FakeGateway()
+
+    result = await module.apply_report(
+        repo, gateway, report_path, progress_every=1
+    )
+
+    assert result.parts == 1
+    assert result.caption_updates == 1
+    assert result.original_filename_updates == 1
+    assert result.errors == 0
+    assert gateway.edits == [(-100, 101, "fileName: Movie.mkv")]
+    assert repo.renamed == [("file1", 0, "Movie physical.mkv")]
+    assert repo.session.commits == 1
+    assert result.records[0].status == "updated"
+
+
+@pytest.mark.asyncio
+async def test_sanitize_apply_report_skips_stale_db_rows(tmp_path):
+    module = load_sanitize_captions_module()
+    report_path = tmp_path / "dry-run.jsonl"
+    record = module.SanitizeRecord(
+        path="/media/Movie.mkv",
+        node_id="file1",
+        name="Movie.mkv",
+        part_idx=0,
+        channel_id=-100,
+        message_id=101,
+        doc_id_db=1001,
+        doc_id_tg=1001,
+        size_db=10,
+        size_tg=10,
+        caption_expected="fileName: Movie.mkv",
+        caption_changed=True,
+        status="dry_run",
+    )
+    module._write_jsonl_report(module.SanitizeReport(records=[record]), report_path)
+    stale_part = SimpleNamespace(
+        file_id="file1",
+        idx=0,
+        channel_id=-100,
+        message_id=999,
+        doc_id=1001,
+        size=10,
+        original_filename="Old physical.mkv",
+    )
+
+    class FakeRepo:
+        async def parts_of(self, file_id):
+            return [stale_part]
+
+        async def set_part_original_filename(self, file_id, idx, original_filename):
+            raise AssertionError("must not update stale rows")
+
+    class FakeGateway:
+        async def edit_message_caption(self, channel_id, message_id, caption):
+            raise AssertionError("must not edit stale rows")
+
+    result = await module.apply_report(
+        FakeRepo(), FakeGateway(), report_path, progress_every=1
+    )
+
+    assert result.caption_updates == 0
+    assert result.original_filename_updates == 0
+    assert result.errors == 1
+    assert result.records[0].status == "error"
+    assert result.records[0].error == "stale_report"
+
+
+def test_sanitize_cli_apply_report_uses_report_runner(tmp_path, monkeypatch):
+    module = load_sanitize_captions_module()
+    monkeypatch.delenv("DB", raising=False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+db: postgresql+asyncpg://cfg-user:cfg-pass@127.0.0.1/tgshelf
+telegram:
+  upload:
+    channel: -100123
+""",
+        encoding="utf-8",
+    )
+    report_path = tmp_path / "dry-run.jsonl"
+    report_path.write_text("", encoding="utf-8")
+    calls = {}
+
+    async def fake_run_apply_report(
+        db_dsn,
+        source_report,
+        *,
+        config_path,
+        runtime_config,
+        progress_every,
+    ):
+        calls["db_dsn"] = db_dsn
+        calls["source_report"] = source_report
+        calls["config_path"] = config_path
+        calls["runtime_config"] = runtime_config
+        calls["progress_every"] = progress_every
+        return module.SanitizeReport(checked=1, parts=1, caption_updates=1)
+
+    monkeypatch.setattr(module, "run_apply_report", fake_run_apply_report)
+
+    rc = module.main([
+        "--apply-report", str(report_path),
+        "--config", str(config_path),
+        "--progress-every", "7",
+    ])
+
+    assert rc == 0
+    assert calls["db_dsn"] == "postgresql+asyncpg://cfg-user:cfg-pass@127.0.0.1/tgshelf"
+    assert calls["source_report"] == str(report_path)
+    assert calls["config_path"] == str(config_path)
+    assert calls["progress_every"] == 7
+
+
+@pytest.mark.asyncio
 async def test_sanitize_logs_scan_and_telegram_progress(caplog):
     module = load_sanitize_captions_module()
     root = SimpleNamespace(id="root", name="media", is_folder=True, state="ACTIVE")

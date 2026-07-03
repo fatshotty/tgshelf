@@ -15,3 +15,10 @@
   and the current logical filename, then update captions on rename operations.
 - Add a migration/reconciliation command to detect stale captions and repair
   them from the database.
+
+## Flood Logging
+
+- Verify that normal tgshelf runtime paths always log Telegram flood waits with
+  the `[flood]` marker. The one-shot caption sanitizer may surface a different
+  behavior during the historical cleanup, but regular service operations must
+  keep flood/cooldown events visible in logs.

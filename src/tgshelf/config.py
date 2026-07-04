@@ -68,15 +68,6 @@ class NotifyConfig:
 
 
 @dataclass(frozen=True)
-class RateLimitConfig:
-    # proactive per-account limit: max API calls per window (0 = disabled).
-    # cross-instance coordination backend; only "memory" is implemented.
-    calls: int = 0
-    window: float = 1.0
-    coordination: str = "memory"
-
-
-@dataclass(frozen=True)
 class MainBotConfig:
     """A dedicated, brand-new bot (its own BotFather token) that watches the
     master channel live. NOT one of the pool `users`: it is a separate instance
@@ -93,7 +84,6 @@ class TelegramConfig:
     upload: UploadConfig
     notify: NotifyConfig = NotifyConfig()
     users: tuple[AccountConfig, ...] = ()
-    rate_limit: RateLimitConfig = RateLimitConfig()
     # optional dedicated watcher bot (own token, outside `users`); None = disabled
     main_bot: MainBotConfig | None = None
 
@@ -111,8 +101,8 @@ class DownloadConfig:
 @dataclass(frozen=True)
 class OperationsConfig:
     concurrent: int = 3
-    sleep: float = 1.0
-    batch: int = 10
+    actions: int = 0
+    within: float = 40.0
 
 
 @dataclass(frozen=True)
@@ -280,21 +270,11 @@ def _parse_telegram(raw: Mapping[str, Any]) -> TelegramConfig:
     if notify_window <= 0:
         raise ConfigError("'telegram.notify.warning_window' must be > 0")
 
-    rl = _section(section, "rate_limit")
-    coordination = _str(rl, "coordination", RateLimitConfig.coordination, path="telegram.rate_limit")
-    if coordination not in ("memory", "redis"):
+    if "rate_limit" in section:
         raise ConfigError(
-            f"'telegram.rate_limit.coordination' must be 'memory' or 'redis', got {coordination!r}"
+            "'telegram.rate_limit' has been removed; use 'operations.actions' "
+            "and 'operations.within' for the per-account Telegram write bucket"
         )
-    rate_limit = RateLimitConfig(
-        calls=_int(rl, "calls", RateLimitConfig.calls, path="telegram.rate_limit"),
-        window=_float(rl, "window", RateLimitConfig.window, path="telegram.rate_limit"),
-        coordination=coordination,
-    )
-    if rate_limit.calls < 0:
-        raise ConfigError("'telegram.rate_limit.calls' must be >= 0 (0 = disabled)")
-    if rate_limit.window <= 0:
-        raise ConfigError("'telegram.rate_limit.window' must be > 0")
 
     users = _parse_accounts(section.get("users"))
 
@@ -327,7 +307,6 @@ def _parse_telegram(raw: Mapping[str, Any]) -> TelegramConfig:
             warning_window=notify_window,
         ),
         users=users,
-        rate_limit=rate_limit,
         main_bot=main_bot,
     )
 
@@ -428,11 +407,25 @@ def _parse_rclone(raw: Mapping[str, Any]) -> RcloneConfig:
 
 def _parse_operations(raw: Mapping[str, Any]) -> OperationsConfig:
     section = _section(raw, "operations")
-    return OperationsConfig(
+    for legacy_key in ("sleep", "batch"):
+        if legacy_key in section:
+            raise ConfigError(
+                f"'operations.{legacy_key}' has been removed; use "
+                "'operations.actions' and 'operations.within' for the "
+                "per-account Telegram write bucket"
+            )
+    cfg = OperationsConfig(
         concurrent=_int(section, "concurrent", OperationsConfig.concurrent, path="operations"),
-        sleep=_float(section, "sleep", OperationsConfig.sleep, path="operations"),
-        batch=_int(section, "batch", OperationsConfig.batch, path="operations"),
+        actions=_int(section, "actions", OperationsConfig.actions, path="operations"),
+        within=_float(section, "within", OperationsConfig.within, path="operations"),
     )
+    if cfg.concurrent < 1:
+        raise ConfigError("'operations.concurrent' must be >= 1")
+    if cfg.actions < 0:
+        raise ConfigError("'operations.actions' must be >= 0 (0 = disabled)")
+    if cfg.within <= 0:
+        raise ConfigError("'operations.within' must be > 0")
+    return cfg
 
 
 def load_config(path: str | Path, env: Mapping[str, str] | None = None) -> Config:

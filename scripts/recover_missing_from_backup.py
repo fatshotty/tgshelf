@@ -27,7 +27,7 @@ from tgshelf.core import channels  # noqa: E402
 from tgshelf.core.upload import PartRecord  # noqa: E402
 from tgshelf.db.engine import create_engine, create_session_factory  # noqa: E402
 from tgshelf.db.models import Part  # noqa: E402
-from tgshelf.http.serve import make_rate_limiter, start_clients  # noqa: E402
+from tgshelf.http.serve import make_write_limiter, start_clients  # noqa: E402
 from tgshelf.log import setup_logging  # noqa: E402
 from tgshelf.telegram.errors import FloodCooldown  # noqa: E402
 
@@ -295,7 +295,7 @@ async def apply_recovery(config_path: str, entries: list[RecoveryEntry], ledger_
     setup_logging(config.logger)
     engine = create_engine(config.db)
     session_factory = create_session_factory(engine)
-    rate_limiter = make_rate_limiter(config.telegram.rate_limit)
+    rate_limiter = make_write_limiter(config.operations)
     clients = await start_clients(config, rate_limiter)
     user_clients = [(account, client) for account, client in clients if not account.is_bot]
     if not user_clients:

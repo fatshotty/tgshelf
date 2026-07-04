@@ -72,10 +72,10 @@ async def run(config: Config, args) -> int:
     master = config.telegram.upload.channel
     limit = getattr(args, "limit", None) or None  # 0/None -> whole history
 
-    from tgshelf.http.serve import make_rate_limiter, start_clients
+    from tgshelf.http.serve import make_write_limiter, start_clients
 
-    rate_limiter = make_rate_limiter(config.telegram.rate_limit)
-    pairs = await start_clients(config, rate_limiter)
+    write_limiter = make_write_limiter(config.operations)
+    pairs = await start_clients(config, write_limiter)
     user = next(((acc, client) for acc, client in pairs if not acc.is_bot), None)
     if user is None:
         for _account, client in pairs:

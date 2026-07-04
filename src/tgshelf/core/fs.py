@@ -19,7 +19,6 @@ from sqlalchemy.exc import IntegrityError
 
 from tgshelf.constants import ROOT_ID
 from tgshelf.core import channels
-from tgshelf.core.batch import Throttle
 from tgshelf.core.captions import logical_part_caption
 from tgshelf.core.download import RangeNotSatisfiable, StreamPlan
 from tgshelf.core.upload import PartRecord
@@ -71,7 +70,6 @@ class FileSystem:
         streamer: Any = None,
         gateway: Any = None,
         min_size: int = 0,
-        throttle: Throttle | None = None,
         executor: Any = None,
         notifier: Any = None,
     ):
@@ -88,7 +86,6 @@ class FileSystem:
         # session + leased account). Without it, the fallback runs sequentially on
         # this instance's session/gateway.
         self._executor = executor
-        self._throttle = throttle or Throttle(concurrent=1)
 
     # -- reads / navigation -------------------------------------------------
 

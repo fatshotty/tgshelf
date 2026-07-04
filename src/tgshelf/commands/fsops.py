@@ -211,16 +211,19 @@ async def _db_fs(config: Config):
 @asynccontextmanager
 async def _telegram_fs(config: Config):
     """fs with connected accounts (cp / mv / purge: forward parts / delete msgs)."""
-    from tgshelf.http.serve import build_runtime, make_rate_limiter, start_clients
+    from tgshelf.http.serve import build_runtime, make_write_limiter, start_clients
 
-    rate_limiter = make_rate_limiter(config.telegram.rate_limit)
-    pairs = await start_clients(config, rate_limiter)
-    gateway = next((client for account, client in pairs if not account.is_bot), None)
-
+    write_limiter = make_write_limiter(config.operations)
+    pairs = await start_clients(config, write_limiter)
     engine = create_engine(config.db)
     try:
         session_factory = create_session_factory(engine)
-        runtime = build_runtime(config, session_factory, pairs)
+        runtime = build_runtime(
+            config,
+            session_factory,
+            pairs,
+            write_limiter=write_limiter,
+        )
         async with session_factory() as session:
             yield FileSystem(
                 NodeRepo(session),
@@ -229,7 +232,7 @@ async def _telegram_fs(config: Config):
                 uploader=runtime["uploader"],
                 streamer=runtime["streamer"],
                 executor=runtime["executor"],
-                gateway=gateway,
+                gateway=runtime["write_gateway"],
             )
     finally:
         await engine.dispose()

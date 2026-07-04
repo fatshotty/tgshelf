@@ -97,14 +97,6 @@ telegram:
       Host: {host}
       Key: {key}
     warning_window: 300
-  # Proactive per-account rate limit: bench an account after `calls` Telegram API
-  # calls within `window` seconds (reuses the FloodWait cooldown path). 0 = off.
-  # coordination: memory (per-instance) | redis (cross-instance, not yet implemented).
-  rate_limit:
-    calls: 0
-    window: 1.0
-    coordination: memory
-
 download:
   multi_bot_download: 3         # parallel bots per stream (1 = sequential)
   allow_user_fallback: false    # use user accounts when the bot pool is exhausted
@@ -114,10 +106,18 @@ download:
   # queued; per-stream RAM is bounded at multi_bot_download x 1MiB. 0 = disabled.
   memory_soft_limit: 0
 
-operations:             # throttling for massive Telegram operations (move/copy/delete)
-  concurrent: 3
-  sleep: 1              # seconds of pause between batches
-  batch: 10             # operations per batch
+operations:
+  # Logical filesystem jobs that may run at once. Management jobs use user
+  # accounts; downloads use the download bot/user pool settings above.
+  concurrent: 4
+  # Proactive per-account Telegram write budget. 0 actions disables it.
+  # Token-bucket model: each account starts with `actions` write tokens. Every
+  # flood-sensitive Telegram write (send/copy/delete/edit/admin action) consumes
+  # one token; the bucket refills gradually from empty to full over `within`
+  # seconds. When an account has no token, tgshelf uses another eligible account;
+  # if every account is empty, it waits for the first token to refill.
+  actions: 16
+  within: 40            # seconds to refill a fully drained account bucket
 
 http:
   enabled: true

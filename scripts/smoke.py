@@ -42,7 +42,7 @@ from tgshelf.log import setup_logging  # noqa: E402
 from tgshelf.core.fs import FileSystem  # noqa: E402
 from tgshelf.db.engine import create_engine, create_session_factory  # noqa: E402
 from tgshelf.db.repo import NodeRepo  # noqa: E402
-from tgshelf.http.serve import build_runtime, make_rate_limiter, start_clients  # noqa: E402
+from tgshelf.http.serve import build_runtime, make_write_limiter, start_clients  # noqa: E402
 
 
 def log(step: str) -> None:
@@ -50,7 +50,7 @@ def log(step: str) -> None:
 
 
 async def list_channels(config) -> None:
-    rate = make_rate_limiter(config.telegram.rate_limit)
+    rate = make_write_limiter(config.operations)
     clients = await start_clients(config, rate)
     if not clients:
         print("no connected accounts (run `tgshelf accounts login <name>`)")
@@ -65,7 +65,7 @@ async def list_channels(config) -> None:
 
 
 async def run_smoke(config, channel_a, channel_b, size_mb, keep, file_path) -> None:
-    rate = make_rate_limiter(config.telegram.rate_limit)
+    rate = make_write_limiter(config.operations)
     clients = await start_clients(config, rate)
     if not clients:
         print("no connected accounts; run `tgshelf accounts login <name>` first")
@@ -85,7 +85,7 @@ async def run_smoke(config, channel_a, channel_b, size_mb, keep, file_path) -> N
             min_size=config.telegram.upload.min_size,
         )
 
-    runtime = build_runtime(config, factory, clients)
+    runtime = build_runtime(config, factory, clients, write_limiter=rate)
     created_ids: list[str] = []
     try:
         async with factory() as session:

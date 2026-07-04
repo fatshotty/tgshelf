@@ -562,10 +562,10 @@ async def _build_gateways(config_path: str, *, include_bots: bool, runtime_confi
     not confused with a missing Telegram message.
     """
     from tgshelf.config import load_config
-    from tgshelf.http.serve import make_rate_limiter, start_clients
+    from tgshelf.http.serve import make_write_limiter, start_clients
 
     config = runtime_config or load_config(config_path)
-    rl = make_rate_limiter(config.telegram.rate_limit)
+    rl = make_write_limiter(config.operations)
     pairs = await start_clients(config, rl)
     clients = [client for _account, client in pairs]
     selected = (

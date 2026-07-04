@@ -3,6 +3,17 @@ from __future__ import annotations
 import pytest
 
 from tgshelf.telegram.client import TgClient
+from tgshelf.telegram.pool import ClientPool, PoolMember
+from tgshelf.telegram.ratelimit import TokenBucketRateLimiter
+from tgshelf.telegram.write_gateway import AccountWriteGateway
+
+
+class Clock:
+    def __init__(self, now: float = 0.0):
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
 
 
 class FakeTelethonClient:
@@ -66,6 +77,62 @@ class RecordingRateLimiter:
     def acquire(self, account: str) -> float:
         self.accounts.append(account)
         return 0.0
+
+
+class RecordingWriteClient:
+    def __init__(self, name: str):
+        self.name = name
+        self.copied = []
+
+    async def copy_message(
+        self,
+        from_channel_id: int,
+        message_id: int,
+        to_channel_id: int,
+        *,
+        caption: str | None = None,
+        rate_limit: bool = True,
+    ):
+        self.copied.append(
+            (from_channel_id, message_id, to_channel_id, caption, rate_limit)
+        )
+        return (message_id + 1000, 42)
+
+
+def test_token_bucket_allows_burst_then_refills_gradually():
+    clock = Clock()
+    limiter = TokenBucketRateLimiter(capacity=2, refill_seconds=10, clock=clock)
+
+    assert limiter.acquire("main") == 0.0
+    assert limiter.acquire("main") == 0.0
+    assert limiter.acquire("main") == 5.0
+
+    clock.now = 4.0
+    assert limiter.acquire("main") == pytest.approx(1.0)
+
+    clock.now = 5.0
+    assert limiter.acquire("main") == 0.0
+
+
+@pytest.mark.asyncio
+async def test_account_write_gateway_skips_full_account_and_uses_available_account():
+    clock = Clock()
+    limiter = TokenBucketRateLimiter(capacity=1, refill_seconds=10, clock=clock)
+    assert limiter.acquire("a") == 0.0
+    client_a = RecordingWriteClient("a")
+    client_b = RecordingWriteClient("b")
+    pool = ClientPool(
+        [
+            PoolMember(client_a, name="a"),
+            PoolMember(client_b, name="b"),
+        ]
+    )
+    gateway = AccountWriteGateway(pool, limiter=limiter)
+
+    await gateway.copy_message(-100, 10, -200)
+
+    assert client_a.copied == []
+    assert client_b.copied == [(-100, 10, -200, None, False)]
 
 
 @pytest.mark.asyncio

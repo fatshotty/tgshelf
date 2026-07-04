@@ -225,7 +225,7 @@ async def run(config: Config, args) -> int:
         return 1
 
     from tgshelf.commands.common import resolve_concurrent
-    from tgshelf.http.serve import build_runtime, make_rate_limiter, start_clients
+    from tgshelf.http.serve import build_runtime, make_write_limiter, start_clients
 
     try:
         concurrent = resolve_concurrent(config, cli_value=getattr(args, "concurrent", None))
@@ -233,8 +233,8 @@ async def run(config: Config, args) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    rate_limiter = make_rate_limiter(config.telegram.rate_limit)
-    pairs = await start_clients(config, rate_limiter)
+    write_limiter = make_write_limiter(config.operations)
+    pairs = await start_clients(config, write_limiter)
     engine = create_engine(config.db)
 
     dest = getattr(args, "dest", None) or "/"
@@ -272,7 +272,12 @@ async def run(config: Config, args) -> int:
     stats = Stats()
     try:
         session_factory = create_session_factory(engine)
-        runtime = build_runtime(config, session_factory, pairs)
+        runtime = build_runtime(
+            config,
+            session_factory,
+            pairs,
+            write_limiter=write_limiter,
+        )
         stats = await sync(
             session_factory, runtime["uploader"],
             master_channel=config.telegram.upload.channel,

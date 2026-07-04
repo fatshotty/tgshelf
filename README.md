@@ -257,13 +257,6 @@ telegram:
       Key: {key}
     warning_window: 300
 
-  # Proactive per-account rate limit. calls=0 disables it.
-  # coordination=redis is a planned extension, not implemented yet.
-  rate_limit:
-    calls: 0
-    window: 1.0
-    coordination: memory
-
 download:
   multi_bot_download: 3         # parallel bots per download; 1 = sequential
   allow_user_fallback: false    # use user accounts if the bot pool is exhausted
@@ -271,10 +264,18 @@ download:
   # Estimated buffer soft threshold. 0 = disabled.
   memory_soft_limit: 0
 
-operations:             # throttling for large Telegram move/copy/delete jobs
-  concurrent: 3
-  sleep: 1              # pause in seconds between batches
-  batch: 10             # operations per batch
+operations:
+  # Logical filesystem jobs that may run at once. Management jobs use user
+  # accounts; downloads use the download bot/user pool settings above.
+  concurrent: 4
+  # Proactive per-account Telegram write budget. 0 actions disables it.
+  # Token-bucket model: each account starts with `actions` write tokens. Every
+  # flood-sensitive Telegram write (send/copy/delete/edit/admin action) consumes
+  # one token; the bucket refills gradually from empty to full over `within`
+  # seconds. When an account has no token, tgshelf uses another eligible account;
+  # if every account is empty, it waits for the first token to refill.
+  actions: 16
+  within: 40            # seconds to refill a fully drained account bucket
 
 http:
   enabled: true

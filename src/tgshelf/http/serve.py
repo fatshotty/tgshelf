@@ -1,6 +1,6 @@
 """`serve` composition root: build the runtime from config and run the HTTP app.
 
-The pure wiring (account classification, rate limiter, engine assembly) is unit
+The pure wiring (account classification, write bucket, engine assembly) is unit
 tested. Starting the real Telegram clients and running the server are the
 Telegram/IO boundary, exercised by manual smoke tests.
 """
@@ -15,7 +15,7 @@ from typing import Any, Sequence
 
 from aiohttp import web
 
-from tgshelf.config import Config, RateLimitConfig
+from tgshelf.config import Config, OperationsConfig
 from tgshelf.constants import PART_SIZE
 from tgshelf.core.executor import FsExecutor
 from tgshelf.core.uploader import Uploader
@@ -24,7 +24,8 @@ from tgshelf.http.app import make_app
 from tgshelf.log import describe_exc
 from tgshelf.looplag import start_loop_lag_monitor, stop_loop_lag_monitor
 from tgshelf.telegram.pool import BotPool, ClientPool, PoolMember
-from tgshelf.telegram.ratelimit import InMemoryRateLimiter
+from tgshelf.telegram.ratelimit import TokenBucketRateLimiter
+from tgshelf.telegram.write_gateway import AccountWriteGateway
 
 log = logging.getLogger("tgshelf.serve")
 
@@ -51,20 +52,33 @@ def build_pools(
     return ClientPool(users), BotPool(bots)
 
 
-def make_rate_limiter(rate_limit: RateLimitConfig):
-    if rate_limit.calls <= 0:
+def make_write_limiter(operations: OperationsConfig):
+    if operations.actions <= 0:
         return None
-    if rate_limit.coordination == "redis":
-        raise NotImplementedError(
-            "redis rate-limit coordination is not implemented yet (memory only)"
-        )
-    return InMemoryRateLimiter(max_calls=rate_limit.calls, window=rate_limit.window)
+    return TokenBucketRateLimiter(
+        capacity=operations.actions,
+        refill_seconds=operations.within,
+    )
 
 
-def build_runtime(config: Config, session_factory, clients) -> dict[str, Any]:
+def build_runtime(
+    config: Config,
+    session_factory,
+    clients,
+    *,
+    write_limiter=None,
+) -> dict[str, Any]:
     """Assemble pools + engines + executor from started clients. Returns the
     components the HTTP routes will use."""
     client_pool, bot_pool = build_pools(clients)
+    write_gateway = AccountWriteGateway(
+        client_pool,
+        limiter=(
+            write_limiter
+            if write_limiter is not None
+            else make_write_limiter(config.operations)
+        ),
+    )
     # with N>1 connections per client, the engine must fire >= N concurrent saves
     # to keep them busy; the client round-robins them across the connections.
     uploader = Uploader(
@@ -90,6 +104,7 @@ def build_runtime(config: Config, session_factory, clients) -> dict[str, Any]:
         min_size=config.telegram.upload.min_size,
         uploader=uploader,
         streamer=streamer,
+        gateway=write_gateway,
     )
     return {
         "config": config,
@@ -98,6 +113,7 @@ def build_runtime(config: Config, session_factory, clients) -> dict[str, Any]:
         "bot_pool": bot_pool,
         "uploader": uploader,
         "streamer": streamer,
+        "write_gateway": write_gateway,
         "executor": executor,
     }
 
@@ -105,7 +121,7 @@ def build_runtime(config: Config, session_factory, clients) -> dict[str, Any]:
 # -- Telegram / IO boundary (smoke tested) ---------------------------------
 
 
-async def start_clients(config: Config, rate_limiter) -> list[tuple[Any, Any]]:
+async def start_clients(config: Config, write_limiter) -> list[tuple[Any, Any]]:
     """Connect each configured account from its stored session. Accounts without
     a usable session are skipped with a warning (run `accounts login`). The
     `main_bot` watcher is NOT here — it is a dedicated instance started separately
@@ -161,7 +177,7 @@ async def start_clients(config: Config, rate_limiter) -> list[tuple[Any, Any]]:
                 if account.is_bot else {}
             )
             clients.append((account, TgClient(
-                tele, name=account.name, rate_limiter=rate_limiter,
+                tele, name=account.name, rate_limiter=write_limiter,
                 tcp_connections=config.concurrent_tcp_connections, **tg_kwargs,
             )))
     finally:
@@ -193,10 +209,15 @@ async def run_server(config: Config) -> None:
     engine = create_engine(config.db)
     session_factory = create_session_factory(engine)
     await _verify_db(engine)  # fail fast on a dead/misconfigured DB
-    rate_limiter = make_rate_limiter(config.telegram.rate_limit)
+    write_limiter = make_write_limiter(config.operations)
 
-    clients = await start_clients(config, rate_limiter)
-    runtime = build_runtime(config, session_factory, clients)
+    clients = await start_clients(config, write_limiter)
+    runtime = build_runtime(
+        config,
+        session_factory,
+        clients,
+        write_limiter=write_limiter,
+    )
 
     from tgshelf.core.notify import Notifier
 
@@ -237,6 +258,7 @@ async def run_server(config: Config) -> None:
         executor=runtime["executor"],
         uploader=runtime["uploader"],
         streamer=runtime["streamer"],
+        gateway=runtime["write_gateway"],
         client_pool=runtime["client_pool"],
         bot_pool=runtime["bot_pool"],
         notifier=notifier,

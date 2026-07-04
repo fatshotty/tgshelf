@@ -359,9 +359,9 @@ async def run_create(config: Config, args) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    from tgshelf.http.serve import make_rate_limiter
+    from tgshelf.http.serve import make_write_limiter
 
-    rate_limiter = make_rate_limiter(config.telegram.rate_limit)
+    rate_limiter = make_write_limiter(config.operations)
     failures = 0
     async with _connect_user(config, account) as client:
         say = lambda text, timeout=15.0: send_and_wait(  # noqa: E731
@@ -433,9 +433,9 @@ async def run_check(config: Config, args) -> int:
         log.info("no channels in use; nothing to check")
         return 0
 
-    from tgshelf.http.serve import make_rate_limiter
+    from tgshelf.http.serve import make_write_limiter
 
-    rate_limiter = make_rate_limiter(config.telegram.rate_limit)
+    rate_limiter = make_write_limiter(config.operations)
     repaired = failed = 0
     async with _connect_user(config, account) as client:
         for channel_id in channels:

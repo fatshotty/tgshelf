@@ -36,6 +36,7 @@ class FsExecutor:
         min_size: int = 0,
         uploader: Any = None,
         streamer: Any = None,
+        gateway: Any = None,
         notifier: Any = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ):
@@ -46,6 +47,7 @@ class FsExecutor:
         self._min_size = min_size
         self._uploader = uploader
         self._streamer = streamer
+        self._gateway = gateway
         self._notifier = notifier
         self._sleep = sleep
 
@@ -74,7 +76,7 @@ class FsExecutor:
                 fs = FileSystem(
                     NodeRepo(session),
                     master_channel=self._master_channel,
-                    gateway=member.client,
+                    gateway=self._gateway or member.client,
                     uploader=self._uploader,
                     streamer=self._streamer,
                     min_size=self._min_size,

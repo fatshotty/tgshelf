@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
-import math
 import time
 from typing import Any, Awaitable, Callable
 
@@ -110,8 +109,9 @@ class TgClient:
                 if rate_limit and self._rate_limiter is not None:
                     wait = self._rate_limiter.acquire(self.name)
                     if wait > 0:
-                        log.debug("[ratelimit] '%s' window full; backing off %.1fs", self.name, wait)
-                        raise FloodCooldown(math.ceil(wait))
+                        log.debug("[ratelimit] '%s' write bucket empty; waiting %.1fs", self.name, wait)
+                        await self._sleep(wait)
+                        continue
                 try:
                     return await do_call()
                 except tg_errors.FloodWaitError as exc:
@@ -321,6 +321,8 @@ class TgClient:
         size: int,
         mime: str,
         caption: str,
+        *,
+        rate_limit: bool = True,
     ) -> tuple[int, int]:
         peer = await self._client.get_input_entity(channel_id)
         media = InputMediaUploadedDocument(
@@ -337,7 +339,7 @@ class TgClient:
                 silent=True,
                 message=caption,
             ),
-            rate_limit=True,
+            rate_limit=rate_limit,
         )
         return _extract_sent(result)
 
@@ -348,6 +350,7 @@ class TgClient:
         to_channel_id: int,
         *,
         caption: str | None = None,
+        rate_limit: bool = True,
     ) -> tuple[int, int]:
         # fetch the source message once: we need both its document (to re-send
         # server-side, no byte transfer) and its caption (the "fileName: …" set
@@ -376,27 +379,34 @@ class TgClient:
                 silent=True,
                 message=(message.message or "") if caption is None else caption,
             ),
-            rate_limit=True,
+            rate_limit=rate_limit,
         )
         return _extract_sent(result)
 
-    async def delete_message(self, channel_id: int, message_id: int) -> bool:
+    async def delete_message(
+        self, channel_id: int, message_id: int, *, rate_limit: bool = True
+    ) -> bool:
         entity = await self._client.get_input_entity(channel_id)
         result = await self._with_middleware(
             lambda: self._client.delete_messages(entity, [message_id]),
-            rate_limit=True,
+            rate_limit=rate_limit,
         )
         # telethon returns AffectedMessages; pts_count 0 = nothing deleted
         affected = result[0] if isinstance(result, list) else result
         return getattr(affected, "pts_count", 1) > 0
 
     async def edit_message_caption(
-        self, channel_id: int, message_id: int, caption: str
+        self,
+        channel_id: int,
+        message_id: int,
+        caption: str,
+        *,
+        rate_limit: bool = True,
     ) -> None:
         entity = await self._client.get_input_entity(channel_id)
         await self._with_middleware(
             lambda: self._client.edit_message(entity, message_id, text=caption),
-            rate_limit=True,
+            rate_limit=rate_limit,
         )
 
 

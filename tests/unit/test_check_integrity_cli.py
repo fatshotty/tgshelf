@@ -34,7 +34,7 @@ def load_sanitize_captions_module():
     return module
 
 
-def test_main_uses_config_db_and_rate_limits_when_db_env_is_missing(
+def test_main_uses_config_db_and_write_bucket_when_db_env_is_missing(
     tmp_path, monkeypatch, capsys
 ):
     module = load_check_integrity_module()
@@ -46,11 +46,10 @@ db: postgresql+asyncpg://cfg-user:cfg-pass@127.0.0.1/tgshelf
 telegram:
   upload:
     channel: -100123
-  rate_limit:
-    calls: 7
-    window: 2.5
 operations:
   concurrent: 7
+  actions: 16
+  within: 40
 """,
         encoding="utf-8",
     )
@@ -93,12 +92,12 @@ operations:
     assert calls["include_bots"] is False
     assert calls["concurrent"] == 7
     assert calls["progress_every"] == 100
-    assert calls["runtime_config"].telegram.rate_limit.calls == 7
-    assert calls["runtime_config"].telegram.rate_limit.window == 2.5
+    assert calls["runtime_config"].operations.actions == 16
+    assert calls["runtime_config"].operations.within == 40
     assert "integrity report: 0 file(s) checked, 0 with issues" in capsys.readouterr().out
 
 
-def test_verify_telegram_allows_disabled_write_rate_limit(tmp_path, monkeypatch):
+def test_verify_telegram_allows_disabled_write_bucket(tmp_path, monkeypatch):
     module = load_check_integrity_module()
     monkeypatch.delenv("DB", raising=False)
     config_path = tmp_path / "config.yaml"
@@ -108,9 +107,8 @@ db: postgresql+asyncpg://cfg-user:cfg-pass@127.0.0.1/tgshelf
 telegram:
   upload:
     channel: -100123
-  rate_limit:
-    calls: 0
-    window: 1.0
+operations:
+  actions: 0
 """,
         encoding="utf-8",
     )
@@ -341,16 +339,16 @@ async def test_sanitize_build_gateway_uses_all_user_accounts(monkeypatch):
         (SimpleNamespace(name="alt", is_bot=False), alt_gateway),
     ]
 
-    async def fake_start_clients(config, rate_limiter):
+    async def fake_start_clients(config, write_limiter):
         return pairs
 
-    monkeypatch.setattr(serve, "make_rate_limiter", lambda rate_limit: "rl")
+    monkeypatch.setattr(serve, "make_write_limiter", lambda operations: "rl")
     monkeypatch.setattr(serve, "start_clients", fake_start_clients)
 
     gateway, clients = await module._build_gateway(
         "unused",
         runtime_config=SimpleNamespace(
-            telegram=SimpleNamespace(rate_limit=SimpleNamespace())
+            operations=SimpleNamespace(actions=0, within=40)
         ),
     )
 

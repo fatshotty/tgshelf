@@ -356,6 +356,23 @@ async def test_sanitize_build_gateway_uses_all_user_accounts(monkeypatch):
     assert clients == [main_gateway, bot_gateway, alt_gateway]
 
 
+def test_sanitize_rate_limiter_supports_legacy_serve_name():
+    module = load_sanitize_captions_module()
+    calls = []
+    serve = SimpleNamespace(
+        make_rate_limiter=lambda rate_limit: calls.append(rate_limit) or "rl"
+    )
+    config = SimpleNamespace(
+        telegram=SimpleNamespace(rate_limit="legacy-rate-limit"),
+        operations="new-operations",
+    )
+
+    result = module._make_runtime_rate_limiter(serve, config)
+
+    assert result == "rl"
+    assert calls == ["legacy-rate-limit"]
+
+
 @pytest.mark.asyncio
 async def test_sanitize_skips_writes_when_identity_checks_fail():
     module = load_sanitize_captions_module()

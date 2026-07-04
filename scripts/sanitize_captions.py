@@ -537,11 +537,11 @@ async def run_apply_report(
 
 async def _build_gateway(config_path: str, *, runtime_config=None):
     from tgshelf.config import load_config
-    from tgshelf.http.serve import make_write_limiter, start_clients
+    from tgshelf.http import serve
 
     config = runtime_config or load_config(config_path)
-    rl = make_write_limiter(config.operations)
-    pairs = await start_clients(config, rl)
+    rl = _make_runtime_rate_limiter(serve, config)
+    pairs = await serve.start_clients(config, rl)
     clients = [client for _account, client in pairs]
     selected = [(account, client) for account, client in pairs if not account.is_bot]
     if not selected:
@@ -556,6 +556,20 @@ async def _build_gateway(config_path: str, *, runtime_config=None):
         ", ".join(gateway.account_names),
     )
     return gateway, clients
+
+
+def _make_runtime_rate_limiter(serve_module, config):
+    make_write_limiter = getattr(serve_module, "make_write_limiter", None)
+    if make_write_limiter is not None:
+        return make_write_limiter(config.operations)
+
+    make_rate_limiter = getattr(serve_module, "make_rate_limiter", None)
+    if make_rate_limiter is not None:
+        return make_rate_limiter(config.telegram.rate_limit)
+
+    raise RuntimeError(
+        "tgshelf.http.serve exposes neither make_write_limiter nor make_rate_limiter"
+    )
 
 
 def _load_runtime_config(config_path: str):

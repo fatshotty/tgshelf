@@ -1,0 +1,287 @@
+"""`tgshelf ls | search | cp | mv | rm | purge` — thin management wrappers over FileSystem.
+
+Path-addressed (like the rest of the UX). ls/rm touch only Postgres; cp/mv/purge
+also need Telegram (forward parts / delete messages), so they connect the user
+accounts. The command logic lives in `_do_*` (takes an fs) so it is testable
+against a fake-backed fs; `run()` only wires config → fs.
+"""
+
+from __future__ import annotations
+
+import sys
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Callable
+
+from tgshelf.config import Config
+from tgshelf.core.fs import FileSystem
+from tgshelf.db.engine import create_engine, create_session_factory
+from tgshelf.db.repo import NodeRepo
+
+
+def _err(msg: str) -> int:
+    print(f"error: {msg}", file=sys.stderr)
+    return 1
+
+
+def _fmt(node) -> str:
+    kind = "d" if node.is_folder else "-"
+    size = "" if node.is_folder else str(node.size)
+    return f"{kind} {node.id}  {size:>12}  {node.name}"
+
+
+def _fmt_path(node, path: str) -> str:
+    kind = "d" if node.is_folder else "-"
+    size = "" if node.is_folder else str(node.size)
+    return f"{kind} {node.id}  {size:>12}  {path}"
+
+
+def _human(size: int) -> str:
+    """Render a byte count as a short human-readable string (1024-based)."""
+    value = float(size)
+    for unit in ("B", "K", "M", "G", "T", "P"):
+        if value < 1024 or unit == "P":
+            return f"{int(value)}{unit}" if unit == "B" else f"{value:.1f}{unit}"
+        value /= 1024
+    return f"{size}B"  # unreachable, keeps type checker happy
+
+
+async def _resolve_any(fs: FileSystem, path: str):
+    """Resolve a path, trying ACTIVE first then the trash (DELETED).
+
+    `resolve` matches a single state across the *whole* path, so it handles a
+    fully-ACTIVE path and a fully-DELETED one (e.g. an rm'd folder). The common
+    case it misses is a single file rm'd inside a folder that stays ACTIVE: the
+    path is mixed-state (ACTIVE parent + DELETED leaf). Resolve the parent as
+    ACTIVE and pick the trashed child by name so `purge <path>` can reach it."""
+    node = await fs.resolve(path)
+    if node is not None:
+        return node
+    node = await fs.repo.resolve(path, state="DELETED")
+    if node is not None:
+        return node
+    segments = [s for s in path.split("/") if s]
+    if not segments:
+        return None
+    parent = await fs.resolve("/" + "/".join(segments[:-1]))
+    if parent is None:
+        return None
+    return await fs.repo.get_child_by_name(parent.id, segments[-1], state="DELETED")
+
+
+# -- command logic (testable: operate on a given fs) ------------------------
+
+
+async def _do_ls(fs: FileSystem, path: str) -> int:
+    node = await fs.resolve(path)
+    if node is None:
+        return _err(f"path not found: {path}")
+    if not node.is_folder:
+        print(_fmt(node))
+        return 0
+    for child in await fs.list_children(node.id):
+        print(_fmt(child))
+    return 0
+
+
+def _make_confirm(assume_yes: bool) -> Callable[[object], bool]:
+    """Build the `cat` confirmation gate. `--yes` auto-confirms. Otherwise the
+    prompt is written to stderr and the answer read from stdin, so `cat > file`
+    keeps stdout clean for the bytes; a non-interactive/empty answer declines."""
+    def confirm(node) -> bool:
+        if assume_yes:
+            return True
+        print(
+            f"'{node.name}' is {_human(node.size)} ({node.size} bytes), over the inline "
+            "limit — print raw bytes to stdout? [y/N] ",
+            end="", file=sys.stderr, flush=True,
+        )
+        return sys.stdin.readline().strip().lower() in ("y", "yes")
+    return confirm
+
+
+async def _do_cat(
+    fs: FileSystem, path: str, *, min_size: int, confirm: Callable[[object], bool], out=None
+) -> int:
+    """Print a file's bytes to `out` (default: stdout, binary). A file larger than
+    the inline DB limit (min_size) is Telegram-backed and may be huge, so dumping
+    it is gated behind `confirm(node)`; if declined no bytes are written."""
+    node = await fs.resolve(path)
+    if node is None:
+        return _err(f"path not found: {path}")
+    if node.is_folder:
+        return _err(f"path is a folder, not a file: {path}")
+    if node.size > min_size and not confirm(node):
+        print("aborted", file=sys.stderr)
+        return 0
+    buffer = out if out is not None else sys.stdout.buffer
+    async for chunk in fs.open_read(node.id):
+        buffer.write(chunk)
+    buffer.flush()
+    return 0
+
+
+async def _do_du(fs: FileSystem, path: str, *, human: bool = False) -> int:
+    node = await fs.resolve(path)
+    if node is None:
+        return _err(f"path not found: {path}")
+    total = await fs.total_size(node.id)
+    size = _human(total) if human else str(total)
+    print(f"{size}\t{path}")
+    return 0
+
+
+async def _do_search(fs: FileSystem, term: str) -> int:
+    for node in await fs.search(term):
+        path = await fs.path_of(node.id)
+        print(_fmt_path(node, path or node.name))
+    return 0
+
+
+async def _do_mkdir(fs: FileSystem, path: str) -> int:
+    # mkdirs semantics (like `mkdir -p`): create missing parents, idempotent if it
+    # already exists. DB-only — a folder has no Telegram footprint until files land.
+    node = await fs.mkdirs(path)
+    print(f"created {path} ({node.id})")
+    return 0
+
+
+async def _do_rm(fs: FileSystem, path: str) -> int:
+    node = await fs.resolve(path)
+    if node is None:
+        return _err(f"path not found: {path}")
+    await fs.delete(node.id, purge=False)
+    print(f"deleted (soft) {path}")
+    return 0
+
+
+async def _do_purge(fs: FileSystem, path: str) -> int:
+    node = await _resolve_any(fs, path)
+    if node is None:
+        return _err(f"path not found: {path}")
+    await fs.delete(node.id, purge=True)
+    print(f"purged {path}")
+    return 0
+
+
+async def _do_mv(fs: FileSystem, src: str, dst: str) -> int:
+    return await _move_or_copy(fs, src, dst, copy=False)
+
+
+async def _do_cp(fs: FileSystem, src: str, dst: str) -> int:
+    return await _move_or_copy(fs, src, dst, copy=True)
+
+
+async def _move_or_copy(fs: FileSystem, src: str, dst: str, *, copy: bool) -> int:
+    source = await fs.resolve(src)
+    if source is None:
+        return _err(f"source not found: {src}")
+    dest = await fs.resolve(dst)
+    if dest is None:
+        return _err(f"destination not found: {dst}")
+    if not dest.is_folder:
+        return _err(f"destination is not a folder: {dst}")
+    if copy:
+        await fs.copy(source.id, dest.id)
+        print(f"copied {src} -> {dst}")
+    else:
+        await fs.move(source.id, dest.id)
+        print(f"moved {src} -> {dst}")
+    return 0
+
+
+# -- config → fs wiring -----------------------------------------------------
+
+
+@asynccontextmanager
+async def _db_fs(config: Config):
+    """fs with Postgres only (ls / rm)."""
+    engine = create_engine(config.db)
+    try:
+        async with create_session_factory(engine)() as session:
+            yield FileSystem(
+                NodeRepo(session),
+                master_channel=config.telegram.upload.channel,
+                min_size=config.telegram.upload.min_size,
+            )
+    finally:
+        await engine.dispose()
+
+
+@asynccontextmanager
+async def _telegram_fs(config: Config):
+    """fs with connected accounts (cp / mv / purge: forward parts / delete msgs)."""
+    from tgshelf.http.serve import build_runtime, make_write_limiter, start_clients
+
+    write_limiter = make_write_limiter(config.operations)
+    pairs = await start_clients(config, write_limiter)
+    engine = create_engine(config.db)
+    try:
+        session_factory = create_session_factory(engine)
+        runtime = build_runtime(
+            config,
+            session_factory,
+            pairs,
+            write_limiter=write_limiter,
+        )
+        async with session_factory() as session:
+            yield FileSystem(
+                NodeRepo(session),
+                master_channel=config.telegram.upload.channel,
+                min_size=config.telegram.upload.min_size,
+                uploader=runtime["uploader"],
+                streamer=runtime["streamer"],
+                executor=runtime["executor"],
+                gateway=runtime["write_gateway"],
+            )
+    finally:
+        await engine.dispose()
+        for _account, client in pairs:
+            disconnect = getattr(getattr(client, "_client", None), "disconnect", None)
+            if disconnect is not None:
+                await disconnect()
+
+
+async def run(config: Config, args) -> int:
+    cmd = args.command
+    if cmd == "ls":
+        async with _db_fs(config) as fs:
+            return await _do_ls(fs, args.path)
+    if cmd == "cat":
+        min_size = config.telegram.upload.min_size
+        # peek over Postgres: inline (DB-stored) files print straight from the DB
+        # with no Telegram connection; only a Telegram-backed file needs the streamer.
+        async with _db_fs(config) as fs:
+            node = await fs.resolve(args.path)
+            if node is None:
+                return _err(f"path not found: {args.path}")
+            if node.is_folder:
+                return _err(f"path is a folder, not a file: {args.path}")
+            if await fs.repo.content_of(node.id) is not None:
+                return await _do_cat(fs, args.path, min_size=min_size,
+                                     confirm=_make_confirm(args.yes))
+        async with _telegram_fs(config) as tfs:
+            return await _do_cat(tfs, args.path, min_size=min_size,
+                                 confirm=_make_confirm(args.yes))
+    if cmd == "du":
+        async with _db_fs(config) as fs:
+            return await _do_du(fs, args.path, human=args.human)
+    if cmd == "search":
+        async with _db_fs(config) as fs:
+            return await _do_search(fs, args.term)
+    if cmd == "mkdir":
+        async with _db_fs(config) as fs:
+            return await _do_mkdir(fs, args.path)
+    if cmd == "rm":
+        async with _db_fs(config) as fs:
+            return await _do_rm(fs, args.path)
+    if cmd == "purge":
+        async with _telegram_fs(config) as fs:
+            return await _do_purge(fs, args.path)
+    if cmd == "mv":
+        async with _telegram_fs(config) as fs:
+            return await _do_mv(fs, args.src, args.dst)
+    if cmd == "cp":
+        async with _telegram_fs(config) as fs:
+            return await _do_cp(fs, args.src, args.dst)
+    return _err(f"unknown command {cmd}")

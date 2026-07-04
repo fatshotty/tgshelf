@@ -18,10 +18,15 @@ data/
 *.session-journal
 .env
 
+# tests: kept local-only for now, will be committed when the suite is ready
+tests/
+
 # OS / editor
 .DS_Store
 .vscode/
 .idea/
 
-docs/
+docs/dev/
 .claude/
+scripts/migrate_mongo.py
+tgshelf-sanitize-captions*.jsonl

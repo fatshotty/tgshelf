@@ -94,6 +94,60 @@ http://127.0.0.1:3000/webui
 The server redirects `/` to `/webui`; older `/b/...`, `/search`, and `/stats`
 Web UI routes redirect to their `/webui/...` equivalents.
 
+## Docker
+
+The Docker image contains only `tgshelf` and the built Web UI. PostgreSQL is
+external and is configured through the `DB` environment variable.
+
+Build the image:
+
+```sh
+docker build -t tgshelf:local .
+```
+
+Run it against an existing PostgreSQL container or service:
+
+```sh
+docker run -d \
+  --name tgshelf \
+  --restart unless-stopped \
+  -p 3000:3000 \
+  -e DB='postgresql+asyncpg://DB_USER:DB_PASS@DB_HOST:5432/DB_NAME' \
+  -e TGSHELF_CONFIG=/config/config.yaml \
+  -v /opt/tgshelf/config:/config:ro \
+  -v /opt/tgshelf/data:/data \
+  tgshelf:local
+```
+
+For Docker and Portainer deployments, set these values in the mounted
+`config.yaml`:
+
+```yaml
+data: /data
+
+http:
+  enabled: true
+  host: 0.0.0.0
+  port: 3000
+```
+
+On `serve`, the container runs `alembic upgrade head` before starting the HTTP
+server. Set `TGSHELF_RUN_MIGRATIONS=0` if migrations are handled externally.
+
+Interactive account setup can be run with the same image and mounted config:
+
+```sh
+docker run --rm -it \
+  -e DB='postgresql+asyncpg://DB_USER:DB_PASS@DB_HOST:5432/DB_NAME' \
+  -e TGSHELF_CONFIG=/config/config.yaml \
+  -v /opt/tgshelf/config:/config:ro \
+  -v /opt/tgshelf/data:/data \
+  tgshelf:local accounts setup
+```
+
+When using bind mounts, make sure `/opt/tgshelf/data` is writable by container
+UID `10001`.
+
 ## Verification
 
 Python:
@@ -203,13 +257,6 @@ telegram:
       Key: {key}
     warning_window: 300
 
-  # Proactive per-account rate limit. calls=0 disables it.
-  # coordination=redis is a planned extension, not implemented yet.
-  rate_limit:
-    calls: 0
-    window: 1.0
-    coordination: memory
-
 download:
   multi_bot_download: 3         # parallel bots per download; 1 = sequential
   allow_user_fallback: false    # use user accounts if the bot pool is exhausted
@@ -217,10 +264,18 @@ download:
   # Estimated buffer soft threshold. 0 = disabled.
   memory_soft_limit: 0
 
-operations:             # throttling for large Telegram move/copy/delete jobs
-  concurrent: 3
-  sleep: 1              # pause in seconds between batches
-  batch: 10             # operations per batch
+operations:
+  # Logical filesystem jobs that may run at once. Management jobs use user
+  # accounts; downloads use the download bot/user pool settings above.
+  concurrent: 4
+  # Proactive per-account Telegram write budget. 0 actions disables it.
+  # Token-bucket model: each account starts with `actions` write tokens. Every
+  # flood-sensitive Telegram write (send/copy/delete/edit/admin action) consumes
+  # one token; the bucket refills gradually from empty to full over `within`
+  # seconds. When an account has no token, tgshelf uses another eligible account;
+  # if every account is empty, it waits for the first token to refill.
+  actions: 16
+  within: 40            # seconds to refill a fully drained account bucket
 
 http:
   enabled: true
@@ -275,11 +330,19 @@ All commands accept `--config`; the default is `./config.yaml`.
 # Inspect configured accounts and saved sessions.
 tgshelf --config config.yaml accounts list
 
-# Interactive login for a user account defined in telegram.users.
+# Create every missing user and bot session from telegram.users.
+tgshelf --config config.yaml accounts setup
+
+# Recreate every user and bot session from telegram.users.
+tgshelf --config config.yaml accounts setup --force
+
+# Interactive login for one user account defined in telegram.users.
 tgshelf --config config.yaml accounts login main
 
-# Register a bot whose bot_token is already present in config.yaml.
+# Register one or more bots whose bot_token is already present in config.yaml.
 tgshelf --config config.yaml accounts add-bot bot01
+tgshelf --config config.yaml accounts add-bot bot01 bot02 bot03
+tgshelf --config config.yaml accounts add-bot --all
 
 # Start the HTTP API, Web UI, watcher, metrics, and enabled WebDAV surfaces.
 tgshelf --config config.yaml serve

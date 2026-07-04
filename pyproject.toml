@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tgshelf"
+dynamic = ["version"]
+description = "Telegram as cloud storage: virtual filesystem on PostgreSQL, files on Telegram channels, HTTP streaming proxy"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "telethon>=1.36",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
+    "aiohttp>=3.11",
+    "pyyaml>=6.0",
+    "cryptg>=0.5",
+    "uvloop>=0.21; sys_platform != 'win32'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",
+]
+
+[project.scripts]
+tgshelf = "tgshelf.cli:main"
+
+[tool.hatch.version]
+path = "src/tgshelf/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tgshelf"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

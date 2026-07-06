@@ -9,6 +9,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
+from tgshelf.config import resolve_env_refs
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -38,7 +39,7 @@ def _resolve_db_url() -> str | None:
     if config_path.is_file():
         raw = yaml.safe_load(config_path.read_text()) or {}
         if isinstance(raw, dict) and raw.get("db"):
-            return str(raw["db"])
+            return str(resolve_env_refs(raw["db"], os.environ, path="db"))
     return None
 
 

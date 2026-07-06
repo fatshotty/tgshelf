@@ -1,5 +1,10 @@
 # tgshelf configuration — copy to config.yaml and edit.
 # config.yaml is gitignored: it contains secrets.
+#
+# Any scalar string may reference environment variables with ${VAR}. tgshelf
+# expands them before validation, including inside larger strings:
+#   db: "postgresql+asyncpg://${DB_USER}:${DB_PASS}@localhost/${DB_NAME}"
+# The DB environment variable still overrides the db key entirely.
 
 data: ./data            # local data dir (file sessions, runtime state)
 

@@ -20,6 +20,20 @@
   missing source entries, nested folders, and channel inheritance across the
   backup destination.
 
+## Batch Delete / Purge CLI
+
+- Allow the `delete`/`rm` and `purge` CLI commands to accept multiple file or
+  folder paths in a single process run, for example:
+  `tgshelf purge /media/a.mkv /other/folder/b.mkv /archive/old`.
+- This avoids restarting the tool once per path when the operator needs to
+  delete or purge several unrelated nodes, which currently causes repeated
+  startup/login work.
+- Resolve every requested path before mutating data, report missing paths
+  clearly, and define whether the command should fail-fast or continue with
+  the remaining valid paths.
+- Keep logs grouped and readable per target path, especially for purge operations
+  that delete Telegram-backed parts.
+
 ## Telegram Caption Consistency
 
 - Track and implement Telegram caption updates when a Telegram-backed file is

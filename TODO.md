@@ -22,3 +22,24 @@
   the `[flood]` marker. The one-shot caption sanitizer may surface a different
   behavior during the historical cleanup, but regular service operations must
   keep flood/cooldown events visible in logs.
+
+## Plugin Hooks And info.notes Captions
+
+- Implement the design recorded in `docs/dev/plugins-and-info-notes.md`.
+- Render only `nodes.info["notes"]` below the canonical `fileName:` caption line.
+- Keep `info.notes` free-form: allow long text, line breaks, and empty lines;
+  do not trim or silently truncate it. If Telegram rejects the caption, surface
+  the error.
+- Add a centralized caption renderer and update upload, rename, copy/move,
+  merge, reorder, split, sanitizer, and recovery tooling to use it.
+- Add a core helper to update `info.notes` and resync Telegram captions for
+  Telegram-backed files.
+- Add a plugin manager with ordered hook chains and a single public
+  `PluginError` exception type.
+- Add initial file-level hooks for upload, move, copy, rename, delete, and
+  import.
+- Wire the plugin manager through every `FileSystem` construction path,
+  including HTTP, WebDAV, CLI sync, CLI fs operations, watcher/import-channel,
+  and `FsExecutor`.
+- Add an `install_plugin` or `plugins` command flow to make local plugin code
+  available and validate configured plugin modules.

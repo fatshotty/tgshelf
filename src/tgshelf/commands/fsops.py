@@ -172,7 +172,7 @@ async def _do_mv(fs: FileSystem, src: str, dst: str) -> int:
 
 
 async def _do_cp(fs: FileSystem, src: str, dst: str, *, force_copy: bool = False) -> int:
-    log.info("[copy] cli src=%s dst=%s force_copy=%s", src, dst, force_copy)
+    log.debug("[copy] cli src=%s dst=%s force_copy=%s", src, dst, force_copy)
     if "*" in dst:
         return _err("wildcard is only supported in the source path")
     copy_contents = src.endswith("/*")
@@ -189,12 +189,12 @@ async def _do_cp(fs: FileSystem, src: str, dst: str, *, force_copy: bool = False
         if not source.is_folder:
             return _err(f"source is not a folder: {source_path}")
         children = await fs.list_children(source.id)
-        log.info("[copy] cli copying %d child item(s) from %s into %s", len(children), src, dst)
+        log.debug("[copy] cli copying %d child item(s) from %s into %s", len(children), src, dst)
         for child in children:
             await fs.copy(child.id, dest.id, force_copy=force_copy)
     else:
         await fs.copy(source.id, dest.id, force_copy=force_copy)
-    log.info("[copy] cli completed src=%s dst=%s force_copy=%s", src, dst, force_copy)
+    log.debug("[copy] cli completed src=%s dst=%s force_copy=%s", src, dst, force_copy)
     print(f"copied {src} -> {dst}")
     return 0
 

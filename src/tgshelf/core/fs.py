@@ -402,7 +402,7 @@ class FileSystem:
         if node is None:
             raise NotAReadableFile(f"node {node_id} not found")
         await self.ensure_move_target(new_parent_id)
-        log.info(
+        log.debug(
             "[copy] requested %s '%s' (%s) -> parent %s force_copy=%s",
             "folder" if node.is_folder else "file",
             node.name,
@@ -443,7 +443,7 @@ class FileSystem:
         if not force_copy:
             existing = await self._same_name_file(dst_parent_id, src.name)
             if existing is not None:
-                log.info(
+                log.debug(
                     "[copy] skip existing file '%s' (%s) in parent %s for source %s",
                     existing.name,
                     existing.id,
@@ -453,7 +453,7 @@ class FileSystem:
                 return existing
 
         name = await self._dedup_name(dst_parent_id, src.name, is_folder=False)
-        log.info(
+        log.debug(
             "[copy] copying file '%s' (%s) -> parent %s as '%s' force_copy=%s",
             src.name,
             src.id,
@@ -469,7 +469,17 @@ class FileSystem:
                 channel_id=dest_channel, state="ACTIVE", size=len(content), content=content,
             )
             await self.repo.session.commit()
-            return await self.repo.get(new.id)
+            copied = await self.repo.get(new.id)
+            log.info(
+                "[copy] copied file '%s' (%s) -> parent %s as '%s' (%s) force_copy=%s",
+                src.name,
+                src.id,
+                dst_parent_id,
+                copied.name,
+                copied.id,
+                force_copy,
+            )
+            return copied
 
         src_parts = await self.repo.parts_of(src.id)
         new = await self.repo.create(
@@ -500,7 +510,17 @@ class FileSystem:
             new.id, state="ACTIVE", size=sum(p.size for p in new_parts)
         )
         await self.repo.session.commit()
-        return await self.repo.get(new.id)
+        copied = await self.repo.get(new.id)
+        log.info(
+            "[copy] copied file '%s' (%s) -> parent %s as '%s' (%s) force_copy=%s",
+            src.name,
+            src.id,
+            dst_parent_id,
+            copied.name,
+            copied.id,
+            force_copy,
+        )
+        return copied
 
     async def _ensure_folder(self, parent_id: str, name: str) -> str:
         """Reuse a same-name folder under parent (merge) or create it; return id."""
@@ -520,7 +540,7 @@ class FileSystem:
         mapping = {src.id: await self._ensure_folder(dst_parent_id, src.name)}
         descendants = await self.repo.subtree(src.id, state="ACTIVE")  # shallow-first
         files = [n for n in descendants if not n.is_folder]
-        log.info(
+        log.debug(
             "[copy] folder '%s' (%s) -> parent %s: %d descendant(s), %d file(s), force_copy=%s",
             src.name,
             src.id,
@@ -538,7 +558,7 @@ class FileSystem:
         # pass 2: copy the files into their mapped folders (fanned out)
         pairs = [(n.id, mapping[n.parent_id], force_copy) for n in files]
         _log_failures(await self._fan_out(pairs, _copy_op), "copy")
-        log.info(
+        log.debug(
             "[copy] folder '%s' (%s) completed into %s",
             src.name,
             src.id,

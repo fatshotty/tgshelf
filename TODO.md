@@ -56,3 +56,8 @@
   the `[flood]` marker. The one-shot caption sanitizer may surface a different
   behavior during the historical cleanup, but regular service operations must
   keep flood/cooldown events visible in logs.
+
+## Web UI Text Editing
+
+- Fix the Web UI text-file editing flow. `.nfo` files are text files and must be
+  editable as text.

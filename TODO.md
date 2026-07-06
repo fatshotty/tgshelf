@@ -1,5 +1,25 @@
 # TODO
 
+## Backup / Mirror Command
+
+- Implement a first-class virtual-to-virtual backup/mirror workflow, exposed from
+  the CLI, for example:
+  `tgshelf --config config.yaml mirror /media/movies /backup/movies-bk-1`.
+- The command must synchronize a source folder into a destination folder without
+  requiring a local download/re-upload round trip.
+- Preserve the latest active source tree in the destination by creating missing
+  folders, copying new files, replacing changed files, and marking destination
+  files/folders that no longer exist in the source as `DELETED`.
+- Reuse existing server-side copy/move primitives where possible, but implement
+  mirror-specific planning instead of relying on a one-shot `cp`.
+- Support a safe dry-run/report mode that lists planned creates, updates,
+  deletes, skips, and mismatches before mutating the destination tree.
+- Add an optional cleanup step for mirror discards that purges only `DELETED`
+  nodes under the backup root, using the existing `deleted_only` purge behavior.
+- Add focused tests for idempotent re-runs, renamed files, changed file sizes,
+  missing source entries, nested folders, and channel inheritance across the
+  backup destination.
+
 ## Telegram Caption Consistency
 
 - Track and implement Telegram caption updates when a Telegram-backed file is

@@ -169,7 +169,27 @@ async def _do_mv(fs: FileSystem, src: str, dst: str) -> int:
 
 
 async def _do_cp(fs: FileSystem, src: str, dst: str) -> int:
-    return await _move_or_copy(fs, src, dst, copy=True)
+    if "*" in dst:
+        return _err("wildcard is only supported in the source path")
+    copy_contents = src.endswith("/*")
+    source_path = src[:-2] if copy_contents else src
+    source = await fs.resolve(source_path)
+    if source is None:
+        return _err(f"source not found: {source_path}")
+    dest = await fs.resolve(dst)
+    if dest is None:
+        return _err(f"destination not found: {dst}")
+    if not dest.is_folder:
+        return _err(f"destination is not a folder: {dst}")
+    if copy_contents:
+        if not source.is_folder:
+            return _err(f"source is not a folder: {source_path}")
+        for child in await fs.list_children(source.id):
+            await fs.copy(child.id, dest.id)
+    else:
+        await fs.copy(source.id, dest.id)
+    print(f"copied {src} -> {dst}")
+    return 0
 
 
 async def _move_or_copy(fs: FileSystem, src: str, dst: str, *, copy: bool) -> int:

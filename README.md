@@ -377,6 +377,8 @@ tgshelf --config config.yaml search readme
 tgshelf --config config.yaml du -H /folder/sub-folder
 tgshelf --config config.yaml cat /notes/readme.txt
 tgshelf --config config.yaml cp /notes/readme.txt /archive
+tgshelf --config config.yaml cp /media/movies /backup
+tgshelf --config config.yaml cp '/media/movies/*' /backup/movies-bk-1
 tgshelf --config config.yaml mv /archive/readme.txt /folder/sub-folder
 tgshelf --config config.yaml rm /notes/readme.txt
 tgshelf --config config.yaml purge /notes/readme.txt

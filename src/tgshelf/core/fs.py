@@ -248,11 +248,36 @@ class FileSystem:
         # the subtree's DELETED nodes — the ACTIVE tree (and the root) survive. It
         # is the manual cleanup of a backup's discards after a mirror run.
         state = "DELETED" if deleted_only else None
+        node = await self.repo.get(node_id)
         parts = await self.repo.parts_in_subtree(node_id, state=state)
+        node_name = getattr(node, "name", None) or "-"
+        log.info(
+            "[purge] starting node=%s name=%s deleted_only=%s telegram_parts=%s gateway=%s",
+            node_id, node_name, deleted_only, len(parts), "yes" if self._gateway else "no",
+        )
         if parts and self._gateway is not None:
-            await channels.delete_originals(self._gateway, parts, notifier=self._notifier)
+            log.info(
+                "[purge] deleting %s Telegram-backed part messages across %s channels",
+                len(parts), len({part.channel_id for part in parts}),
+            )
+            await channels.delete_originals(
+                self._gateway, parts, notifier=self._notifier, context="purge"
+            )
+        elif parts:
+            log.warning(
+                "[purge] skipping Telegram message deletion for %s parts: no gateway configured",
+                len(parts),
+            )
+        log.info(
+            "[purge] deleting database subtree node=%s state=%s",
+            node_id, state or "ANY",
+        )
         await self.repo.purge_subtree(node_id, state=state)
         await self.repo.session.commit()
+        log.info(
+            "[purge] done node=%s name=%s deleted_only=%s telegram_parts=%s",
+            node_id, node_name, deleted_only, len(parts),
+        )
 
     async def restore(self, node_id: str) -> None:
         try:

@@ -5,6 +5,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="light dark" />
     <title>tgshelf</title>
+    <script>
+      ;(function () {
+        if (typeof Object.hasOwn !== 'function') {
+          Object.defineProperty(Object, 'hasOwn', {
+            configurable: true,
+            value: function hasOwn(object, property) {
+              if (object == null) {
+                throw new TypeError('Object.hasOwn called on null or undefined')
+              }
+              return Object.prototype.hasOwnProperty.call(Object(object), property)
+            },
+            writable: true,
+          })
+        }
+      })()
+    </script>
     <script type="module" crossorigin src="/assets/index-BSIQlLKo.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-aBsjlAmP.css">
   </head>

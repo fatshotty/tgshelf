@@ -68,6 +68,12 @@ def build_parser() -> argparse.ArgumentParser:
         elif name in ("cp", "mv"):
             cmd.add_argument("src", help="source path (file or folder)")
             cmd.add_argument("dst", help="destination folder path")
+            if name == "cp":
+                cmd.add_argument(
+                    "--force-copy",
+                    action="store_true",
+                    help="copy even when a same-name file already exists in the destination",
+                )
         elif name == "strm":
             cmd.add_argument("--source", help="drive folder to mirror (default: config strm.source)")
             cmd.add_argument("--destination", help="local output folder (default: config strm.destination)")

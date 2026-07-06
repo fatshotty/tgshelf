@@ -337,12 +337,16 @@ paths:
       description: |
         A **file** copies synchronously (201) — its Telegram messages are
         duplicated so the copy owns its own messages. A **folder** is
-        fire-and-forget (**202**), like move. Name collisions are auto-renamed.
+        fire-and-forget (**202**), like move.
+
+        By default, a same-name ACTIVE file already present in the destination
+        is reused and no duplicate copy is created. Set `force_copy: true` to
+        force a duplicate copy using the next available deduplicated name.
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/ParentRef" }
+            schema: { $ref: "#/components/schemas/CopyRequest" }
       responses:
         "201":
           description: File copied.
@@ -630,6 +634,15 @@ components:
       required: [parent_id]
       properties:
         parent_id: { type: string }
+    CopyRequest:
+      type: object
+      required: [parent_id]
+      properties:
+        parent_id: { type: string }
+        force_copy:
+          type: boolean
+          default: false
+          description: "Copy even when a same-name file already exists in the destination."
     FilePart:
       type: object
       properties:

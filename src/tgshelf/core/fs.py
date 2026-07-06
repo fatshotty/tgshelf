@@ -363,19 +363,38 @@ class FileSystem:
 
     # -- copy ---------------------------------------------------------------
 
-    async def copy(self, node_id: str, new_parent_id: str) -> Node:
+    async def copy(
+        self, node_id: str, new_parent_id: str, *, force_copy: bool = False
+    ) -> Node:
         """Copy a node under `new_parent_id`, leaving the source untouched.
-        Telegram messages are duplicated so the copy owns its own messages."""
+        Telegram messages are duplicated so the copy owns its own messages.
+
+        By default a same-name ACTIVE file already present in the destination is
+        reused instead of duplicated. `force_copy=True` preserves the old
+        duplicate-with-dedup-name behavior.
+        """
         node = await self.repo.get(node_id)
         if node is None:
             raise NotAReadableFile(f"node {node_id} not found")
         await self.ensure_move_target(new_parent_id)
+        log.info(
+            "[copy] requested %s '%s' (%s) -> parent %s force_copy=%s",
+            "folder" if node.is_folder else "file",
+            node.name,
+            node.id,
+            new_parent_id,
+            force_copy,
+        )
         if node.is_folder:
-            return await self._copy_folder(node, new_parent_id)
+            return await self._copy_folder(node, new_parent_id, force_copy=force_copy)
         # single file: also via the executor (solution B) -> account-leased
-        results = await self._fan_out([(node_id, new_parent_id)], _copy_op)
+        results = await self._fan_out([(node_id, new_parent_id, force_copy)], _copy_op)
         new_id = _first_result(results)
         return await self.repo.get(new_id)
+
+    async def _same_name_file(self, parent_id: str, name: str) -> Node | None:
+        children = await self.repo.children(parent_id, files_only=True)
+        return next((c for c in children if c.name.lower() == name.lower()), None)
 
     async def _dedup_name(self, parent_id: str, name: str, *, is_folder: bool) -> str:
         children = await self.repo.children(parent_id)
@@ -392,9 +411,31 @@ class FileSystem:
             i += 1
         return f"{stem} - {i}{suffix}"
 
-    async def _copy_file(self, src: Node, dst_parent_id: str) -> Node:
+    async def _copy_file(
+        self, src: Node, dst_parent_id: str, *, force_copy: bool = False
+    ) -> Node:
         dest_channel = await self.effective_channel(dst_parent_id)
+        if not force_copy:
+            existing = await self._same_name_file(dst_parent_id, src.name)
+            if existing is not None:
+                log.info(
+                    "[copy] skip existing file '%s' (%s) in parent %s for source %s",
+                    existing.name,
+                    existing.id,
+                    dst_parent_id,
+                    src.id,
+                )
+                return existing
+
         name = await self._dedup_name(dst_parent_id, src.name, is_folder=False)
+        log.info(
+            "[copy] copying file '%s' (%s) -> parent %s as '%s' force_copy=%s",
+            src.name,
+            src.id,
+            dst_parent_id,
+            name,
+            force_copy,
+        )
 
         content = await self.repo.content_of(src.id)
         if content is not None:
@@ -448,9 +489,21 @@ class FileSystem:
         await self.repo.session.commit()
         return created.id
 
-    async def _copy_folder(self, src: Node, dst_parent_id: str) -> Node:
+    async def _copy_folder(
+        self, src: Node, dst_parent_id: str, *, force_copy: bool = False
+    ) -> Node:
         mapping = {src.id: await self._ensure_folder(dst_parent_id, src.name)}
         descendants = await self.repo.subtree(src.id, state="ACTIVE")  # shallow-first
+        files = [n for n in descendants if not n.is_folder]
+        log.info(
+            "[copy] folder '%s' (%s) -> parent %s: %d descendant(s), %d file(s), force_copy=%s",
+            src.name,
+            src.id,
+            dst_parent_id,
+            len(descendants),
+            len(files),
+            force_copy,
+        )
 
         # pass 1: recreate the folder structure (parents before children)
         for node in descendants:
@@ -458,8 +511,14 @@ class FileSystem:
                 mapping[node.id] = await self._ensure_folder(mapping[node.parent_id], node.name)
 
         # pass 2: copy the files into their mapped folders (fanned out)
-        pairs = [(n.id, mapping[n.parent_id]) for n in descendants if not n.is_folder]
+        pairs = [(n.id, mapping[n.parent_id], force_copy) for n in files]
         _log_failures(await self._fan_out(pairs, _copy_op), "copy")
+        log.info(
+            "[copy] folder '%s' (%s) completed into %s",
+            src.name,
+            src.id,
+            mapping[src.id],
+        )
         return await self.repo.get(mapping[src.id])
 
     # -- write --------------------------------------------------------------
@@ -908,12 +967,15 @@ async def _reroute_op(fs: FileSystem, node_id: str) -> None:
         await fs._reroute_file(file)
 
 
-async def _copy_op(fs: FileSystem, pair: tuple[str, str]) -> str | None:
-    src_id, dst_parent_id = pair
+async def _copy_op(
+    fs: FileSystem, pair: tuple[str, str] | tuple[str, str, bool]
+) -> str | None:
+    src_id, dst_parent_id, *rest = pair
+    force_copy = bool(rest[0]) if rest else False
     src = await fs.get(src_id)
     if src is None or src.is_folder:
         return None
-    new = await fs._copy_file(src, dst_parent_id)
+    new = await fs._copy_file(src, dst_parent_id, force_copy=force_copy)
     return new.id
 
 

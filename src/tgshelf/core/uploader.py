@@ -117,7 +117,9 @@ class Uploader:
         self, member, source_factory, filename, mime, channel_id, min_size, on_part,
         *, is_premium, resume_parts: tuple[PartRecord, ...],
     ) -> UploadResult:
-        boundary = self._premium_max if is_premium else self._free_max
+        boundary = int(getattr(member, "max_upload_parts", 0) or 0)
+        if boundary <= 0:
+            boundary = self._premium_max if is_premium else self._free_max
         engine = UploadEngine(
             member.client,
             part_size=self._part_size,

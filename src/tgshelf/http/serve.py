@@ -46,6 +46,8 @@ def build_pools(
     bots: list[PoolMember] = []
     for account, client in clients:
         member = PoolMember(client=client, name=account.name, capacity=capacity)
+        member.is_premium = bool(getattr(client, "is_premium", False))
+        member.max_upload_parts = int(getattr(client, "max_upload_parts", 0) or 0)
         (bots if account.is_bot else users).append(member)
     if not users:
         raise ServeError("at least one user account is required (upload/management)")
@@ -129,6 +131,7 @@ async def start_clients(config: Config, write_limiter) -> list[tuple[Any, Any]]:
     from telethon import TelegramClient
     from telethon.sessions import StringSession
 
+    from tgshelf.telegram import auth
     from tgshelf.telegram.client import TgClient
     from tgshelf.telegram.session_store import build_session_store
 
@@ -165,6 +168,22 @@ async def start_clients(config: Config, write_limiter) -> list[tuple[Any, Any]]:
                 log.warning("session for '%s' is not authorized; re-login", account.name)
                 await tele.disconnect()
                 continue
+            caps = None
+            if not account.is_bot:
+                caps = await auth.fetch_caps(tele)
+                await store.save(
+                    account.name,
+                    tele.session.save(),
+                    kind="user",
+                    api_id=account.api_id,
+                    api_hash=account.api_hash,
+                    dc_id=caps.dc_id,
+                    is_premium=caps.is_premium,
+                )
+                log.info(
+                    "[premium] account '%s' checked at startup: premium=%s, max parts=%d",
+                    account.name, caps.is_premium, caps.max_upload_parts,
+                )
             # Bots are leased only by the streamer (which fails over on cooldown).
             # Telegram's "natural" sub-second FloodWaits are absorbed inline (DEBUG,
             # no warning, no bot swap) — the read-ahead buffer covers them; only a
@@ -176,10 +195,14 @@ async def start_clients(config: Config, write_limiter) -> list[tuple[Any, Any]]:
                 {"flood_threshold": max(0, int(config.download.chunk_timeout) - 1)}
                 if account.is_bot else {}
             )
-            clients.append((account, TgClient(
+            client = TgClient(
                 tele, name=account.name, rate_limiter=write_limiter,
                 tcp_connections=config.concurrent_tcp_connections, **tg_kwargs,
-            )))
+            )
+            if caps is not None:
+                client.is_premium = caps.is_premium
+                client.max_upload_parts = caps.max_upload_parts
+            clients.append((account, client))
     finally:
         if store_session is not None:
             await store_session.close()

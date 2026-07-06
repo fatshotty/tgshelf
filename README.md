@@ -186,6 +186,24 @@ v0.2.0
 
 ## Configuration
 
+`config.yaml` supports environment-variable references in any scalar string.
+Every `${VAR}` occurrence is replaced from `os.environ` before validation, so
+values can be embedded in larger strings:
+
+```yaml
+db: "postgresql+asyncpg://${DB_USER}:${DB_PASS}@localhost/${DB_NAME}"
+
+telegram:
+  users:
+    - name: bot01
+      api_id: "${TELEGRAM_API_ID}"
+      api_hash: "${TELEGRAM_API_HASH}"
+      bot_token: "${TELEGRAM_BOT_TOKEN}"
+```
+
+Missing variables fail startup with a `ConfigError` that names the YAML path.
+The `DB` environment variable still overrides the `db` key entirely.
+
 ```yaml
 # Example configuration: all sensitive values are dummy values.
 # Do not use api_id, api_hash, bot_token, or channel as-is.

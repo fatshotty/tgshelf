@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 import string
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,7 @@ from tgshelf.constants import PART_SIZE
 LOG_LEVELS = ("no", "error", "warn", "info", "debug")
 SESSION_STORAGES = ("db", "file")
 STRM_PLACEHOLDERS = ("file_id", "filename", "channel_id", "parts", "parts_dash", "size", "mime")
+ENV_REF_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 NOTIFY_TEMPLATE = """[tgshelf:{severity}] {title}
 
 Impact: {impact}
@@ -39,6 +41,42 @@ Key: {key}"""
 
 class ConfigError(Exception):
     """Invalid or missing configuration."""
+
+
+def _child_path(path: str, key: Any) -> str:
+    if isinstance(key, int):
+        return f"{path}[{key}]"
+    if path == "<root>":
+        return str(key)
+    return f"{path}.{key}"
+
+
+def resolve_env_refs(value: Any, env: Mapping[str, str], *, path: str = "<root>") -> Any:
+    """Expand ${VAR} references in YAML scalar strings."""
+    if isinstance(value, str):
+        def replace(match: re.Match[str]) -> str:
+            name = match.group(1)
+            if name not in env:
+                raise ConfigError(
+                    f"'{path}' references missing environment variable {name}"
+                )
+            return env[name]
+
+        return ENV_REF_PATTERN.sub(replace, value)
+
+    if isinstance(value, list):
+        return [
+            resolve_env_refs(item, env, path=_child_path(path, i))
+            for i, item in enumerate(value)
+        ]
+
+    if isinstance(value, Mapping):
+        return {
+            key: resolve_env_refs(item, env, path=_child_path(path, key))
+            for key, item in value.items()
+        }
+
+    return value
 
 
 @dataclass(frozen=True)
@@ -194,9 +232,15 @@ def _float(section: Mapping[str, Any], key: str, default: float, *, path: str) -
 
 def _bool(section: Mapping[str, Any], key: str, default: bool, *, path: str) -> bool:
     value = section.get(key, default)
-    if not isinstance(value, bool):
-        raise ConfigError(f"'{path}.{key}' must be a boolean, got {value!r}")
-    return value
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("1", "true", "yes", "on"):
+            return True
+        if normalized in ("0", "false", "no", "off"):
+            return False
+    raise ConfigError(f"'{path}.{key}' must be a boolean, got {value!r}")
 
 
 def _str(section: Mapping[str, Any], key: str, default: str, *, path: str) -> str:
@@ -443,6 +487,9 @@ def load_config(path: str | Path, env: Mapping[str, str] | None = None) -> Confi
     raw = yaml.safe_load(path.read_text()) or {}
     if not isinstance(raw, Mapping):
         raise ConfigError("config root must be a YAML mapping")
+    if env.get("DB"):
+        raw = {**raw, "db": env["DB"]}
+    raw = resolve_env_refs(raw, env)
 
     db = env.get("DB") or raw.get("db")
     if not db:

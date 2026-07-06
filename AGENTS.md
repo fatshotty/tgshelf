@@ -36,6 +36,14 @@ user explicitly approves a change.
 
 - Write code comments, logs, exceptions, diagnostics, commit messages, branch
   notes, and generated developer documentation in English.
+- Root-level and official repository documentation that is tracked in git, such
+  as `README.md`, `docs/openapi.yaml`, and any tracked `docs/specs/` or
+  `docs/plans/` files, must be written in English.
+- `docs/dev/` is local-only, ignored by git, and exists as the operator's
+  Italian handoff notebook for resuming completed work. Write new `docs/dev/`
+  notes in Italian unless the user explicitly asks otherwise.
+- `tests/` is local-only and ignored by git for now. Keep tests useful and
+  runnable, but do not assume new test files will be tracked.
 - User-facing product copy may follow an existing intentional product language;
   otherwise prefer English.
 - If you touch an area that already contains Italian comments or log messages,
@@ -71,7 +79,7 @@ user explicitly approves a change.
 - For new engines or operational flows, add grep-friendly log markers consistent
   with the existing style, such as `[sync]`, `[download]`, `[stream]`, `[watch]`,
   `[notify]`, `[migrate]`, `[flood]`, or a clear new marker.
-- Every implementation task should leave a short technical note in
+- Every implementation task should leave a short Italian technical note in
   `docs/dev/<task>.md` unless the user says the change is too small for one.
 
 ## Verification

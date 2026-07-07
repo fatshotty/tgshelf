@@ -8,7 +8,7 @@ import { useState } from 'react'
 
 import { api, ApiError, downloadUrl } from '../api/client'
 import type { FsNode } from '../api/types'
-import { humanBytes, isTextMime } from '../lib/format'
+import { humanBytes, isTextFile } from '../lib/format'
 import { Modal } from './Modal'
 
 export function FileEditDialog({
@@ -20,7 +20,7 @@ export function FileEditDialog({
   onSave: (data: string, force: boolean) => Promise<void>
   onClose: () => void
 }) {
-  const editable = isTextMime(node.mime)
+  const editable = isTextFile(node.name, node.mime)
 
   if (!editable) {
     return (

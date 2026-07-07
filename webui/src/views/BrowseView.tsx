@@ -11,6 +11,7 @@ import { MergePartsDialog } from '../components/MergePartsDialog'
 import { NodeList } from '../components/NodeList'
 import type { NodeAction } from '../components/NodeMenu'
 import { SplitPartsDialog } from '../components/SplitPartsDialog'
+import { StrmDialog } from '../components/StrmDialog'
 import { useToast } from '../components/Toast'
 import { useTreeActions } from '../lib/mutations'
 import { filterNodesByName } from '../lib/nodeFilter'
@@ -24,6 +25,7 @@ type Dialog =
   | { kind: 'splitParts'; node: FsNode }
   | { kind: 'rename'; node: FsNode }
   | { kind: 'setChannel'; node: FsNode }
+  | { kind: 'strm'; node: FsNode }
   | { kind: 'delete'; node: FsNode }
   | { kind: 'purge'; node: FsNode }
   | { kind: 'move'; node: FsNode }
@@ -72,6 +74,7 @@ export default function BrowseView() {
     else if (a === 'split') setDialog({ kind: 'splitParts', node })
     else if (a === 'rename') setDialog({ kind: 'rename', node })
     else if (a === 'setChannel') setDialog({ kind: 'setChannel', node })
+    else if (a === 'strm') setDialog({ kind: 'strm', node })
     else if (a === 'move') setDialog({ kind: 'move', node })
     else if (a === 'copy') setDialog({ kind: 'copy', node })
     else if (a === 'delete') setDialog({ kind: 'delete', node })
@@ -205,6 +208,14 @@ export default function BrowseView() {
           placeholder="-100…"
           onClose={() => setDialog(null)}
           onSubmit={(v) => actions.setChannel(dialog.node.id, v.trim() === '' ? null : Number(v))}
+        />
+      )}
+      {dialog?.kind === 'strm' && (
+        <StrmDialog
+          node={dialog.node}
+          onClose={() => setDialog(null)}
+          onGenerate={() => actions.generateStrm(dialog.node.id)}
+          onDelete={() => actions.deleteStrm(dialog.node.id)}
         />
       )}
       {dialog?.kind === 'delete' && (

@@ -402,9 +402,51 @@ async def strm_node(request: web.Request) -> web.Response:
             return _bad_request(f"node is not under strm.source ({cfg.source})")
         # clear only makes sense for a folder; for a file it would wipe siblings
         stats = await strm_cmd.generate(
-            fs.repo, node, base, cfg.template, clear=clear and node.is_folder
+            fs.repo,
+            node,
+            base,
+            cfg.template,
+            clear=clear and node.is_folder,
+            concurrent=request.app[RUNTIME].get("operations_concurrent", 1),
         )
         log.info("strm generated for %s -> %s (%s)", node_id, base, stats)
+        return web.json_response(
+            {
+                "destination": str(base),
+                "created": stats.created,
+                "updated": stats.updated,
+                "skipped": stats.skipped,
+                "removed": stats.removed,
+                "inline": stats.inline,
+            }
+        )
+
+
+async def delete_strm_node(request: web.Request) -> web.Response:
+    """Delete .strm/raw-inline outputs for one folder/file from the configured
+    destination tree. Deletion is guarded by expected generated content."""
+    from tgshelf.commands import strm as strm_cmd
+
+    node_id = request.match_info["id"]
+    cfg = request.app[RUNTIME].get("strm")
+    if cfg is None:
+        return _bad_request("strm is not configured")
+    async with open_fs(request) as fs:
+        node = await fs.get(node_id)
+        if node is None:
+            return _not_found(f"node {node_id} not found")
+        node_path = await fs.path_of(node_id)
+        base = strm_cmd.strm_base(cfg.destination, cfg.source, node_path, node.is_folder)
+        if base is None:
+            return _bad_request(f"node is not under strm.source ({cfg.source})")
+        stats = await strm_cmd.delete_outputs(
+            fs.repo,
+            node,
+            base,
+            cfg.template,
+            concurrent=request.app[RUNTIME].get("operations_concurrent", 1),
+        )
+        log.info("strm deleted for %s -> %s (%s)", node_id, base, stats)
         return web.json_response(
             {
                 "destination": str(base),
@@ -502,3 +544,4 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/api/v1/nodes/{id}/parts/split", split_parts_node)
     app.router.add_put("/api/v1/nodes/{id}/parts", reorder_parts_node)
     app.router.add_post("/api/v1/nodes/{id}/strm", strm_node)
+    app.router.add_delete("/api/v1/nodes/{id}/strm", delete_strm_node)

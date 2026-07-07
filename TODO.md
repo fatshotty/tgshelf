@@ -57,7 +57,6 @@
   behavior during the historical cleanup, but regular service operations must
   keep flood/cooldown events visible in logs.
 
-## Web UI Text Editing
+## Web UI Chromium Ubuntu 16 Icons
 
-- Fix the Web UI text-file editing flow. `.nfo` files are text files and must be
-  editable as text.
+- Fix Web UI icon rendering on Chromium under Ubuntu 16.

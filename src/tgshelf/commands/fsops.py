@@ -190,7 +190,18 @@ async def _do_cp(fs: FileSystem, src: str, dst: str, *, force_copy: bool = False
             return _err(f"source is not a folder: {source_path}")
         children = await fs.list_children(source.id)
         log.debug("[copy] cli copying %d child item(s) from %s into %s", len(children), src, dst)
-        for child in children:
+        files = [child for child in children if not child.is_folder]
+        folders = [child for child in children if child.is_folder]
+        if files and hasattr(fs, "copy_files"):
+            await fs.copy_files(
+                [child.id for child in files],
+                dest.id,
+                force_copy=force_copy,
+            )
+        else:
+            for child in files:
+                await fs.copy(child.id, dest.id, force_copy=force_copy)
+        for child in folders:
             await fs.copy(child.id, dest.id, force_copy=force_copy)
     else:
         await fs.copy(source.id, dest.id, force_copy=force_copy)

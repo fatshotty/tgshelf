@@ -5,7 +5,7 @@
 import { useQueryClient } from '@tanstack/react-query'
 
 import { api, isAccepted } from '../api/client'
-import type { AcceptedOp, FilePartRef, FsNode } from '../api/types'
+import type { AcceptedOp, FilePartRef, FsNode, StrmResult } from '../api/types'
 import { useToast } from '../components/Toast'
 
 export function useTreeActions(folderId: string | undefined, path: string) {
@@ -25,6 +25,9 @@ export function useTreeActions(folderId: string | undefined, path: string) {
       invalidate()
     }
   }
+
+  const strmSummary = (r: StrmResult) =>
+    `${r.created} created, ${r.updated} updated, ${r.skipped} unchanged, ${r.removed} removed`
 
   return {
     createFolder: (name: string) => api.createFolder(folderId!, name).then(invalidate),
@@ -51,6 +54,16 @@ export function useTreeActions(folderId: string | undefined, path: string) {
       api.reorderParts(id, order).then(() => {
         invalidate()
         qc.invalidateQueries({ queryKey: ['parts', id] })
+      }),
+    generateStrm: (id: string) =>
+      api.generateStrm(id).then((r) => {
+        toast(`STRM generated: ${strmSummary(r)}`, 'info')
+        return r
+      }),
+    deleteStrm: (id: string) =>
+      api.deleteStrm(id).then((r) => {
+        toast(`STRM deleted: ${strmSummary(r)}`, 'info')
+        return r
       }),
   }
 }

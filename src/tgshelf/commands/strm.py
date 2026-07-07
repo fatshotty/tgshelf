@@ -13,6 +13,7 @@ Telegram. Placeholders (closed set, validated at config-load):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 import sys
@@ -132,13 +133,118 @@ async def _target(repo: NodeRepo, node, template: str) -> tuple[str, bytes]:
     return strm_name(node), text.encode("utf-8")
 
 
+async def _targets(repo: NodeRepo, nodes, template: str) -> dict[str, tuple[str, bytes]]:
+    contents_of = getattr(repo, "contents_of", None)
+    parts_by_file = getattr(repo, "parts_by_file", None)
+    if not callable(contents_of) or not callable(parts_by_file):
+        return {node.id: await _target(repo, node, template) for node in nodes}
+
+    ids = [node.id for node in nodes]
+    contents = await contents_of(ids)
+    remote_ids = []
+    for node in nodes:
+        content = contents.get(node.id)
+        if content is None or len(content) == 0:
+            remote_ids.append(node.id)
+    parts = await parts_by_file(remote_ids)
+    targets: dict[str, tuple[str, bytes]] = {}
+    for node in nodes:
+        content = contents.get(node.id)
+        if content is not None and len(content) > 0:
+            targets[node.id] = (node.name, content)
+            continue
+        text = resolve_template(
+            template,
+            node,
+            [part.message_id for part in parts.get(node.id, [])],
+        )
+        targets[node.id] = (strm_name(node), text.encode("utf-8"))
+    return targets
+
+
 async def _release_read_transaction(repo: NodeRepo) -> None:
     session = getattr(repo, "session", None)
     if session is not None:
         await session.rollback()
 
 
-async def generate(repo: NodeRepo, source, destination, template: str, *, clear: bool = False) -> Stats:
+def _merge_stats(target: Stats, delta: Stats) -> None:
+    target.created += delta.created
+    target.updated += delta.updated
+    target.skipped += delta.skipped
+    target.removed += delta.removed
+    target.inline += delta.inline
+
+
+def _write_active(output: _ActiveOutput) -> Stats:
+    stats = Stats()
+    _write(output.path, output.data, stats)
+    if output.inline:
+        stats.inline += 1
+    return stats
+
+
+def _prune_deleted(output: _DeletedOutput) -> Stats:
+    stats = Stats()
+    path = output.path
+    if not path.exists():
+        log.debug("[strm] obsolete output already absent %s", path)
+    elif path.is_dir():
+        log.warning("[strm] keeping obsolete candidate %s: path is a directory", path)
+    elif path.read_bytes() == output.data:
+        path.unlink()
+        stats.removed += 1
+        log.debug("[strm] removed obsolete %s", path)
+    else:
+        log.warning("[strm] keeping obsolete candidate %s: content changed", path)
+    return stats
+
+
+async def _run_local_jobs(
+    outputs,
+    *,
+    concurrent: int,
+    worker,
+    stats: Stats,
+    progress_label: str,
+    total: int,
+) -> None:
+    sem = asyncio.Semaphore(max(1, concurrent))
+
+    async def run_one(output):
+        async with sem:
+            return await asyncio.to_thread(worker, output)
+
+    tasks = [asyncio.create_task(run_one(output)) for output in outputs]
+    completed = 0
+    try:
+        for task in asyncio.as_completed(tasks):
+            _merge_stats(stats, await task)
+            completed += 1
+            if completed % PROGRESS_EVERY_FILES == 0:
+                log.info(
+                    "[strm] progress %s=%d/%d (%s)",
+                    progress_label,
+                    completed,
+                    total,
+                    stats,
+                )
+    except Exception:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
+async def generate(
+    repo: NodeRepo,
+    source,
+    destination,
+    template: str,
+    *,
+    clear: bool = False,
+    concurrent: int = 1,
+) -> Stats:
     """Walk source's subtree and (re)generate outputs under destination.
 
     ACTIVE files are created/updated in place; DELETED files have their output
@@ -177,9 +283,11 @@ async def generate(repo: NodeRepo, source, destination, template: str, *, clear:
         len(files), len(active_files), len(deleted_files),
     )
 
+    target_by_id = await _targets(repo, files, template)
+
     active_outputs: list[_ActiveOutput] = []
     for node in active_files:
-        name, data = await _target(repo, node, template)
+        name, data = target_by_id[node.id]
         active_outputs.append(
             _ActiveOutput(
                 path=destination / rel_dir(node) / name,
@@ -190,45 +298,98 @@ async def generate(repo: NodeRepo, source, destination, template: str, *, clear:
 
     deleted_outputs: list[_DeletedOutput] = []
     for node in deleted_files:
-        name, data = await _target(repo, node, template)
+        name, data = target_by_id[node.id]
         deleted_outputs.append(_DeletedOutput(destination / rel_dir(node) / name, data))
 
     await _release_read_transaction(repo)
 
     # write ACTIVE first, then prune DELETED (so a name reused by an ACTIVE node
     # is already present and the content guard keeps it)
-    for idx, output in enumerate(active_outputs, start=1):
-        _write(output.path, output.data, stats)
-        if output.inline:  # inline written as a real file
-            stats.inline += 1
-        if idx % PROGRESS_EVERY_FILES == 0:
-            log.info("[strm] progress active=%d/%d (%s)", idx, len(active_files), stats)
+    await _run_local_jobs(
+        active_outputs,
+        concurrent=concurrent,
+        worker=_write_active,
+        stats=stats,
+        progress_label="active",
+        total=len(active_files),
+    )
 
     if deleted_files:
         log.info("[strm] pruning %d deleted outputs", len(deleted_files))
-    for idx, output in enumerate(deleted_outputs, start=1):
-        path = output.path
-        if not path.exists():
-            log.debug("[strm] obsolete output already absent %s", path)
-        elif path.is_dir():
-            log.warning("[strm] keeping obsolete candidate %s: path is a directory", path)
-        elif path.read_bytes() == output.data:  # guard: still ours
-            path.unlink()
-            stats.removed += 1
-            log.debug("[strm] removed obsolete %s", path)
-        else:
-            log.warning("[strm] keeping obsolete candidate %s: content changed", path)
-        if idx % PROGRESS_EVERY_FILES == 0:
-            log.info("[strm] progress deleted=%d/%d (%s)", idx, len(deleted_files), stats)
+    await _run_local_jobs(
+        deleted_outputs,
+        concurrent=concurrent,
+        worker=_prune_deleted,
+        stats=stats,
+        progress_label="deleted",
+        total=len(deleted_files),
+    )
 
     log.info("[strm] done %s", stats)
     return stats
 
 
+async def delete_outputs(
+    repo: NodeRepo,
+    source,
+    destination,
+    template: str,
+    *,
+    concurrent: int = 1,
+) -> Stats:
+    """Remove the local outputs currently generated by `source`.
+
+    Deletion is guarded by expected content, exactly like obsolete-output pruning
+    in `generate`: if a file has been edited on disk, it is kept.
+    """
+    destination = Path(destination)
+    log.info("[strm] deleting outputs source=%s destination=%s", source.name, destination)
+    if source.is_folder:
+        nodes = await repo.subtree(source.id, state="ACTIVE")
+    else:
+        nodes = [source]
+    by_id = {n.id: n for n in nodes}
+
+    def rel_dir(node) -> Path:
+        parts: list[str] = []
+        cur = by_id.get(node.parent_id)
+        while cur is not None and cur.id != source.id:
+            parts.append(cur.name)
+            cur = by_id.get(cur.parent_id)
+        return Path(*reversed(parts)) if parts else Path()
+
+    files = [n for n in nodes if not n.is_folder]
+    target_by_id = await _targets(repo, files, template)
+    outputs = [
+        _DeletedOutput(destination / rel_dir(node) / target_by_id[node.id][0], target_by_id[node.id][1])
+        for node in files
+    ]
+    await _release_read_transaction(repo)
+
+    stats = Stats()
+    await _run_local_jobs(
+        outputs,
+        concurrent=concurrent,
+        worker=_prune_deleted,
+        stats=stats,
+        progress_label="deleted",
+        total=len(outputs),
+    )
+    log.info("[strm] deleted outputs %s", stats)
+    return stats
+
+
 async def run(config: Config, args) -> int:
+    from tgshelf.commands.common import resolve_concurrent
+
     source_path = getattr(args, "source", None) or config.strm.source
     destination = getattr(args, "destination", None) or config.strm.destination
     clear = bool(getattr(args, "clear", False) or config.strm.clear_folder)
+    try:
+        concurrent = resolve_concurrent(config, cli_value=getattr(args, "concurrent", None))
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
     engine = create_engine(config.db)
     try:
@@ -240,7 +401,14 @@ async def run(config: Config, args) -> int:
                 print(f"error: source not found: {source_path}", file=sys.stderr)
                 return 1
             try:
-                stats = await generate(repo, source, destination, config.strm.template, clear=clear)
+                stats = await generate(
+                    repo,
+                    source,
+                    destination,
+                    config.strm.template,
+                    clear=clear,
+                    concurrent=concurrent,
+                )
             except Exception:
                 log.exception("[strm] failed source=%s destination=%s", source_path, destination)
                 print(f"error: strm generation failed for {source_path} -> {destination}", file=sys.stderr)

@@ -417,9 +417,40 @@ class FileSystem:
         new_id = _first_result(results)
         return await self.repo.get(new_id)
 
+    async def copy_files(
+        self, node_ids: Sequence[str], new_parent_id: str, *, force_copy: bool = False
+    ) -> list[Node]:
+        """Copy several file nodes into one destination folder as one governed
+        batch. Used by path-level wildcard copy so direct child files can share
+        the same existing-name lookup and executor run."""
+        await self.ensure_move_target(new_parent_id)
+        files: list[Node] = []
+        for node_id in node_ids:
+            node = await self.repo.get(node_id)
+            if node is None:
+                raise NotAReadableFile(f"node {node_id} not found")
+            if node.is_folder:
+                raise ValueError(f"node {node_id} is a folder")
+            files.append(node)
+        results = await self._copy_file_batch(
+            [(file, new_parent_id) for file in files],
+            force_copy=force_copy,
+        )
+        _raise_first_error(results)
+        copied: list[Node] = []
+        for result in results:
+            if result is None:
+                continue
+            node = await self.repo.get(result)
+            if node is not None:
+                copied.append(node)
+        return copied
+
     async def _same_name_file(self, parent_id: str, name: str) -> Node | None:
-        children = await self.repo.children(parent_id, files_only=True)
-        return next((c for c in children if c.name.lower() == name.lower()), None)
+        child = await self.repo.get_child_by_name(parent_id, name, state="ACTIVE")
+        if child is None or child.is_folder:
+            return None
+        return child
 
     async def _dedup_name(self, parent_id: str, name: str, *, is_folder: bool) -> str:
         children = await self.repo.children(parent_id)
@@ -439,7 +470,6 @@ class FileSystem:
     async def _copy_file(
         self, src: Node, dst_parent_id: str, *, force_copy: bool = False
     ) -> Node:
-        dest_channel = await self.effective_channel(dst_parent_id)
         if not force_copy:
             existing = await self._same_name_file(dst_parent_id, src.name)
             if existing is not None:
@@ -453,6 +483,7 @@ class FileSystem:
                 return existing
 
         name = await self._dedup_name(dst_parent_id, src.name, is_folder=False)
+        dest_channel = await self.effective_channel(dst_parent_id)
         log.debug(
             "[copy] copying file '%s' (%s) -> parent %s as '%s' force_copy=%s",
             src.name,
@@ -522,6 +553,36 @@ class FileSystem:
         )
         return copied
 
+    async def _copy_file_batch(
+        self, targets: Sequence[tuple[Node, str]], *, force_copy: bool = False
+    ) -> list:
+        pairs: list[tuple[str, str, bool]] = []
+        skipped: list[str] = []
+        if force_copy:
+            pairs = [(src.id, dst_parent_id, True) for src, dst_parent_id in targets]
+        else:
+            names_by_parent: dict[str, dict[str, Node]] = {}
+            for dst_parent_id in {dst_parent_id for _src, dst_parent_id in targets}:
+                children = await self.repo.children(dst_parent_id, files_only=True)
+                names_by_parent[dst_parent_id] = {
+                    child.name.lower(): child for child in children
+                }
+            for src, dst_parent_id in targets:
+                existing = names_by_parent[dst_parent_id].get(src.name.lower())
+                if existing is not None:
+                    log.debug(
+                        "[copy] skip existing file '%s' (%s) in parent %s for source %s",
+                        existing.name,
+                        existing.id,
+                        dst_parent_id,
+                        src.id,
+                    )
+                    skipped.append(existing.id)
+                    continue
+                names_by_parent[dst_parent_id][src.name.lower()] = src
+                pairs.append((src.id, dst_parent_id, False))
+        return [*skipped, *(await self._fan_out(pairs, _copy_op))]
+
     async def _ensure_folder(self, parent_id: str, name: str) -> str:
         """Reuse a same-name folder under parent (merge) or create it; return id."""
         existing = await self.repo.children(parent_id, folders_only=True)
@@ -556,8 +617,11 @@ class FileSystem:
                 mapping[node.id] = await self._ensure_folder(mapping[node.parent_id], node.name)
 
         # pass 2: copy the files into their mapped folders (fanned out)
-        pairs = [(n.id, mapping[n.parent_id], force_copy) for n in files]
-        _log_failures(await self._fan_out(pairs, _copy_op), "copy")
+        pairs = [(n, mapping[n.parent_id]) for n in files]
+        _log_failures(
+            await self._copy_file_batch(pairs, force_copy=force_copy),
+            "copy",
+        )
         log.debug(
             "[copy] folder '%s' (%s) completed into %s",
             src.name,

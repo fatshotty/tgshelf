@@ -2,7 +2,7 @@
 // auth (whole-origin) automatically — see auth/credentials.ts. Kept free of React
 // so it (and types.ts) can be reused by a future react-native app.
 import { authHeaders } from '../auth/credentials'
-import type { AcceptedOp, FilePart, FilePartRef, FsNode, MetricsSnapshot, NodeSize, SearchResult, SplitPartsResult } from './types'
+import type { AcceptedOp, FilePart, FilePartRef, FsNode, MetricsSnapshot, NodeSize, SearchResult, SplitPartsResult, StrmResult } from './types'
 
 export class ApiError extends Error {
   status: number
@@ -73,6 +73,10 @@ export const api = {
     request<SplitPartsResult>('POST', `/api/v1/nodes/${id(nodeId)}/parts/split`, { body: { part_indices: partIndices } }),
   reorderParts: (nodeId: string, order: number[]) =>
     request<FsNode>('PUT', `/api/v1/nodes/${id(nodeId)}/parts`, { body: { order } }),
+  generateStrm: (nodeId: string) =>
+    request<StrmResult>('POST', `/api/v1/nodes/${id(nodeId)}/strm`),
+  deleteStrm: (nodeId: string) =>
+    request<StrmResult>('DELETE', `/api/v1/nodes/${id(nodeId)}/strm`),
 
   // -- inline file content (edit)
   fileContent: async (nodeId: string): Promise<string> => {

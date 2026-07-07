@@ -278,6 +278,7 @@ async def run_server(config: Config) -> None:
         session_factory=session_factory,
         master_channel=config.telegram.upload.channel,
         min_size=config.telegram.upload.min_size,
+        operations_concurrent=config.operations.concurrent,
         executor=runtime["executor"],
         uploader=runtime["uploader"],
         streamer=runtime["streamer"],

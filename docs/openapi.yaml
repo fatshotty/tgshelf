@@ -496,6 +496,30 @@ paths:
                   inline: { type: integer }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [tree]
+      summary: Delete generated .strm output for this folder/file.
+      description: |
+        Removes the .strm (or raw inline) files for the node from the global
+        `strm.destination` tree at the node's current relative position. Deletion
+        is content-guarded: files whose content differs from the expected generated
+        output are kept. 400 if the node is not under `strm.source`.
+      responses:
+        "200":
+          description: Deletion stats.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  destination: { type: string }
+                  created: { type: integer }
+                  updated: { type: integer }
+                  skipped: { type: integer }
+                  removed: { type: integer }
+                  inline: { type: integer }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/resolve:
     get:

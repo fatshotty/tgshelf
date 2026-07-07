@@ -21,6 +21,7 @@ import logging
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 from tgshelf.constants import PART_SIZE
+from tgshelf.core.captions import DEFAULT_CAPTION_TEMPLATE
 from tgshelf.core.upload import PartRecord, UploadEngine, UploadResult, _default_file_id
 from tgshelf.telegram.errors import UploadLimitExceeded
 from tgshelf.telegram.pool import ClientPool, PoolMember
@@ -74,6 +75,9 @@ class Uploader:
         on_reset: Callable[[], Any] | None = None,
         on_account: Callable[[str], Any] | None = None,
         resume_parts: tuple[PartRecord, ...] = (),
+        caption_template: str = DEFAULT_CAPTION_TEMPLATE,
+        node_id: str = "",
+        parent_path: str = "",
     ) -> UploadResult:
         member = self._pool.lease_one()
         if member is None:
@@ -93,7 +97,8 @@ class Uploader:
                 return await self._attempt(
                     member, source_factory, filename, mime, channel_id,
                     min_size, on_part, is_premium=member.is_premium,
-                    resume_parts=resume_parts,
+                    resume_parts=resume_parts, caption_template=caption_template,
+                    node_id=node_id, parent_path=parent_path,
                 )
             except UploadLimitExceeded as exc:
                 # premium expired at runtime: downgrade, warn, reset, retry free
@@ -104,11 +109,14 @@ class Uploader:
                 member.is_premium = False
                 if self._notifier is not None:
                     self._notifier(exc)
+                member.max_upload_parts = self._free_max
                 if on_reset is not None:
                     await _maybe_await(on_reset())
                 return await self._attempt(
                     member, source_factory, filename, mime, channel_id,
                     min_size, on_part, is_premium=False, resume_parts=resume_parts,
+                    caption_template=caption_template, node_id=node_id,
+                    parent_path=parent_path,
                 )
         finally:
             self._pool.release(member)
@@ -116,8 +124,9 @@ class Uploader:
     async def _attempt(
         self, member, source_factory, filename, mime, channel_id, min_size, on_part,
         *, is_premium, resume_parts: tuple[PartRecord, ...],
+        caption_template: str, node_id: str, parent_path: str,
     ) -> UploadResult:
-        boundary = self._premium_max if is_premium else self._free_max
+        boundary = self._max_upload_parts_for(member, is_premium=is_premium)
         engine = UploadEngine(
             member.client,
             part_size=self._part_size,
@@ -144,6 +153,9 @@ class Uploader:
                 on_part=track,
                 skip_bytes=skip_bytes,
                 start_portion_idx=len(resume_parts),
+                caption_template=caption_template,
+                node_id=node_id,
+                parent_path=parent_path,
             )
         except BaseException:
             # any failure: delete the portions finalized in THIS attempt so they
@@ -165,3 +177,9 @@ class Uploader:
             size=sum(p.size for p in all_parts),
             parts=all_parts,
         )
+
+    def _max_upload_parts_for(self, member: Any, *, is_premium: bool) -> int:
+        live = getattr(member, "max_upload_parts", None)
+        if isinstance(live, int) and live > 0 and (is_premium or live <= self._free_max):
+            return live
+        return self._premium_max if is_premium else self._free_max

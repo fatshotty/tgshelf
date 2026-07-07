@@ -99,6 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
             cmd.add_argument("--source", help="drive folder to mirror (default: config strm.source)")
             cmd.add_argument("--destination", help="local output folder (default: config strm.destination)")
             cmd.add_argument("--clear", action="store_true", help="wipe destination first (full regen)")
+            cmd.add_argument("--concurrent", type=int, default=1, help="parallel local writes (default: 1)")
         elif name == "sync":
             cmd.add_argument("local_dir", help="local directory to upload")
             cmd.add_argument("--dest", help="drive destination folder (default: /)")

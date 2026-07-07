@@ -21,6 +21,14 @@
   serious inconsistencies with the latest logical filesystem state.
 - Define a stable caption format that contains both immutable identity metadata
   and the current logical filename, then update captions on rename operations.
+- Include the current logical full path in Telegram captions, in addition to
+  the filename, so disaster recovery can rebuild both file names and tree
+  placement from channel history.
+- Consider a dedicated configuration section for Telegram caption rendering.
+- Support configurable caption placeholders, for example `{file_id}`,
+  `{filename}`, `{path}`, `{channel_id}`, `{part_idx}`, `{parts}`, `{size}`,
+  and `{mime}`, so operators can decide which recovery metadata is written into
+  Telegram captions.
 - Add a migration/reconciliation command to detect stale captions and repair
   them from the database.
 

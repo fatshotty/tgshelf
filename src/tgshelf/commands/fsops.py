@@ -315,6 +315,7 @@ async def _db_fs(config: Config):
                 NodeRepo(session),
                 master_channel=config.telegram.upload.channel,
                 min_size=config.telegram.upload.min_size,
+                caption_template=config.caption.template,
             )
     finally:
         await engine.dispose()
@@ -345,6 +346,7 @@ async def _telegram_fs(config: Config):
                 streamer=runtime["streamer"],
                 executor=runtime["executor"],
                 gateway=runtime["write_gateway"],
+                caption_template=config.caption.template,
             )
     finally:
         await engine.dispose()

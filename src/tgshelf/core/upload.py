@@ -24,6 +24,11 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 from tgshelf.constants import PART_SIZE
+from tgshelf.core.captions import (
+    DEFAULT_CAPTION_TEMPLATE,
+    CaptionRenderContext,
+    render_caption,
+)
 
 
 @dataclass(frozen=True)
@@ -74,6 +79,9 @@ class UploadEngine:
         on_part: Callable[[PartRecord], Awaitable[None] | None] | None = None,
         skip_bytes: int = 0,
         start_portion_idx: int = 0,
+        caption_template: str = DEFAULT_CAPTION_TEMPLATE,
+        node_id: str = "",
+        parent_path: str = "",
     ) -> UploadResult:
         stream = aiter(source)
 
@@ -83,6 +91,8 @@ class UploadEngine:
             return await self._upload_portions(
                 leftover, stream, filename, mime, channel_id, max_upload_parts,
                 on_part, start_portion_idx=start_portion_idx,
+                caption_template=caption_template, node_id=node_id,
+                parent_path=parent_path,
             )
 
         # buffer until we exceed min_size or hit EOF
@@ -98,7 +108,9 @@ class UploadEngine:
             return UploadResult(size=len(buf), inline_content=bytes(buf))
 
         return await self._upload_portions(
-            buf, stream, filename, mime, channel_id, max_upload_parts, on_part
+            buf, stream, filename, mime, channel_id, max_upload_parts, on_part,
+            caption_template=caption_template, node_id=node_id,
+            parent_path=parent_path,
         )
 
     async def _skip(self, stream, n: int) -> bytearray:
@@ -117,7 +129,8 @@ class UploadEngine:
 
     async def _upload_portions(
         self, buf, stream, filename, mime, channel_id, max_upload_parts, on_part,
-        *, start_portion_idx: int = 0,
+        *, start_portion_idx: int = 0, caption_template: str = DEFAULT_CAPTION_TEMPLATE,
+        node_id: str = "", parent_path: str = "",
     ) -> UploadResult:
         records: list[PartRecord] = []
         sem = asyncio.Semaphore(self._max_in_flight)
@@ -154,6 +167,8 @@ class UploadEngine:
                 record = await self._finalize(
                     file_id, portion_idx, part_idx, portion_size,
                     filename, mime, channel_id, is_last_portion=is_last_piece,
+                    caption_template=caption_template, node_id=node_id,
+                    parent_path=parent_path,
                 )
                 records.append(record)
                 if on_part is not None:
@@ -194,12 +209,26 @@ class UploadEngine:
             sem.release()
 
     async def _finalize(
-        self, file_id, portion_idx, total_parts, size, filename, mime, channel_id, *, is_last_portion
+        self, file_id, portion_idx, total_parts, size, filename, mime, channel_id,
+        *, is_last_portion, caption_template: str, node_id: str, parent_path: str
     ) -> PartRecord:
         multi = portion_idx > 0 or not is_last_portion
         name = f"{filename}.{portion_idx + 1:03d}" if multi else filename
+        caption = render_caption(
+            caption_template,
+            CaptionRenderContext(
+                node_id=node_id,
+                parent_path=parent_path,
+                logical_name=filename,
+                idx=portion_idx,
+                total_parts=portion_idx + 1 if multi else 1,
+                part_size=size,
+                mime=mime,
+                channel_id=channel_id,
+            ),
+        )
         message_id, doc_id = await self._gw.send_document(
-            channel_id, file_id, total_parts, name, size, mime, f"fileName: {name}"
+            channel_id, file_id, total_parts, name, size, mime, caption
         )
         return PartRecord(
             idx=portion_idx,

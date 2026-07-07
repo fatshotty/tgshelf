@@ -3,6 +3,7 @@ import { Virtuoso } from 'react-virtuoso'
 import { downloadUrl } from '../api/client'
 import type { FsNode } from '../api/types'
 import { humanBytes } from '../lib/format'
+import { DownloadIcon, FileIcon, FolderIcon } from './Icons'
 import { NodeMenu, type NodeAction } from './NodeMenu'
 
 // ACTIVE before DELETED, then folders before files, then by name (numeric-aware).
@@ -12,8 +13,8 @@ function ordering(a: FsNode, b: FsNode): number {
   return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
 }
 
-// Virtualized list (react-virtuoso) → stays fast on folders with many thousands of
-// entries. Each row carries a ⋯ actions menu; DELETED rows are dimmed.
+// Virtualized list (react-virtuoso) stays fast on folders with many thousands of
+// entries. Each row carries an actions menu; DELETED rows are dimmed.
 export function NodeList({
   nodes,
   selectedIds,
@@ -55,12 +56,12 @@ export function NodeList({
                 onClick={() => !deleted && onOpenFolder(node.name)}
                 disabled={deleted}
               >
-                <span className="ic">📁</span>
+                <FolderIcon className="ic" />
                 <span className="name">{node.name}</span>
               </button>
             ) : (
               <div className="rowmain">
-                <span className="ic">📄</span>
+                <FileIcon className="ic" />
                 <span className="name">{node.name}</span>
                 <span className="meta">
                   {humanBytes(node.size)}
@@ -69,8 +70,14 @@ export function NodeList({
               </div>
             )}
             {!deleted && !node.is_folder ? (
-              <a className="dl" href={downloadUrl(node.id, node.name)} target="_blank" rel="noreferrer">
-                ↓
+              <a
+                className="dl"
+                href={downloadUrl(node.id, node.name)}
+                target="_blank"
+                rel="noreferrer"
+                aria-label={`Download ${node.name}`}
+              >
+                <DownloadIcon />
               </a>
             ) : null}
             <NodeMenu node={node} onAction={(a) => onAction(node, a)} />

@@ -1,4 +1,4 @@
-// Per-row ⋯ actions menu. Lists only actions applicable to the node: ACTIVE nodes
+// Per-row actions menu. Lists only actions applicable to the node: ACTIVE nodes
 // get rename/move/copy/delete (+ set-channel for folders); DELETED nodes get
 // restore/purge. Closes on outside click. Clicks stopPropagation so they don't also
 // trigger the row's open-folder handler.
@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react'
 
 import type { FsNode } from '../api/types'
 import { isTextMime } from '../lib/format'
+import { MoreIcon } from './Icons'
 
 export type NodeAction =
   | 'size'
@@ -66,8 +67,9 @@ export function NodeMenu({ node, onAction }: { node: FsNode; onAction: (a: NodeA
           e.stopPropagation()
           setOpen((o) => !o)
         }}
+        aria-label="Actions"
       >
-        ⋯
+        <MoreIcon />
       </button>
       {open ? (
         <div className="menu">

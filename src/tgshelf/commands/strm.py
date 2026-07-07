@@ -169,6 +169,47 @@ async def generate(repo: NodeRepo, source, destination, template: str, *, clear:
     return stats
 
 
+async def delete_outputs(repo: NodeRepo, source, destination, template: str) -> Stats:
+    """Delete the generated output files for one source file or folder.
+
+    The content guard mirrors obsolete pruning in `generate`: a file is removed
+    only when the bytes on disk still match the output this node would generate.
+    Manual edits or files now owned by something else are left untouched.
+    """
+    destination = Path(destination)
+    if source.is_folder:
+        nodes = await repo.subtree(source.id, state=None)
+    else:
+        nodes = [source]
+    by_id = {source.id: source, **{n.id: n for n in nodes}}
+    stats = Stats()
+
+    def rel_dir(node) -> Path:
+        parts: list[str] = []
+        cur = by_id.get(node.parent_id)
+        while cur is not None and cur.id != source.id:
+            parts.append(cur.name)
+            cur = by_id.get(cur.parent_id)
+        return Path(*reversed(parts)) if parts else Path()
+
+    for node in [n for n in nodes if not n.is_folder]:
+        name, data = await _target(repo, node, template)
+        path = destination / rel_dir(node) / name
+        if not path.exists():
+            stats.skipped += 1
+            continue
+        if path.is_file() and path.read_bytes() == data:
+            path.unlink()
+            stats.removed += 1
+            log.debug("[strm] removed output %s", path)
+        else:
+            stats.skipped += 1
+            log.warning("[strm] keeping obsolete candidate %s (content differs)", path)
+
+    log.info("[strm] deleted %s", stats)
+    return stats
+
+
 async def run(config: Config, args) -> int:
     source_path = getattr(args, "source", None) or config.strm.source
     destination = getattr(args, "destination", None) or config.strm.destination

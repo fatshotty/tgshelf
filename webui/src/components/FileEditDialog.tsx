@@ -81,7 +81,7 @@ function TextEditor({
   }
 
   return (
-    <Modal title={`Edit — ${node.name}`} onClose={onClose}>
+    <Modal title={`Edit — ${node.name}`} onClose={onClose} className="file-edit-modal">
       <div className="dialog">
         {contentQ.isLoading && <p>Loading…</p>}
         {contentQ.error && <div className="error">{String(contentQ.error)}</div>}

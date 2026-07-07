@@ -4,7 +4,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 
 import { api, ApiError } from '../api/client'
 import type { FsNode } from '../api/types'
-import { ConfirmDialog, PromptDialog, SizeDialog } from '../components/dialogs'
+import { ConfirmDialog, PromptDialog, SizeDialog, StrmDialog } from '../components/dialogs'
 import { FileEditDialog } from '../components/FileEditDialog'
 import { FolderPicker } from '../components/FolderPicker'
 import { MergePartsDialog } from '../components/MergePartsDialog'
@@ -210,17 +210,14 @@ export default function BrowseView() {
         />
       )}
       {dialog?.kind === 'strm' && (
-        <ConfirmDialog
-          title="STRM"
-          message={`Generate STRM output for "${dialog.node.name}"?`}
-          confirmLabel="Generate"
+        <StrmDialog
+          name={dialog.node.name}
           onClose={() => setDialog(null)}
-          onConfirm={async () => {
-            try {
-              await actions.generateStrm(dialog.node.id)
-            } catch (e) {
-              toast(String(e), 'error')
-            }
+          onDelete={async () => {
+            await actions.deleteStrm(dialog.node.id)
+          }}
+          onGenerate={async () => {
+            await actions.generateStrm(dialog.node.id)
           }}
         />
       )}

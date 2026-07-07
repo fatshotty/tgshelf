@@ -136,3 +136,51 @@ export function ConfirmDialog({
     </Modal>
   )
 }
+
+export function StrmDialog({
+  name,
+  onClose,
+  onDelete,
+  onGenerate,
+}: {
+  name: string
+  onClose: () => void
+  onDelete: () => Promise<void>
+  onGenerate: () => Promise<void>
+}) {
+  const [busy, setBusy] = useState<'delete' | 'generate' | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  const run = async (action: 'delete' | 'generate', op: () => Promise<void>) => {
+    setBusy(action)
+    setErr(null)
+    try {
+      await op()
+      onClose()
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : String(ex))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <Modal title="STRM" onClose={onClose}>
+      <div className="dialog">
+        <p>Manage STRM output for "{name}".</p>
+        {err ? <div className="error">{err}</div> : null}
+        <div className="dialog-actions">
+          <button type="button" disabled={busy !== null} onClick={onClose}>
+            Cancel
+          </button>
+          <button className="danger" disabled={busy !== null} onClick={() => run('delete', onDelete)}>
+            {busy === 'delete' ? 'Deleting...' : 'Delete'}
+          </button>
+          <button disabled={busy !== null} onClick={() => run('generate', onGenerate)}>
+            {busy === 'generate' ? 'Generating...' : 'Generate'}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  )
+}

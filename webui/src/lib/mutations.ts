@@ -61,5 +61,10 @@ export function useTreeActions(folderId: string | undefined, path: string) {
         toast(`STRM generated: ${strmSummary(stats)}`, 'info')
         return stats
       }),
+    deleteStrm: (id: string) =>
+      api.deleteStrm(id).then((stats) => {
+        toast(`STRM deleted: ${strmSummary(stats)}`, 'info')
+        return stats
+      }),
   }
 }

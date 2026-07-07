@@ -375,6 +375,39 @@ async def strm_node(request: web.Request) -> web.Response:
         )
 
 
+async def delete_strm_node(request: web.Request) -> web.Response:
+    """Delete .strm outputs for one folder/file from the global destination tree.
+
+    Deletion is guarded by expected content: files edited by hand are preserved.
+    """
+    from tgshelf.commands import strm as strm_cmd
+
+    node_id = request.match_info["id"]
+    cfg = request.app[RUNTIME].get("strm")
+    if cfg is None:
+        return _bad_request("strm is not configured")
+    async with open_fs(request) as fs:
+        node = await fs.get(node_id)
+        if node is None:
+            return _not_found(f"node {node_id} not found")
+        node_path = await fs.path_of(node_id)
+        base = strm_cmd.strm_base(cfg.destination, cfg.source, node_path, node.is_folder)
+        if base is None:
+            return _bad_request(f"node is not under strm.source ({cfg.source})")
+        stats = await strm_cmd.delete_outputs(fs.repo, node, base, cfg.template)
+        log.info("strm deleted for %s -> %s (%s)", node_id, base, stats)
+        return web.json_response(
+            {
+                "destination": str(base),
+                "created": stats.created,
+                "updated": stats.updated,
+                "skipped": stats.skipped,
+                "removed": stats.removed,
+                "inline": stats.inline,
+            }
+        )
+
+
 async def list_parts(request: web.Request) -> web.Response:
     """Ordered parts of a multi-part file (for the WebUI reorder view)."""
     node_id = request.match_info["id"]
@@ -460,3 +493,4 @@ def register_routes(app: web.Application) -> None:
     app.router.add_post("/api/v1/nodes/{id}/parts/split", split_parts_node)
     app.router.add_put("/api/v1/nodes/{id}/parts", reorder_parts_node)
     app.router.add_post("/api/v1/nodes/{id}/strm", strm_node)
+    app.router.add_delete("/api/v1/nodes/{id}/strm", delete_strm_node)

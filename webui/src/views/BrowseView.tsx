@@ -214,8 +214,12 @@ export default function BrowseView() {
         <StrmDialog
           node={dialog.node}
           onClose={() => setDialog(null)}
-          onGenerate={() => actions.generateStrm(dialog.node.id)}
-          onDelete={() => actions.deleteStrm(dialog.node.id)}
+          onGenerate={async () => {
+            await actions.generateStrm(dialog.node.id)
+          }}
+          onDelete={async () => {
+            await actions.deleteStrm(dialog.node.id)
+          }}
         />
       )}
       {dialog?.kind === 'delete' && (

@@ -8,6 +8,10 @@ import { api, isAccepted } from '../api/client'
 import type { AcceptedOp, FilePartRef, FsNode, StrmResult } from '../api/types'
 import { useToast } from '../components/Toast'
 
+function strmSummary(stats: StrmResult): string {
+  return `${stats.created} created, ${stats.updated} updated, ${stats.skipped} unchanged, ${stats.removed} removed`
+}
+
 export function useTreeActions(folderId: string | undefined, path: string) {
   const qc = useQueryClient()
   const toast = useToast()
@@ -25,9 +29,6 @@ export function useTreeActions(folderId: string | undefined, path: string) {
       invalidate()
     }
   }
-
-  const strmSummary = (r: StrmResult) =>
-    `${r.created} created, ${r.updated} updated, ${r.skipped} unchanged, ${r.removed} removed`
 
   return {
     createFolder: (name: string) => api.createFolder(folderId!, name).then(invalidate),

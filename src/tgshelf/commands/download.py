@@ -191,6 +191,7 @@ async def run(config: Config, args) -> int:
             return FileSystem(
                 NodeRepo(session), master_channel=config.telegram.upload.channel,
                 streamer=runtime["streamer"], min_size=config.telegram.upload.min_size,
+                caption_template=config.caption.template,
             )
 
         # one fresh DB session per worker (sessions are not concurrent-safe), same

@@ -3,12 +3,12 @@
 Mirrors the drive tree (from `strm.source`) under `strm.destination`. For each
 on-Telegram file it writes `<stem>.strm` containing the configured template with
 every placeholder resolved from the node; for inline files (content in the DB) it
-writes the raw bytes under the original name (subtitles, .nfo, …). DB-only — no
-Telegram. Placeholders (closed set, validated at config-load):
+writes the raw bytes under the original name (subtitles, .nfo, ...). DB-only -
+no Telegram. Placeholders (closed set, validated at config-load):
 
   {file_id}=node.id  {filename}=node.name  {channel_id}=node.channel_id
   {parts}=part message_ids by idx, comma-joined  {parts_dash}=same, dash-joined
-  (URL-safe — no comma, which ffmpeg/Emby reject)  {size}=node.size  {mime}=node.mime
+  (URL-safe - no comma, which ffmpeg/Emby reject)  {size}=node.size  {mime}=node.mime
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ def resolve_template(template: str, node, part_message_ids) -> str:
             "channel_id": _blank(node.channel_id),
             "parts": ",".join(part_ids),
             # URL-safe variant: message_ids are integers, so a dash join yields a
-            # path segment of only [0-9-] — no comma (which ffmpeg/Emby choke on).
+            # path segment of only [0-9-] - no comma (which ffmpeg/Emby choke on).
             "parts_dash": "-".join(part_ids),
             "size": node.size,
             "mime": _blank(node.mime),
@@ -86,8 +86,8 @@ def strm_base(destination, source_path: str, node_path: str, is_folder: bool) ->
     """Where a partial regen of `node_path` writes inside the global destination
     tree, so the output matches a full regen but only that subtree is touched.
 
-    Folder → destination / <node path relative to source> (generate writes its
-    contents under it). File → destination / <parent path relative to source>
+    Folder -> destination / <node path relative to source> (generate writes its
+    contents under it). File -> destination / <parent path relative to source>
     (generate writes the single file under it). Returns None if the node is not
     under `source_path`.
     """
@@ -123,8 +123,8 @@ def _write(path: Path, data: bytes, stats: Stats) -> None:
 
 
 async def _target(repo: NodeRepo, node, template: str) -> tuple[str, bytes]:
-    """The output filename + expected bytes for a file node (inline → raw under
-    its name; on-Telegram → <stem>.strm with the resolved template)."""
+    """The output filename + expected bytes for a file node (inline -> raw under
+    its name; on-Telegram -> <stem>.strm with the resolved template)."""
     content = await repo.content_of(node.id)
     if content is not None and len(content) > 0:
         return node.name, content
@@ -164,8 +164,9 @@ async def _targets(repo: NodeRepo, nodes, template: str) -> dict[str, tuple[str,
 
 async def _release_read_transaction(repo: NodeRepo) -> None:
     session = getattr(repo, "session", None)
-    if session is not None:
-        await session.rollback()
+    rollback = getattr(session, "rollback", None)
+    if rollback is not None:
+        await rollback()
 
 
 def _merge_stats(target: Stats, delta: Stats) -> None:
@@ -252,7 +253,7 @@ async def generate(
     `clear` wipes destination first for a clean regen.
     """
     destination = Path(destination)
-    log.info("[strm] starting source=%s destination=%s clear=%s", source.name, destination, clear)
+    log.info("[strm] starting source=%s destination=%s clear=%s", source.id, destination, clear)
     if clear and destination.exists():
         log.info("[strm] clearing %s", destination)
         shutil.rmtree(destination)
@@ -343,12 +344,12 @@ async def delete_outputs(
     in `generate`: if a file has been edited on disk, it is kept.
     """
     destination = Path(destination)
-    log.info("[strm] deleting outputs source=%s destination=%s", source.name, destination)
+    log.info("[strm] deleting outputs source=%s destination=%s", source.id, destination)
     if source.is_folder:
-        nodes = await repo.subtree(source.id, state="ACTIVE")
+        nodes = await repo.subtree(source.id, state=None)
     else:
         nodes = [source]
-    by_id = {n.id: n for n in nodes}
+    by_id = {source.id: source, **{n.id: n for n in nodes}}
 
     def rel_dir(node) -> Path:
         parts: list[str] = []
@@ -416,5 +417,5 @@ async def run(config: Config, args) -> int:
     finally:
         await engine.dispose()
 
-    print(f"strm: {stats} → {destination}")
+    print(f"strm: {stats} -> {destination}")
     return 0

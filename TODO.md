@@ -1,24 +1,21 @@
 # TODO
 
-## Backup / Mirror Command
+## Da fare quanto prima
 
-- Implement a first-class virtual-to-virtual backup/mirror workflow, exposed from
-  the CLI, for example:
-  `tgshelf --config config.yaml mirror /media/movies /backup/movies-bk-1`.
-- The command must synchronize a source folder into a destination folder without
-  requiring a local download/re-upload round trip.
-- Preserve the latest active source tree in the destination by creating missing
-  folders, copying new files, replacing changed files, and marking destination
-  files/folders that no longer exist in the source as `DELETED`.
-- Reuse existing server-side copy/move primitives where possible, but implement
-  mirror-specific planning instead of relying on a one-shot `cp`.
-- Support a safe dry-run/report mode that lists planned creates, updates,
-  deletes, skips, and mismatches before mutating the destination tree.
-- Add an optional cleanup step for mirror discards that purges only `DELETED`
-  nodes under the backup root, using the existing `deleted_only` purge behavior.
-- Add focused tests for idempotent re-runs, renamed files, changed file sizes,
-  missing source entries, nested folders, and channel inheritance across the
-  backup destination.
+- finire di pianificare il placeholder {info} nella caption
+- formalizzare l'uso dei plugin con gli hook necessari
+- impostare l'upload per processare i file in ordine di peso (dal piu' piccolo al piu' grande)
+- creare il plugin che scrive nelle {info}
+- modificare template caption nel file config.yaml
+- bonificare tutte le caption su telegram
+
+## Mirror Follow Ups
+
+- Consider an explicit option to create the missing destination root for
+  `mirror`; the first implementation intentionally fails clearly when the
+  destination folder does not already exist.
+- Consider a Web UI entry point for the existing virtual-to-virtual mirror
+  workflow.
 
 ## Batch Delete / Purge CLI
 
@@ -47,6 +44,14 @@
   serious inconsistencies with the latest logical filesystem state.
 - Define a stable caption format that contains both immutable identity metadata
   and the current logical filename, then update captions on rename operations.
+- Include the current logical full path in Telegram captions, in addition to
+  the filename, so disaster recovery can rebuild both file names and tree
+  placement from channel history.
+- Consider a dedicated configuration section for Telegram caption rendering.
+- Support configurable caption placeholders, for example `{file_id}`,
+  `{filename}`, `{path}`, `{channel_id}`, `{part_idx}`, `{parts}`, `{size}`,
+  and `{mime}`, so operators can decide which recovery metadata is written into
+  Telegram captions.
 - Add a migration/reconciliation command to detect stale captions and repair
   them from the database.
 
@@ -57,6 +62,23 @@
   behavior during the historical cleanup, but regular service operations must
   keep flood/cooldown events visible in logs.
 
-## Web UI Chromium Ubuntu 16 Icons
+## Plugin Hooks And info.notes Captions
 
-- Fix Web UI icon rendering on Chromium under Ubuntu 16.
+- Implement the design recorded in `docs/dev/plugins-and-info-notes.md`.
+- Render only `nodes.info["notes"]` below the canonical `fileName:` caption line.
+- Keep `info.notes` free-form: allow long text, line breaks, and empty lines;
+  do not trim or silently truncate it. If Telegram rejects the caption, surface
+  the error.
+- Add a centralized caption renderer and update upload, rename, copy/move,
+  merge, reorder, split, sanitizer, and recovery tooling to use it.
+- Add a core helper to update `info.notes` and resync Telegram captions for
+  Telegram-backed files.
+- Add a plugin manager with ordered hook chains and a single public
+  `PluginError` exception type.
+- Add initial file-level hooks for upload, move, copy, rename, delete, and
+  import.
+- Wire the plugin manager through every `FileSystem` construction path,
+  including HTTP, WebDAV, CLI sync, CLI fs operations, watcher/import-channel,
+  and `FsExecutor`.
+- Add an `install_plugin` or `plugins` command flow to make local plugin code
+  available and validate configured plugin modules.

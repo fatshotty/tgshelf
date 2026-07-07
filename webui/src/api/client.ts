@@ -2,7 +2,17 @@
 // auth (whole-origin) automatically — see auth/credentials.ts. Kept free of React
 // so it (and types.ts) can be reused by a future react-native app.
 import { authHeaders } from '../auth/credentials'
-import type { AcceptedOp, FilePart, FilePartRef, FsNode, MetricsSnapshot, NodeSize, SearchResult, SplitPartsResult, StrmResult } from './types'
+import type {
+  AcceptedOp,
+  FilePart,
+  FilePartRef,
+  FsNode,
+  MetricsSnapshot,
+  NodeSize,
+  SearchResult,
+  SplitPartsResult,
+  StrmResult,
+} from './types'
 
 export class ApiError extends Error {
   status: number

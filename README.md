@@ -19,9 +19,9 @@ aiohttp APIs, HTTP download endpoints, WebDAV/rclone, and a React Web UI.
   parity, ETag, 304, and 416 handling.
 - Parallel downloads through multiple bots or user accounts, with failover,
   cooldowns, and optional user-account fallback.
-- Filesystem operations: create folders, rename, move, copy, soft delete,
-  restore, purge, search, recursive size, merge parts, split parts, and reorder
-  parts.
+- Filesystem operations: create folders, rename, move, copy, mirror, soft
+  delete, restore, purge, search, recursive size, merge parts, split parts, and
+  reorder parts.
 - CLI workflows for accounts/sessions, filesystem operations, sync, download,
   `.strm` generation, and bot checks.
 - Web UI for browsing, search, metrics, tree management, inline text editing,
@@ -275,6 +275,28 @@ telegram:
       Key: {key}
     warning_window: 300
 
+caption:
+  # template: complete Telegram caption template for Telegram-backed file parts.
+  # Rendered for new uploads/copies and re-rendered only when an operation
+  # changes data referenced by the template. Existing historical captions are
+  # not rewritten automatically when this value changes.
+  #
+  # Set template: "" to disable tgshelf-managed Telegram captions.
+  #
+  # Placeholders:
+  #   {id}         stable logical node id
+  #   {path}       logical parent folder path, root = /, no filename included
+  #   {filename}   logical part filename, e.g. Movie.mkv.001
+  #   {part_idx}   1-based part index
+  #   {parts}      total number of parts in the logical file
+  #   {size}       current Telegram part size in bytes
+  #   {mime}       node MIME
+  #   {channel_id} physical Telegram channel id for this part
+  # {info} is reserved and not implemented yet.
+  # See docs/telegram-captions.md for full semantics.
+  template: |
+    fileName: {filename}
+
 download:
   multi_bot_download: 3         # parallel bots per download; 1 = sequential
   allow_user_fallback: false    # use user accounts if the bot pool is exhausted
@@ -377,11 +399,19 @@ tgshelf --config config.yaml search readme
 tgshelf --config config.yaml du -H /folder/sub-folder
 tgshelf --config config.yaml cat /notes/readme.txt
 tgshelf --config config.yaml cp /notes/readme.txt /archive
+tgshelf --config config.yaml cp --force-copy /notes/readme.txt /archive
 tgshelf --config config.yaml cp /media/movies /backup
 tgshelf --config config.yaml cp '/media/movies/*' /backup/movies-bk-1
+tgshelf --config config.yaml cp '/media/movies/*' /archive/movies
 tgshelf --config config.yaml mv /archive/readme.txt /folder/sub-folder
 tgshelf --config config.yaml rm /notes/readme.txt
 tgshelf --config config.yaml purge /notes/readme.txt
+
+# Mirror one virtual folder into another. The destination root must already
+# exist. Source contents win: missing entries are copied, changed entries are
+# replaced, and destination-only entries are soft-deleted.
+tgshelf --config config.yaml mirror /media/movies /backup/movies-bk-1
+tgshelf --config config.yaml mirror --dry-run /media/movies /backup/movies-bk-1
 
 # Download a file or folder. Existing partial files are resumed unless
 # --overwrite is used explicitly.

@@ -4,6 +4,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 
 import { api, downloadUrl } from '../api/client'
 import type { SearchResult } from '../api/types'
+import { DownloadIcon, FileIcon, FolderIcon } from '../components/Icons'
 import { humanBytes } from '../lib/format'
 import { browseUrl, pathSegments } from '../lib/path'
 
@@ -58,7 +59,7 @@ export default function SearchView() {
           <div className="results">
             {[...data].sort(searchOrdering).map((result) => (
               <div className={`row ${result.node.is_folder ? 'folder' : 'file'}`} key={result.node.id}>
-                <span className="ic">{result.node.is_folder ? '📁' : '📄'}</span>
+                {result.node.is_folder ? <FolderIcon className="ic" /> : <FileIcon className="ic" />}
                 <span className="search-result-main">
                   <span className="name">{result.node.name}</span>
                   <span className="path">{result.node.is_folder ? result.path : result.parent_path}</span>
@@ -74,8 +75,14 @@ export default function SearchView() {
                   </Link>
                 )}
                 {!result.node.is_folder && (
-                  <a className="dl" href={downloadUrl(result.node.id, result.node.name)} target="_blank" rel="noreferrer">
-                    ↓
+                  <a
+                    className="dl"
+                    href={downloadUrl(result.node.id, result.node.name)}
+                    target="_blank"
+                    rel="noreferrer"
+                    aria-label={`Download ${result.node.name}`}
+                  >
+                    <DownloadIcon />
                   </a>
                 )}
               </div>

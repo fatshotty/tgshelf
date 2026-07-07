@@ -38,6 +38,7 @@ class FsExecutor:
         streamer: Any = None,
         gateway: Any = None,
         notifier: Any = None,
+        caption_template: str = "fileName: {filename}",
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ):
         self._session_factory = session_factory
@@ -49,6 +50,7 @@ class FsExecutor:
         self._streamer = streamer
         self._gateway = gateway
         self._notifier = notifier
+        self._caption_template = caption_template
         self._sleep = sleep
 
     async def run(
@@ -81,6 +83,7 @@ class FsExecutor:
                     streamer=self._streamer,
                     min_size=self._min_size,
                     notifier=self._notifier,
+                    caption_template=self._caption_template,
                 )
                 return await op(fs, item)
         finally:

@@ -7,10 +7,12 @@ export function Modal({
   title,
   onClose,
   children,
+  className,
 }: {
   title: string
   onClose: () => void
   children: ReactNode
+  className?: string
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -22,7 +24,7 @@ export function Modal({
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div className={className ? `modal ${className}` : 'modal'} onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">{title}</div>
         <div className="modal-body">{children}</div>
       </div>

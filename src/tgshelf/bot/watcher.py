@@ -84,6 +84,7 @@ async def start_watcher(
                     master_channel=master,
                     gateway=user_gateway,
                     min_size=config.telegram.upload.min_size,
+                    caption_template=config.caption.template,
                 )
                 node = await fs.import_message(master, message.id, parent_id=ROOT_ID)
             if node is not None:

@@ -12,15 +12,22 @@ from __future__ import annotations
 import logging
 import mimetypes
 import re
-from typing import Any, AsyncIterator, Callable, Sequence
+from dataclasses import dataclass
+from typing import Any, AsyncIterator, Callable, Iterable, Sequence
 
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 
 from tgshelf.constants import ROOT_ID
 from tgshelf.core import channels
-from tgshelf.core.captions import logical_part_caption
+from tgshelf.core.captions import (
+    DEFAULT_CAPTION_TEMPLATE,
+    CaptionRenderContext,
+    caption_template_depends_on,
+    render_caption,
+)
 from tgshelf.core.download import RangeNotSatisfiable, StreamPlan
+from tgshelf.core.mirror import MirrorPlan, build_mirror_plan
 from tgshelf.core.upload import PartRecord
 from tgshelf.db.models import Node
 from tgshelf.db.repo import DuplicateNameError, NodeRepo
@@ -33,6 +40,16 @@ DEFAULT_MIME = "application/octet-stream"
 # Not a closed registry (new types appear); just rejects garbage (no slash,
 # empty side, spaces, multiple slashes).
 _MIME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9!#$&^_+.-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_+.-]*(\s*;.*)?$")
+
+
+@dataclass(frozen=True)
+class _PurgeFilePlan:
+    file_id: str
+    name: str
+    path: str
+    telegram_parts: int
+    channels: int
+    parts: tuple[Any, ...]
 
 
 def is_valid_mime(mime: str) -> bool:
@@ -72,6 +89,7 @@ class FileSystem:
         min_size: int = 0,
         executor: Any = None,
         notifier: Any = None,
+        caption_template: str = DEFAULT_CAPTION_TEMPLATE,
     ):
         self.repo = repo
         self._master_channel = master_channel
@@ -82,6 +100,7 @@ class FileSystem:
         # optional Notifier: critical move/copy cleanup failures get pushed to the
         # alert channel (see channels.delete_originals); None -> log-only.
         self._notifier = notifier
+        self._caption_template = caption_template
         # FsExecutor: when set, folder move/copy fan out per-file (each on its own
         # session + leased account). Without it, the fallback runs sequentially on
         # this instance's session/gateway.
@@ -197,13 +216,21 @@ class FileSystem:
         raise DuplicateNameError(f"cannot allocate a unique name for {desired!r}")
 
     async def rename(self, node_id: str, new_name: str) -> Node:
+        node = await self.repo.get(node_id)
+        old_mime = getattr(node, "mime", None) if node is not None else None
+        fields: dict[str, Any] = {"name": new_name}
+        if node is not None and not node.is_folder:
+            fields["mime"] = mimetypes.guess_type(new_name)[0] or DEFAULT_MIME
         try:
-            await self.repo.set_fields(node_id, name=new_name)
+            await self.repo.set_fields(node_id, **fields)
             await self.repo.session.commit()
         except IntegrityError as exc:
             await self.repo.session.rollback()
             raise DuplicateNameError(f"name '{new_name}' already exists") from exc
-        await self._sync_part_captions(node_id)
+        changed = {"filename"}
+        if fields.get("mime") != old_mime:
+            changed.add("mime")
+        await self._sync_part_captions(node_id, changed_fields=changed)
         return await self.repo.get(node_id)
 
     async def set_channel(self, node_id: str, channel_id: int | None) -> Node:
@@ -234,6 +261,7 @@ class FileSystem:
             resolved = mimetypes.guess_type(node.name)[0] or DEFAULT_MIME
         await self.repo.set_fields(node_id, mime=resolved)
         await self.repo.session.commit()
+        await self._sync_part_captions(node_id, changed_fields={"mime"})
         return await self.repo.get(node_id)
 
     async def delete(
@@ -249,34 +277,62 @@ class FileSystem:
         # is the manual cleanup of a backup's discards after a mirror run.
         state = "DELETED" if deleted_only else None
         node = await self.repo.get(node_id)
+        node_path = await self.repo.path_of(node_id)
         parts = await self.repo.parts_in_subtree(node_id, state=state)
-        node_name = getattr(node, "name", None) or "-"
+        files = await self.repo.purge_file_summaries(node_id, state=state)
+        purge_plan = _build_purge_file_plan(files, parts)
         log.info(
-            "[purge] starting node=%s name=%s deleted_only=%s telegram_parts=%s gateway=%s",
-            node_id, node_name, deleted_only, len(parts), "yes" if self._gateway else "no",
+            "[purge] starting node=%s path=%s name=%s deleted_only=%s telegram_parts=%d gateway=%s",
+            node_id,
+            node_path or "?",
+            getattr(node, "name", "?"),
+            deleted_only,
+            len(parts),
+            "yes" if self._gateway is not None or self._executor is not None else "no",
         )
-        if parts and self._gateway is not None:
+        for file_plan in purge_plan:
             log.info(
-                "[purge] deleting %s Telegram-backed part messages across %s channels",
-                len(parts), len({part.channel_id for part in parts}),
+                "[purge] file node=%s path=%s name=%s telegram_parts=%d channels=%d",
+                file_plan.file_id,
+                file_plan.path,
+                file_plan.name,
+                file_plan.telegram_parts,
+                file_plan.channels,
             )
-            await channels.delete_originals(
-                self._gateway, parts, notifier=self._notifier, context="purge"
-            )
-        elif parts:
-            log.warning(
-                "[purge] skipping Telegram message deletion for %s parts: no gateway configured",
+        if parts and (self._gateway is not None or self._executor is not None):
+            _validate_purge_plan(parts, purge_plan)
+        if parts and self._executor is not None:
+            channels_count = len({part.channel_id for part in parts})
+            log.info(
+                "[purge] deleting %d Telegram-backed part messages across %d channels using executor",
                 len(parts),
+                channels_count,
             )
+            _raise_first_error(await self._executor.run(purge_plan, _purge_file_op))
+        elif parts and self._gateway is not None:
+            channels_count = len({part.channel_id for part in parts})
+            log.info(
+                "[purge] deleting %d Telegram-backed part messages across %d channels",
+                len(parts),
+                channels_count,
+            )
+            await _delete_purge_file_plans(self._gateway, purge_plan)
+        elif parts:
+            log.warning("[purge] no gateway configured; %d Telegram messages were not deleted", len(parts))
         log.info(
             "[purge] deleting database subtree node=%s state=%s",
-            node_id, state or "ANY",
+            node_id,
+            state or "ANY",
         )
         await self.repo.purge_subtree(node_id, state=state)
         await self.repo.session.commit()
         log.info(
-            "[purge] done node=%s name=%s deleted_only=%s telegram_parts=%s",
-            node_id, node_name, deleted_only, len(parts),
+            "[purge] done node=%s path=%s name=%s deleted_only=%s telegram_parts=%d",
+            node_id,
+            node_path or "?",
+            getattr(node, "name", "?"),
+            deleted_only,
+            len(parts),
         )
 
     async def restore(self, node_id: str) -> None:
@@ -288,6 +344,92 @@ class FileSystem:
             raise DuplicateNameError(
                 f"cannot restore {node_id}: an active sibling has the same name"
             ) from exc
+
+    async def mirror(self, source_id: str, dest_id: str, *, dry_run: bool = False) -> MirrorPlan:
+        source = await self.repo.get(source_id)
+        if source is None or not source.is_folder or source.state != "ACTIVE":
+            raise NotAReadableFile(f"source folder {source_id} not found")
+        dest = await self.repo.get(dest_id)
+        if dest is None or not dest.is_folder or dest.state != "ACTIVE":
+            raise NotAReadableFile(f"destination folder {dest_id} not found")
+        if source.id == dest.id:
+            raise ValueError("source and destination cannot be the same folder")
+
+        source_ancestors = await self.repo.ancestors(source.id)
+        dest_ancestors = await self.repo.ancestors(dest.id)
+        if any(node.id == source.id for node in dest_ancestors) or any(
+            node.id == dest.id for node in source_ancestors
+        ):
+            raise ValueError("source and destination cannot be inside each other")
+
+        plan = await build_mirror_plan(self.repo, source, dest)
+        log.info(
+            "[mirror] planned source=%s dest=%s actions=%d dry_run=%s",
+            source_id, dest_id, len(plan.actions), dry_run,
+        )
+        if dry_run:
+            return plan
+
+        await self._apply_mirror_plan(plan)
+        log.info(
+            "[mirror] applied source=%s dest=%s actions=%d",
+            source_id, dest_id, len(plan.actions),
+        )
+        return plan
+
+    async def _apply_mirror_plan(self, plan: MirrorPlan) -> None:
+        delete_kinds = {
+            "delete_extra",
+            "replace_file",
+            "replace_folder_with_file",
+            "replace_file_with_folder",
+        }
+        for action in sorted(
+            [
+                action for action in plan.actions
+                if action.kind in delete_kinds and action.dest_id
+            ],
+            key=lambda action: (-_path_depth(action.path), action.path.lower()),
+        ):
+            await self.delete(action.dest_id, purge=False)
+
+        for action in sorted(
+            [
+                action for action in plan.actions
+                if action.kind in {"create_folder", "replace_file_with_folder"}
+            ],
+            key=lambda action: (_path_depth(action.path), action.path.lower()),
+        ):
+            parent_id = await self._mirror_parent_id(plan.dest_id, action.path)
+            name = action.path.rsplit("/", 1)[-1]
+            await self._ensure_folder(parent_id, name)
+
+        for action in sorted(
+            [
+                action for action in plan.actions
+                if action.kind in {"copy_file", "replace_file", "replace_folder_with_file"}
+            ],
+            key=lambda action: (_path_depth(action.path), action.path.lower()),
+        ):
+            if action.source_id is None:
+                raise NotAReadableFile(f"mirror source for {action.path} not found")
+            source = await self.repo.get(action.source_id)
+            if source is None or source.is_folder:
+                raise NotAReadableFile(f"source file {action.source_id} not found")
+            parent_id = await self._mirror_parent_id(plan.dest_id, action.path)
+            await self._copy_file(source, parent_id)
+
+    async def _mirror_parent_id(self, dest_root_id: str, action_path: str) -> str:
+        parent_path = action_path.rpartition("/")[0]
+        if not parent_path:
+            return dest_root_id
+        parent_id = dest_root_id
+        for segment in parent_path.split("/"):
+            node = await self.repo.get_child_by_name(parent_id, segment, state="ACTIVE")
+            if node is None or not node.is_folder:
+                raise NotAReadableFile(f"mirror destination folder {parent_path} not found")
+            parent_id = node.id
+        return parent_id
 
     # -- move ---------------------------------------------------------------
 
@@ -351,6 +493,7 @@ class FileSystem:
         source = file.channel_id
         dest = await self.effective_channel(file.id, skip_current=True)
         if dest == source:
+            await self._sync_part_captions(file.id, changed_fields={"path"})
             return
 
         parts = await self.repo.parts_of(file.id)
@@ -360,9 +503,10 @@ class FileSystem:
             return
 
         total = len(parts)
+        parent_path = await self._parent_path(file)
         captions = {
-            (p.channel_id, p.message_id): logical_part_caption(
-                file.name, idx=i, total_parts=total
+            (p.channel_id, p.message_id): self._render_part_caption(
+                file, p, i, total, parent_path=parent_path, channel_id=dest
             )
             for i, p in enumerate(parts)
         }
@@ -389,68 +533,68 @@ class FileSystem:
     # -- copy ---------------------------------------------------------------
 
     async def copy(
-        self, node_id: str, new_parent_id: str, *, force_copy: bool = False
+        self,
+        node_id: str,
+        new_parent_id: str,
+        *,
+        force_copy: bool = False,
     ) -> Node:
         """Copy a node under `new_parent_id`, leaving the source untouched.
-        Telegram messages are duplicated so the copy owns its own messages.
-
-        By default a same-name ACTIVE file already present in the destination is
-        reused instead of duplicated. `force_copy=True` preserves the old
-        duplicate-with-dedup-name behavior.
-        """
+        Telegram messages are duplicated so the copy owns its own messages."""
         node = await self.repo.get(node_id)
         if node is None:
             raise NotAReadableFile(f"node {node_id} not found")
         await self.ensure_move_target(new_parent_id)
-        log.debug(
-            "[copy] requested %s '%s' (%s) -> parent %s force_copy=%s",
-            "folder" if node.is_folder else "file",
-            node.name,
-            node.id,
-            new_parent_id,
-            force_copy,
-        )
         if node.is_folder:
             return await self._copy_folder(node, new_parent_id, force_copy=force_copy)
+        existing = await self._existing_file(new_parent_id, node.name)
+        log.debug(
+            "[copy] requested file '%s' (%s) -> parent %s force_copy=%s",
+            node.name, node.id, new_parent_id, force_copy,
+        )
+        if existing is not None and not force_copy:
+            log.debug(
+                "[copy] skip existing file '%s' (%s) in parent %s for source %s",
+                existing.name, existing.id, new_parent_id, node.id,
+            )
+            return existing
         # single file: also via the executor (solution B) -> account-leased
         results = await self._fan_out([(node_id, new_parent_id, force_copy)], _copy_op)
         new_id = _first_result(results)
         return await self.repo.get(new_id)
 
     async def copy_files(
-        self, node_ids: Sequence[str], new_parent_id: str, *, force_copy: bool = False
+        self,
+        node_ids: Iterable[str],
+        new_parent_id: str,
+        *,
+        force_copy: bool = False,
     ) -> list[Node]:
-        """Copy several file nodes into one destination folder as one governed
-        batch. Used by path-level wildcard copy so direct child files can share
-        the same existing-name lookup and executor run."""
         await self.ensure_move_target(new_parent_id)
-        files: list[Node] = []
+        pairs: list[tuple[str, str, bool]] = []
+        reused: list[Node] = []
+        existing_files = await self._existing_files_by_name(new_parent_id)
         for node_id in node_ids:
             node = await self.repo.get(node_id)
-            if node is None:
-                raise NotAReadableFile(f"node {node_id} not found")
-            if node.is_folder:
-                raise ValueError(f"node {node_id} is a folder")
-            files.append(node)
-        results = await self._copy_file_batch(
-            [(file, new_parent_id) for file in files],
-            force_copy=force_copy,
-        )
-        _raise_first_error(results)
-        copied: list[Node] = []
-        for result in results:
-            if result is None:
+            if node is None or node.is_folder:
                 continue
-            node = await self.repo.get(result)
-            if node is not None:
-                copied.append(node)
-        return copied
-
-    async def _same_name_file(self, parent_id: str, name: str) -> Node | None:
-        child = await self.repo.get_child_by_name(parent_id, name, state="ACTIVE")
-        if child is None or child.is_folder:
-            return None
-        return child
+            existing = existing_files.get(node.name.lower())
+            log.debug(
+                "[copy] requested file '%s' (%s) -> parent %s force_copy=%s",
+                node.name, node.id, new_parent_id, force_copy,
+            )
+            if existing is not None and not force_copy:
+                log.debug(
+                    "[copy] skip existing file '%s' (%s) in parent %s for source %s",
+                    existing.name, existing.id, new_parent_id, node.id,
+                )
+                reused.append(existing)
+                continue
+            pairs.append((node.id, new_parent_id, force_copy))
+        results = await self._fan_out(pairs, _copy_op) if pairs else []
+        _raise_first_error(results)
+        created = [await self.repo.get(node_id) for node_id in results]
+        return reused + [node for node in created if node is not None]
 
     async def _dedup_name(self, parent_id: str, name: str, *, is_folder: bool) -> str:
         children = await self.repo.children(parent_id)
@@ -467,31 +611,19 @@ class FileSystem:
             i += 1
         return f"{stem} - {i}{suffix}"
 
-    async def _copy_file(
-        self, src: Node, dst_parent_id: str, *, force_copy: bool = False
-    ) -> Node:
-        if not force_copy:
-            existing = await self._same_name_file(dst_parent_id, src.name)
-            if existing is not None:
-                log.debug(
-                    "[copy] skip existing file '%s' (%s) in parent %s for source %s",
-                    existing.name,
-                    existing.id,
-                    dst_parent_id,
-                    src.id,
-                )
-                return existing
+    async def _existing_file(self, parent_id: str, name: str) -> Node | None:
+        existing = await self.repo.get_child_by_name(parent_id, name, state="ACTIVE")
+        if existing is not None and not existing.is_folder:
+            return existing
+        return None
 
-        name = await self._dedup_name(dst_parent_id, src.name, is_folder=False)
+    async def _existing_files_by_name(self, parent_id: str) -> dict[str, Node]:
+        children = await self.repo.children(parent_id, files_only=True)
+        return {child.name.lower(): child for child in children}
+
+    async def _copy_file(self, src: Node, dst_parent_id: str, *, force_copy: bool = False) -> Node:
         dest_channel = await self.effective_channel(dst_parent_id)
-        log.debug(
-            "[copy] copying file '%s' (%s) -> parent %s as '%s' force_copy=%s",
-            src.name,
-            src.id,
-            dst_parent_id,
-            name,
-            force_copy,
-        )
+        name = await self._dedup_name(dst_parent_id, src.name, is_folder=False)
 
         content = await self.repo.content_of(src.id)
         if content is not None:
@@ -500,17 +632,11 @@ class FileSystem:
                 channel_id=dest_channel, state="ACTIVE", size=len(content), content=content,
             )
             await self.repo.session.commit()
-            copied = await self.repo.get(new.id)
             log.info(
                 "[copy] copied file '%s' (%s) -> parent %s as '%s' (%s) force_copy=%s",
-                src.name,
-                src.id,
-                dst_parent_id,
-                copied.name,
-                copied.id,
-                force_copy,
+                src.name, src.id, dst_parent_id, new.name, new.id, force_copy,
             )
-            return copied
+            return await self.repo.get(new.id)
 
         src_parts = await self.repo.parts_of(src.id)
         new = await self.repo.create(
@@ -519,9 +645,17 @@ class FileSystem:
         )
         await self.repo.session.commit()
         total = len(src_parts)
+        parent_path = await self._path_of_folder(dst_parent_id)
         captions = {
-            (p.channel_id, p.message_id): logical_part_caption(
-                name, idx=i, total_parts=total
+            (p.channel_id, p.message_id): self._render_part_caption_values(
+                node_id=new.id,
+                parent_path=parent_path,
+                logical_name=name,
+                idx=i,
+                total_parts=total,
+                part=p,
+                mime=src.mime,
+                channel_id=dest_channel,
             )
             for i, p in enumerate(src_parts)
         }
@@ -541,47 +675,11 @@ class FileSystem:
             new.id, state="ACTIVE", size=sum(p.size for p in new_parts)
         )
         await self.repo.session.commit()
-        copied = await self.repo.get(new.id)
         log.info(
             "[copy] copied file '%s' (%s) -> parent %s as '%s' (%s) force_copy=%s",
-            src.name,
-            src.id,
-            dst_parent_id,
-            copied.name,
-            copied.id,
-            force_copy,
+            src.name, src.id, dst_parent_id, name, new.id, force_copy,
         )
-        return copied
-
-    async def _copy_file_batch(
-        self, targets: Sequence[tuple[Node, str]], *, force_copy: bool = False
-    ) -> list:
-        pairs: list[tuple[str, str, bool]] = []
-        skipped: list[str] = []
-        if force_copy:
-            pairs = [(src.id, dst_parent_id, True) for src, dst_parent_id in targets]
-        else:
-            names_by_parent: dict[str, dict[str, Node]] = {}
-            for dst_parent_id in {dst_parent_id for _src, dst_parent_id in targets}:
-                children = await self.repo.children(dst_parent_id, files_only=True)
-                names_by_parent[dst_parent_id] = {
-                    child.name.lower(): child for child in children
-                }
-            for src, dst_parent_id in targets:
-                existing = names_by_parent[dst_parent_id].get(src.name.lower())
-                if existing is not None:
-                    log.debug(
-                        "[copy] skip existing file '%s' (%s) in parent %s for source %s",
-                        existing.name,
-                        existing.id,
-                        dst_parent_id,
-                        src.id,
-                    )
-                    skipped.append(existing.id)
-                    continue
-                names_by_parent[dst_parent_id][src.name.lower()] = src
-                pairs.append((src.id, dst_parent_id, False))
-        return [*skipped, *(await self._fan_out(pairs, _copy_op))]
+        return await self.repo.get(new.id)
 
     async def _ensure_folder(self, parent_id: str, name: str) -> str:
         """Reuse a same-name folder under parent (merge) or create it; return id."""
@@ -596,20 +694,14 @@ class FileSystem:
         return created.id
 
     async def _copy_folder(
-        self, src: Node, dst_parent_id: str, *, force_copy: bool = False
+        self,
+        src: Node,
+        dst_parent_id: str,
+        *,
+        force_copy: bool = False,
     ) -> Node:
         mapping = {src.id: await self._ensure_folder(dst_parent_id, src.name)}
         descendants = await self.repo.subtree(src.id, state="ACTIVE")  # shallow-first
-        files = [n for n in descendants if not n.is_folder]
-        log.debug(
-            "[copy] folder '%s' (%s) -> parent %s: %d descendant(s), %d file(s), force_copy=%s",
-            src.name,
-            src.id,
-            dst_parent_id,
-            len(descendants),
-            len(files),
-            force_copy,
-        )
 
         # pass 1: recreate the folder structure (parents before children)
         for node in descendants:
@@ -617,17 +709,27 @@ class FileSystem:
                 mapping[node.id] = await self._ensure_folder(mapping[node.parent_id], node.name)
 
         # pass 2: copy the files into their mapped folders (fanned out)
-        pairs = [(n, mapping[n.parent_id]) for n in files]
-        _log_failures(
-            await self._copy_file_batch(pairs, force_copy=force_copy),
-            "copy",
-        )
-        log.debug(
-            "[copy] folder '%s' (%s) completed into %s",
-            src.name,
-            src.id,
-            mapping[src.id],
-        )
+        existing_by_parent: dict[str, dict[str, Node]] = {}
+        pairs: list[tuple[str, str, bool]] = []
+        for node in descendants:
+            if node.is_folder:
+                continue
+            parent_id = mapping[node.parent_id]
+            if parent_id not in existing_by_parent:
+                existing_by_parent[parent_id] = await self._existing_files_by_name(parent_id)
+            existing = existing_by_parent[parent_id].get(node.name.lower())
+            log.debug(
+                "[copy] requested file '%s' (%s) -> parent %s force_copy=%s",
+                node.name, node.id, parent_id, force_copy,
+            )
+            if existing is not None and not force_copy:
+                log.debug(
+                    "[copy] skip existing file '%s' (%s) in parent %s for source %s",
+                    existing.name, existing.id, parent_id, node.id,
+                )
+                continue
+            pairs.append((node.id, parent_id, force_copy))
+        _log_failures(await self._fan_out(pairs, _copy_op), "copy")
         return await self.repo.get(mapping[src.id])
 
     # -- write --------------------------------------------------------------
@@ -684,7 +786,8 @@ class FileSystem:
             result = await self._uploader.upload(
                 source_factory, filename=name, mime=mime, channel_id=channel,
                 min_size=self._min_size, on_part=persist_part, on_reset=reset_parts,
-                on_account=on_account,
+                on_account=on_account, caption_template=self._caption_template,
+                node_id=node.id, parent_path=await self._path_of_folder(parent_id),
             )
         except BaseException:
             await self.repo.purge(node.id)  # drop TEMP (parts cascade)
@@ -707,6 +810,8 @@ class FileSystem:
         else:
             await self.repo.set_fields(node.id, size=result.size, state="ACTIVE")
         await self.repo.session.commit()
+        if result.inline_content is None:
+            await self._sync_part_captions(node.id)
         # post-write sanity: the persisted parts must sum back to the expected
         # size (catches a part row that failed to persist). Always holds for a
         # correct write; a guard, not a recovery path.
@@ -773,6 +878,9 @@ class FileSystem:
         result = await self._uploader.upload(
             source_factory, filename=node.name, mime=node.mime, channel_id=channel,
             min_size=self._min_size, on_part=persist_part, on_reset=reset_parts,
+            caption_template=self._caption_template,
+            node_id=node_id,
+            parent_path=await self._path_of_folder(node.parent_id),
         )
         # Drop the inline body now that the parts are durable; size follows the
         # parts. (force-path data is always > min_size, so it never stays inline.)
@@ -780,6 +888,7 @@ class FileSystem:
             node_id, content=None, size=result.size, mtime=func.now()
         )
         await self.repo.session.commit()
+        await self._sync_part_captions(node_id)
         await self.check_size(node_id)
         return await self.repo.get(node_id)
 
@@ -868,7 +977,15 @@ class FileSystem:
         await self.repo.session.commit()
         return await self.repo.get(node.id)
 
-    async def _sync_part_captions(self, file_id: str) -> None:
+    async def _sync_part_captions(
+        self, file_id: str, *, changed_fields: set[str] | None = None
+    ) -> None:
+        if self._caption_template == "":
+            return
+        if changed_fields is not None and not caption_template_depends_on(
+            self._caption_template, changed_fields
+        ):
+            return
         node = await self.repo.get(file_id)
         if node is None or node.is_folder:
             return
@@ -881,12 +998,71 @@ class FileSystem:
             raise ValueError("gateway unavailable: cannot sync Telegram captions")
 
         total = len(parts)
+        parent_path = await self._parent_path(node)
         for pos, part in enumerate(parts):
             await self._gateway.edit_message_caption(
                 part.channel_id,
                 part.message_id,
-                logical_part_caption(node.name, idx=pos, total_parts=total),
+                self._render_part_caption(
+                    node, part, pos, total, parent_path=parent_path
+                ),
             )
+
+    async def _path_of_folder(self, folder_id: str | None) -> str:
+        if folder_id is None:
+            return "/"
+        path = await self.repo.path_of(folder_id)
+        return path or "/"
+
+    async def _parent_path(self, node: Node) -> str:
+        return await self._path_of_folder(node.parent_id)
+
+    def _render_part_caption(
+        self,
+        node: Node,
+        part: Any,
+        idx: int,
+        total_parts: int,
+        *,
+        parent_path: str,
+        channel_id: int | None = None,
+    ) -> str:
+        return self._render_part_caption_values(
+            node_id=node.id,
+            parent_path=parent_path,
+            logical_name=node.name,
+            idx=idx,
+            total_parts=total_parts,
+            part=part,
+            mime=node.mime,
+            channel_id=channel_id,
+        )
+
+    def _render_part_caption_values(
+        self,
+        *,
+        node_id: str,
+        parent_path: str,
+        logical_name: str,
+        idx: int,
+        total_parts: int,
+        part: Any,
+        mime: str | None,
+        channel_id: int | None = None,
+    ) -> str:
+        return render_caption(
+            self._caption_template,
+            CaptionRenderContext(
+                node_id=node_id,
+                parent_path=parent_path,
+                logical_name=logical_name,
+                idx=idx,
+                total_parts=total_parts,
+                part_size=part.size,
+                mime=mime,
+                channel_id=part.channel_id if channel_id is None else channel_id,
+            ),
+        )
 
     async def merge_parts(
         self,
@@ -1076,16 +1252,100 @@ async def _reroute_op(fs: FileSystem, node_id: str) -> None:
         await fs._reroute_file(file)
 
 
-async def _copy_op(
-    fs: FileSystem, pair: tuple[str, str] | tuple[str, str, bool]
-) -> str | None:
-    src_id, dst_parent_id, *rest = pair
-    force_copy = bool(rest[0]) if rest else False
+async def _copy_op(fs: FileSystem, pair: tuple[str, str, bool]) -> str | None:
+    src_id, dst_parent_id, force_copy = pair
     src = await fs.get(src_id)
     if src is None or src.is_folder:
         return None
     new = await fs._copy_file(src, dst_parent_id, force_copy=force_copy)
     return new.id
+
+
+def _build_purge_file_plan(files: Sequence[Any], parts: Sequence[Any]) -> list[_PurgeFilePlan]:
+    parts_by_file: dict[str, list[Any]] = {}
+    for part in parts:
+        file_id = getattr(part, "file_id", None)
+        if file_id is None:
+            continue
+        parts_by_file.setdefault(str(file_id), []).append(part)
+
+    plan: list[_PurgeFilePlan] = []
+    for file in files:
+        file_id = str(file.file_id)
+        file_parts = tuple(parts_by_file.get(file_id, ()))
+        if not file_parts:
+            continue
+        plan.append(
+            _PurgeFilePlan(
+                file_id=file_id,
+                name=str(file.name),
+                path=str(file.path),
+                telegram_parts=int(getattr(file, "telegram_parts", len(file_parts))),
+                channels=int(getattr(file, "channels", len({p.channel_id for p in file_parts}))),
+                parts=file_parts,
+            )
+        )
+    return plan
+
+
+def _validate_purge_plan(parts: Sequence[Any], plan: Sequence[_PurgeFilePlan]) -> None:
+    planned_parts = sum(len(file.parts) for file in plan)
+    if planned_parts != len(parts):
+        raise RuntimeError(
+            "purge plan does not cover all Telegram parts: "
+            f"planned={planned_parts} actual={len(parts)}"
+        )
+
+
+async def _purge_file_op(fs: FileSystem, file: _PurgeFilePlan) -> None:
+    if fs._gateway is None:
+        raise RuntimeError(f"no gateway available for purge file {file.path}")
+    await _delete_purge_file_plan(fs._gateway, file)
+
+
+async def _delete_purge_file_plans(
+    gateway: Any, files: Sequence[_PurgeFilePlan]
+) -> None:
+    for file in files:
+        await _delete_purge_file_plan(gateway, file)
+
+
+async def _delete_purge_file_plan(gateway: Any, file: _PurgeFilePlan) -> None:
+    log.info(
+        "[purge] deleting file node=%s path=%s telegram_parts=%d",
+        file.file_id,
+        file.path,
+        len(file.parts),
+    )
+    try:
+        await _delete_purge_parts(gateway, file.parts)
+    except Exception:
+        log.exception(
+            "[purge] failed deleting file node=%s path=%s telegram_parts=%d",
+            file.file_id,
+            file.path,
+            len(file.parts),
+        )
+        raise
+
+
+async def _delete_purge_parts(gateway: Any, parts: Sequence[PartRecord]) -> None:
+    """Strict Telegram cleanup for purge.
+
+    Move cleanup is best-effort because the moved copy is already durable. Purge
+    is different: once DB rows are removed there is no reliable retry list for
+    Telegram messages left behind.
+    """
+    for part in parts:
+        try:
+            await gateway.delete_message(part.channel_id, part.message_id)
+        except Exception:
+            log.exception(
+                "[purge] failed deleting Telegram message %s in channel %s",
+                part.message_id,
+                part.channel_id,
+            )
+            raise
 
 
 def _raise_first_error(results: list) -> None:
@@ -1108,3 +1368,7 @@ def _log_failures(results: list, operation: str) -> None:
             "[%s] %d of %d item(s) failed (best-effort): %s",
             operation, len(errors), len(results), errors[0],
         )
+
+
+def _path_depth(path: str) -> int:
+    return 0 if not path else path.count("/") + 1

@@ -7,6 +7,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 
 import { api } from '../api/client'
+import { FolderIcon } from './Icons'
 import { Modal } from './Modal'
 
 export function FolderPicker({
@@ -55,7 +56,8 @@ export function FolderPicker({
                 className="picker-row"
                 onClick={() => setStack([...stack, { id: f.id, name: f.name }])}
               >
-                📁 {f.name}
+                <FolderIcon className="ic" />
+                <span>{f.name}</span>
               </button>
             ))
           )}

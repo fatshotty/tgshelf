@@ -47,7 +47,9 @@ def build_pools(
     for account, client in clients:
         member = PoolMember(client=client, name=account.name, capacity=capacity)
         member.is_premium = bool(getattr(client, "is_premium", False))
-        member.max_upload_parts = int(getattr(client, "max_upload_parts", 0) or 0)
+        max_upload_parts = getattr(client, "max_upload_parts", None)
+        if max_upload_parts is not None:
+            member.max_upload_parts = int(max_upload_parts)
         (bots if account.is_bot else users).append(member)
     if not users:
         raise ServeError("at least one user account is required (upload/management)")
@@ -107,6 +109,7 @@ def build_runtime(
         uploader=uploader,
         streamer=streamer,
         gateway=write_gateway,
+        caption_template=config.caption.template,
     )
     return {
         "config": config,
@@ -131,7 +134,7 @@ async def start_clients(config: Config, write_limiter) -> list[tuple[Any, Any]]:
     from telethon import TelegramClient
     from telethon.sessions import StringSession
 
-    from tgshelf.telegram import auth
+    from tgshelf.telegram.auth import fetch_caps
     from tgshelf.telegram.client import TgClient
     from tgshelf.telegram.session_store import build_session_store
 
@@ -168,9 +171,8 @@ async def start_clients(config: Config, write_limiter) -> list[tuple[Any, Any]]:
                 log.warning("session for '%s' is not authorized; re-login", account.name)
                 await tele.disconnect()
                 continue
-            caps = None
             if not account.is_bot:
-                caps = await auth.fetch_caps(tele)
+                caps = await fetch_caps(tele)
                 await store.save(
                     account.name,
                     tele.session.save(),
@@ -195,14 +197,14 @@ async def start_clients(config: Config, write_limiter) -> list[tuple[Any, Any]]:
                 {"flood_threshold": max(0, int(config.download.chunk_timeout) - 1)}
                 if account.is_bot else {}
             )
-            client = TgClient(
+            tg_client = TgClient(
                 tele, name=account.name, rate_limiter=write_limiter,
                 tcp_connections=config.concurrent_tcp_connections, **tg_kwargs,
             )
-            if caps is not None:
-                client.is_premium = caps.is_premium
-                client.max_upload_parts = caps.max_upload_parts
-            clients.append((account, client))
+            if not account.is_bot:
+                tg_client.is_premium = caps.is_premium
+                tg_client.max_upload_parts = caps.max_upload_parts
+            clients.append((account, tg_client))
     finally:
         if store_session is not None:
             await store_session.close()
@@ -286,6 +288,7 @@ async def run_server(config: Config) -> None:
         client_pool=runtime["client_pool"],
         bot_pool=runtime["bot_pool"],
         notifier=notifier,
+        caption_template=config.caption.template,
         strm=config.strm,
         rclone=config.rclone,
         rc_registry=rc_registry,

@@ -30,6 +30,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "cat": ("print a file's contents to stdout", "C2"),
     "du": ("total size of a file or folder (recursive)", "C2"),
     "cp": ("copy files/folders", "C2"),
+    "mirror": ("mirror one virtual folder into another", "C2"),
     "mv": ("move files/folders", "C2"),
     "rm": ("delete files/folders (soft delete)", "C2"),
     "purge": ("permanently delete soft-deleted items", "C2"),
@@ -53,7 +54,19 @@ def build_parser() -> argparse.ArgumentParser:
         cmd = subparsers.add_parser(name, help=help_text)
         if name == "accounts":
             _add_accounts_subparsers(cmd)
-        elif name in ("ls", "rm", "purge", "mkdir"):
+        elif name in ("ls", "rm", "mkdir"):
+            cmd.add_argument("path", help="path of a folder or file")
+        elif name == "purge":
+            cmd.add_argument(
+                "--deleted-only",
+                action="store_true",
+                help="purge only soft-deleted nodes under the given path",
+            )
+            cmd.add_argument(
+                "--dry-run",
+                action="store_true",
+                help="show what would be purged without deleting Telegram messages or DB rows",
+            )
             cmd.add_argument("path", help="path of a folder or file")
         elif name == "search":
             cmd.add_argument("term", help="case-insensitive substring to search for")
@@ -66,14 +79,22 @@ def build_parser() -> argparse.ArgumentParser:
             cmd.add_argument("-H", "--human", action="store_true",
                              help="human-readable size (e.g. 1.2G) instead of raw bytes")
         elif name in ("cp", "mv"):
-            cmd.add_argument("src", help="source path (file or folder)")
-            cmd.add_argument("dst", help="destination folder path")
             if name == "cp":
                 cmd.add_argument(
                     "--force-copy",
                     action="store_true",
-                    help="copy even when a same-name file already exists in the destination",
-                )
+                    help="always create a new copy instead of reusing same-name files",
+            )
+            cmd.add_argument("src", help="source path (file or folder)")
+            cmd.add_argument("dst", help="destination folder path")
+        elif name == "mirror":
+            cmd.add_argument(
+                "--dry-run",
+                action="store_true",
+                help="show the mirror plan without applying it",
+            )
+            cmd.add_argument("source", help="source folder path")
+            cmd.add_argument("dest", help="destination folder path")
         elif name == "strm":
             cmd.add_argument("--source", help="drive folder to mirror (default: config strm.source)")
             cmd.add_argument("--destination", help="local output folder (default: config strm.destination)")
@@ -159,7 +180,18 @@ def _dispatch(config: Config, args: argparse.Namespace) -> int:
 
         return asyncio.run(accounts.run(config, args))
 
-    if args.command in ("mkdir", "ls", "cat", "du", "cp", "mv", "rm", "purge", "search"):
+    if args.command in (
+        "mkdir",
+        "ls",
+        "cat",
+        "du",
+        "cp",
+        "mirror",
+        "mv",
+        "rm",
+        "purge",
+        "search",
+    ):
         from tgshelf.commands import fsops
 
         return asyncio.run(fsops.run(config, args))

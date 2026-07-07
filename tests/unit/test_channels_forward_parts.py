@@ -5,7 +5,13 @@ from typing import Any
 
 import pytest
 
-from tgshelf.core.captions import logical_part_caption, logical_part_filename
+from tgshelf.core.captions import (
+    DEFAULT_CAPTION_TEMPLATE,
+    CaptionRenderContext,
+    logical_part_caption,
+    logical_part_filename,
+    render_caption,
+)
 from tgshelf.core.channels import forward_parts
 from tgshelf.core.fs import FileSystem
 from tgshelf.core.upload import PartRecord
@@ -62,6 +68,50 @@ def test_multi_part_caption_uses_one_based_three_digit_suffix():
     assert logical_part_filename("Movie.mkv", idx=0, total_parts=3) == "Movie.mkv.001"
     assert logical_part_filename("Movie.mkv", idx=1, total_parts=3) == "Movie.mkv.002"
     assert logical_part_caption("Movie.mkv", idx=2, total_parts=3) == "fileName: Movie.mkv.003"
+
+
+def test_caption_template_renders_parent_path_and_part_metadata():
+    caption = render_caption(
+        "{path}\nfileName: {filename}\npart: {part_idx}/{parts}\nsize: {size}\n{id}\n{mime}\n{channel_id}",
+        CaptionRenderContext(
+            node_id="abc123def4",
+            parent_path="/backup/movies-bk-1",
+            logical_name="Inception.mkv",
+            idx=0,
+            total_parts=2,
+            part_size=2097152,
+            mime="video/x-matroska",
+            channel_id=-100123,
+        ),
+    )
+
+    assert caption == (
+        "/backup/movies-bk-1\n"
+        "fileName: Inception.mkv.001\n"
+        "part: 1/2\n"
+        "size: 2097152\n"
+        "abc123def4\n"
+        "video/x-matroska\n"
+        "-100123"
+    )
+
+
+def test_empty_caption_template_renders_empty_caption():
+    caption = render_caption(
+        "",
+        CaptionRenderContext(
+            node_id="abc123def4",
+            parent_path="/",
+            logical_name="Movie.mkv",
+            idx=0,
+            total_parts=1,
+            part_size=123,
+            mime="video/x-matroska",
+            channel_id=-100,
+        ),
+    )
+
+    assert caption == ""
 
 
 @dataclass
@@ -134,6 +184,17 @@ class FakeRepo:
     async def parts_of(self, file_id: str) -> list[FakePart]:
         return sorted(self.parts.get(file_id, []), key=lambda part: part.idx)
 
+    async def path_of(self, node_id: str) -> str | None:
+        node = self.nodes.get(node_id)
+        if node is None:
+            return None
+        segments = []
+        current = node
+        while current.parent_id is not None:
+            segments.append(current.name)
+            current = self.nodes[current.parent_id]
+        return "/" + "/".join(reversed(segments))
+
     async def clear_parts(self, file_id: str) -> None:
         self.parts[file_id] = []
 
@@ -176,8 +237,18 @@ class RecordingGateway:
         self.caption_edits.append((channel_id, message_id, caption))
 
 
-def make_fs(repo: FakeRepo, gateway: RecordingGateway) -> FileSystem:
-    return FileSystem(repo, master_channel=-100, gateway=gateway)
+def make_fs(
+    repo: FakeRepo,
+    gateway: RecordingGateway,
+    *,
+    caption_template: str = DEFAULT_CAPTION_TEMPLATE,
+) -> FileSystem:
+    return FileSystem(
+        repo,
+        master_channel=-100,
+        gateway=gateway,
+        caption_template=caption_template,
+    )
 
 
 @pytest.mark.asyncio
@@ -201,6 +272,67 @@ async def test_rename_syncs_telegram_captions_without_changing_original_filename
         "Physical Old.mkv.001",
         "Physical Old.mkv.002",
     ]
+
+
+@pytest.mark.asyncio
+async def test_rename_skips_caption_sync_when_template_does_not_depend_on_changed_values():
+    repo = FakeRepo()
+    gateway = RecordingGateway()
+    repo.nodes["file"] = FakeNode(id="file", name="Old.mkv", size=20)
+    repo.parts["file"] = [
+        FakePart("file", 0, -100, 11, 101, 20, "Physical Old.mkv"),
+    ]
+
+    node = await make_fs(repo, gateway, caption_template="{path}").rename("file", "New.mkv")
+
+    assert node.name == "New.mkv"
+    assert gateway.caption_edits == []
+
+
+@pytest.mark.asyncio
+async def test_rename_uses_caption_template_with_parent_path_and_part_size():
+    repo = FakeRepo()
+    gateway = RecordingGateway()
+    repo.nodes["root"] = FakeNode(id="root", name="", parent_id=None, is_folder=True)
+    repo.nodes["backup"] = FakeNode(id="backup", name="backup", parent_id="root", is_folder=True)
+    repo.nodes["file"] = FakeNode(
+        id="file", name="Old.mkv", parent_id="backup", size=30, mime="video/x-matroska"
+    )
+    repo.parts["file"] = [
+        FakePart("file", 0, -100, 11, 101, 10, "Physical Old.mkv.001"),
+        FakePart("file", 1, -100, 12, 102, 20, "Physical Old.mkv.002"),
+    ]
+
+    await make_fs(
+        repo,
+        gateway,
+        caption_template="{path}\nfileName: {filename}\npart: {part_idx}/{parts}\nsize: {size}",
+    ).rename("file", "New.mkv")
+
+    assert gateway.caption_edits == [
+        (-100, 11, "/backup\nfileName: New.mkv.001\npart: 1/2\nsize: 10"),
+        (-100, 12, "/backup\nfileName: New.mkv.002\npart: 2/2\nsize: 20"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_set_mime_syncs_caption_when_template_depends_on_mime():
+    repo = FakeRepo()
+    gateway = RecordingGateway()
+    repo.nodes["root"] = FakeNode(id="root", name="", parent_id=None, is_folder=True)
+    repo.nodes["file"] = FakeNode(
+        id="file", name="Movie.mkv", parent_id="root", size=20, mime="video/x-matroska"
+    )
+    repo.parts["file"] = [
+        FakePart("file", 0, -100, 11, 101, 20, "Movie.mkv"),
+    ]
+
+    node = await make_fs(repo, gateway, caption_template="{mime}").set_mime(
+        "file", "video/x-msvideo"
+    )
+
+    assert node.mime == "video/x-msvideo"
+    assert gateway.caption_edits == [(-100, 11, "video/x-msvideo")]
 
 
 @pytest.mark.asyncio

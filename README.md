@@ -19,9 +19,9 @@ aiohttp APIs, HTTP download endpoints, WebDAV/rclone, and a React Web UI.
   parity, ETag, 304, and 416 handling.
 - Parallel downloads through multiple bots or user accounts, with failover,
   cooldowns, and optional user-account fallback.
-- Filesystem operations: create folders, rename, move, copy, soft delete,
-  restore, purge, search, recursive size, merge parts, split parts, and reorder
-  parts.
+- Filesystem operations: create folders, rename, move, copy, mirror, soft
+  delete, restore, purge, search, recursive size, merge parts, split parts, and
+  reorder parts.
 - CLI workflows for accounts/sessions, filesystem operations, sync, download,
   `.strm` generation, and bot checks.
 - Web UI for browsing, search, metrics, tree management, inline text editing,
@@ -377,9 +377,17 @@ tgshelf --config config.yaml search readme
 tgshelf --config config.yaml du -H /folder/sub-folder
 tgshelf --config config.yaml cat /notes/readme.txt
 tgshelf --config config.yaml cp /notes/readme.txt /archive
+tgshelf --config config.yaml cp --force-copy /notes/readme.txt /archive
+tgshelf --config config.yaml cp '/media/movies/*' /archive/movies
 tgshelf --config config.yaml mv /archive/readme.txt /folder/sub-folder
 tgshelf --config config.yaml rm /notes/readme.txt
 tgshelf --config config.yaml purge /notes/readme.txt
+
+# Mirror one virtual folder into another. The destination root must already
+# exist. Source contents win: missing entries are copied, changed entries are
+# replaced, and destination-only entries are soft-deleted.
+tgshelf --config config.yaml mirror /media/movies /backup/movies-bk-1
+tgshelf --config config.yaml mirror --dry-run /media/movies /backup/movies-bk-1
 
 # Download a file or folder. Existing partial files are resumed unless
 # --overwrite is used explicitly.

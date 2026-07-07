@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import mimetypes
 import re
-from typing import Any, AsyncIterator, Callable, Sequence
+from typing import Any, AsyncIterator, Callable, Iterable, Sequence
 
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
@@ -21,6 +21,7 @@ from tgshelf.constants import ROOT_ID
 from tgshelf.core import channels
 from tgshelf.core.captions import logical_part_caption
 from tgshelf.core.download import RangeNotSatisfiable, StreamPlan
+from tgshelf.core.mirror import MirrorPlan, build_mirror_plan
 from tgshelf.core.upload import PartRecord
 from tgshelf.db.models import Node
 from tgshelf.db.repo import DuplicateNameError, NodeRepo
@@ -264,6 +265,92 @@ class FileSystem:
                 f"cannot restore {node_id}: an active sibling has the same name"
             ) from exc
 
+    async def mirror(self, source_id: str, dest_id: str, *, dry_run: bool = False) -> MirrorPlan:
+        source = await self.repo.get(source_id)
+        if source is None or not source.is_folder or source.state != "ACTIVE":
+            raise NotAReadableFile(f"source folder {source_id} not found")
+        dest = await self.repo.get(dest_id)
+        if dest is None or not dest.is_folder or dest.state != "ACTIVE":
+            raise NotAReadableFile(f"destination folder {dest_id} not found")
+        if source.id == dest.id:
+            raise ValueError("source and destination cannot be the same folder")
+
+        source_ancestors = await self.repo.ancestors(source.id)
+        dest_ancestors = await self.repo.ancestors(dest.id)
+        if any(node.id == source.id for node in dest_ancestors) or any(
+            node.id == dest.id for node in source_ancestors
+        ):
+            raise ValueError("source and destination cannot be inside each other")
+
+        plan = await build_mirror_plan(self.repo, source, dest)
+        log.info(
+            "[mirror] planned source=%s dest=%s actions=%d dry_run=%s",
+            source_id, dest_id, len(plan.actions), dry_run,
+        )
+        if dry_run:
+            return plan
+
+        await self._apply_mirror_plan(plan)
+        log.info(
+            "[mirror] applied source=%s dest=%s actions=%d",
+            source_id, dest_id, len(plan.actions),
+        )
+        return plan
+
+    async def _apply_mirror_plan(self, plan: MirrorPlan) -> None:
+        delete_kinds = {
+            "delete_extra",
+            "replace_file",
+            "replace_folder_with_file",
+            "replace_file_with_folder",
+        }
+        for action in sorted(
+            [
+                action for action in plan.actions
+                if action.kind in delete_kinds and action.dest_id
+            ],
+            key=lambda action: (-_path_depth(action.path), action.path.lower()),
+        ):
+            await self.delete(action.dest_id, purge=False)
+
+        for action in sorted(
+            [
+                action for action in plan.actions
+                if action.kind in {"create_folder", "replace_file_with_folder"}
+            ],
+            key=lambda action: (_path_depth(action.path), action.path.lower()),
+        ):
+            parent_id = await self._mirror_parent_id(plan.dest_id, action.path)
+            name = action.path.rsplit("/", 1)[-1]
+            await self._ensure_folder(parent_id, name)
+
+        for action in sorted(
+            [
+                action for action in plan.actions
+                if action.kind in {"copy_file", "replace_file", "replace_folder_with_file"}
+            ],
+            key=lambda action: (_path_depth(action.path), action.path.lower()),
+        ):
+            if action.source_id is None:
+                raise NotAReadableFile(f"mirror source for {action.path} not found")
+            source = await self.repo.get(action.source_id)
+            if source is None or source.is_folder:
+                raise NotAReadableFile(f"source file {action.source_id} not found")
+            parent_id = await self._mirror_parent_id(plan.dest_id, action.path)
+            await self._copy_file(source, parent_id)
+
+    async def _mirror_parent_id(self, dest_root_id: str, action_path: str) -> str:
+        parent_path = action_path.rpartition("/")[0]
+        if not parent_path:
+            return dest_root_id
+        parent_id = dest_root_id
+        for segment in parent_path.split("/"):
+            node = await self.repo.get_child_by_name(parent_id, segment, state="ACTIVE")
+            if node is None or not node.is_folder:
+                raise NotAReadableFile(f"mirror destination folder {parent_path} not found")
+            parent_id = node.id
+        return parent_id
+
     # -- move ---------------------------------------------------------------
 
     async def ensure_move_target(self, new_parent_id: str) -> None:
@@ -363,7 +450,13 @@ class FileSystem:
 
     # -- copy ---------------------------------------------------------------
 
-    async def copy(self, node_id: str, new_parent_id: str) -> Node:
+    async def copy(
+        self,
+        node_id: str,
+        new_parent_id: str,
+        *,
+        force_copy: bool = False,
+    ) -> Node:
         """Copy a node under `new_parent_id`, leaving the source untouched.
         Telegram messages are duplicated so the copy owns its own messages."""
         node = await self.repo.get(node_id)
@@ -371,11 +464,55 @@ class FileSystem:
             raise NotAReadableFile(f"node {node_id} not found")
         await self.ensure_move_target(new_parent_id)
         if node.is_folder:
-            return await self._copy_folder(node, new_parent_id)
+            return await self._copy_folder(node, new_parent_id, force_copy=force_copy)
+        existing = await self._existing_file(new_parent_id, node.name)
+        log.debug(
+            "[copy] requested file '%s' (%s) -> parent %s force_copy=%s",
+            node.name, node.id, new_parent_id, force_copy,
+        )
+        if existing is not None and not force_copy:
+            log.debug(
+                "[copy] skip existing file '%s' (%s) in parent %s for source %s",
+                existing.name, existing.id, new_parent_id, node.id,
+            )
+            return existing
         # single file: also via the executor (solution B) -> account-leased
-        results = await self._fan_out([(node_id, new_parent_id)], _copy_op)
+        results = await self._fan_out([(node_id, new_parent_id, force_copy)], _copy_op)
         new_id = _first_result(results)
         return await self.repo.get(new_id)
+
+    async def copy_files(
+        self,
+        node_ids: Iterable[str],
+        new_parent_id: str,
+        *,
+        force_copy: bool = False,
+    ) -> list[Node]:
+        await self.ensure_move_target(new_parent_id)
+        pairs: list[tuple[str, str, bool]] = []
+        reused: list[Node] = []
+        existing_files = await self._existing_files_by_name(new_parent_id)
+        for node_id in node_ids:
+            node = await self.repo.get(node_id)
+            if node is None or node.is_folder:
+                continue
+            existing = existing_files.get(node.name.lower())
+            log.debug(
+                "[copy] requested file '%s' (%s) -> parent %s force_copy=%s",
+                node.name, node.id, new_parent_id, force_copy,
+            )
+            if existing is not None and not force_copy:
+                log.debug(
+                    "[copy] skip existing file '%s' (%s) in parent %s for source %s",
+                    existing.name, existing.id, new_parent_id, node.id,
+                )
+                reused.append(existing)
+                continue
+            pairs.append((node.id, new_parent_id, force_copy))
+        results = await self._fan_out(pairs, _copy_op) if pairs else []
+        _raise_first_error(results)
+        created = [await self.repo.get(node_id) for node_id in results]
+        return reused + [node for node in created if node is not None]
 
     async def _dedup_name(self, parent_id: str, name: str, *, is_folder: bool) -> str:
         children = await self.repo.children(parent_id)
@@ -392,7 +529,17 @@ class FileSystem:
             i += 1
         return f"{stem} - {i}{suffix}"
 
-    async def _copy_file(self, src: Node, dst_parent_id: str) -> Node:
+    async def _existing_file(self, parent_id: str, name: str) -> Node | None:
+        existing = await self.repo.get_child_by_name(parent_id, name, state="ACTIVE")
+        if existing is not None and not existing.is_folder:
+            return existing
+        return None
+
+    async def _existing_files_by_name(self, parent_id: str) -> dict[str, Node]:
+        children = await self.repo.children(parent_id, files_only=True)
+        return {child.name.lower(): child for child in children}
+
+    async def _copy_file(self, src: Node, dst_parent_id: str, *, force_copy: bool = False) -> Node:
         dest_channel = await self.effective_channel(dst_parent_id)
         name = await self._dedup_name(dst_parent_id, src.name, is_folder=False)
 
@@ -403,6 +550,10 @@ class FileSystem:
                 channel_id=dest_channel, state="ACTIVE", size=len(content), content=content,
             )
             await self.repo.session.commit()
+            log.info(
+                "[copy] copied file '%s' (%s) -> parent %s as '%s' (%s) force_copy=%s",
+                src.name, src.id, dst_parent_id, new.name, new.id, force_copy,
+            )
             return await self.repo.get(new.id)
 
         src_parts = await self.repo.parts_of(src.id)
@@ -434,6 +585,10 @@ class FileSystem:
             new.id, state="ACTIVE", size=sum(p.size for p in new_parts)
         )
         await self.repo.session.commit()
+        log.info(
+            "[copy] copied file '%s' (%s) -> parent %s as '%s' (%s) force_copy=%s",
+            src.name, src.id, dst_parent_id, name, new.id, force_copy,
+        )
         return await self.repo.get(new.id)
 
     async def _ensure_folder(self, parent_id: str, name: str) -> str:
@@ -448,7 +603,13 @@ class FileSystem:
         await self.repo.session.commit()
         return created.id
 
-    async def _copy_folder(self, src: Node, dst_parent_id: str) -> Node:
+    async def _copy_folder(
+        self,
+        src: Node,
+        dst_parent_id: str,
+        *,
+        force_copy: bool = False,
+    ) -> Node:
         mapping = {src.id: await self._ensure_folder(dst_parent_id, src.name)}
         descendants = await self.repo.subtree(src.id, state="ACTIVE")  # shallow-first
 
@@ -458,7 +619,26 @@ class FileSystem:
                 mapping[node.id] = await self._ensure_folder(mapping[node.parent_id], node.name)
 
         # pass 2: copy the files into their mapped folders (fanned out)
-        pairs = [(n.id, mapping[n.parent_id]) for n in descendants if not n.is_folder]
+        existing_by_parent: dict[str, dict[str, Node]] = {}
+        pairs: list[tuple[str, str, bool]] = []
+        for node in descendants:
+            if node.is_folder:
+                continue
+            parent_id = mapping[node.parent_id]
+            if parent_id not in existing_by_parent:
+                existing_by_parent[parent_id] = await self._existing_files_by_name(parent_id)
+            existing = existing_by_parent[parent_id].get(node.name.lower())
+            log.debug(
+                "[copy] requested file '%s' (%s) -> parent %s force_copy=%s",
+                node.name, node.id, parent_id, force_copy,
+            )
+            if existing is not None and not force_copy:
+                log.debug(
+                    "[copy] skip existing file '%s' (%s) in parent %s for source %s",
+                    existing.name, existing.id, parent_id, node.id,
+                )
+                continue
+            pairs.append((node.id, parent_id, force_copy))
         _log_failures(await self._fan_out(pairs, _copy_op), "copy")
         return await self.repo.get(mapping[src.id])
 
@@ -908,12 +1088,12 @@ async def _reroute_op(fs: FileSystem, node_id: str) -> None:
         await fs._reroute_file(file)
 
 
-async def _copy_op(fs: FileSystem, pair: tuple[str, str]) -> str | None:
-    src_id, dst_parent_id = pair
+async def _copy_op(fs: FileSystem, pair: tuple[str, str, bool]) -> str | None:
+    src_id, dst_parent_id, force_copy = pair
     src = await fs.get(src_id)
     if src is None or src.is_folder:
         return None
-    new = await fs._copy_file(src, dst_parent_id)
+    new = await fs._copy_file(src, dst_parent_id, force_copy=force_copy)
     return new.id
 
 
@@ -937,3 +1117,7 @@ def _log_failures(results: list, operation: str) -> None:
             "[%s] %d of %d item(s) failed (best-effort): %s",
             operation, len(errors), len(results), errors[0],
         )
+
+
+def _path_depth(path: str) -> int:
+    return 0 if not path else path.count("/") + 1

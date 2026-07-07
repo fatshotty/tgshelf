@@ -1,5 +1,13 @@
 # TODO
 
+## Mirror Follow Ups
+
+- Consider an explicit option to create the missing destination root for
+  `mirror`; the first implementation intentionally fails clearly when the
+  destination folder does not already exist.
+- Consider a Web UI entry point for the existing virtual-to-virtual mirror
+  workflow.
+
 ## Telegram Caption Consistency
 
 - Track and implement Telegram caption updates when a Telegram-backed file is

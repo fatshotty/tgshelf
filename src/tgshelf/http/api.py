@@ -52,7 +52,14 @@ def _spawn_background(app: web.Application, coro) -> None:
     task.add_done_callback(tasks.discard)
 
 
-async def _run_op_background(rt: dict, op: str, node_id: str, parent_id: str) -> None:
+async def _run_op_background(
+    rt: dict,
+    op: str,
+    node_id: str,
+    parent_id: str,
+    *,
+    force_copy: bool = False,
+) -> None:
     log.info("[bg] starting %s of folder %s -> %s", op, node_id, parent_id)
     try:
         async with rt["session_factory"]() as session:
@@ -60,7 +67,7 @@ async def _run_op_background(rt: dict, op: str, node_id: str, parent_id: str) ->
             if op == "move":
                 await fs.move(node_id, parent_id)
             else:
-                await fs.copy(node_id, parent_id)
+                await fs.copy(node_id, parent_id, force_copy=force_copy)
         log.info("[bg] %s of folder %s -> %s completed", op, node_id, parent_id)
     except Exception:  # noqa: BLE001 - fire-and-forget: log, never crash the loop
         log.exception("[bg] %s of folder %s -> %s FAILED", op, node_id, parent_id)
@@ -273,6 +280,7 @@ async def copy_node(request: web.Request) -> web.Response:
     parent_id = body.get("parent_id")
     if not parent_id:
         return _bad_request("'parent_id' is required")
+    force_copy = bool(body.get("force_copy", False))
     async with open_fs(request) as fs:
         node = await fs.get(node_id)
         if node is None:
@@ -280,12 +288,22 @@ async def copy_node(request: web.Request) -> web.Response:
         await fs.ensure_move_target(parent_id)  # sync 400/404 before any 202
         if node.is_folder:  # may take hours -> fire-and-forget, respond now
             log.info("copy folder %s -> %s: accepted (background)", node_id, parent_id)
-            _spawn_background(request.app, _run_op_background(request.app[RUNTIME], "copy", node_id, parent_id))
+            _spawn_background(
+                request.app,
+                _run_op_background(
+                    request.app[RUNTIME],
+                    "copy",
+                    node_id,
+                    parent_id,
+                    force_copy=force_copy,
+                ),
+            )
             return web.json_response(
                 {"status": "accepted", "operation": "copy", "node_id": node_id}, status=202
             )
         log.info("copy file %s -> %s", node_id, parent_id)
-        return web.json_response(node_to_dict(await fs.copy(node_id, parent_id)), status=201)
+        copied = await fs.copy(node_id, parent_id, force_copy=force_copy)
+        return web.json_response(node_to_dict(copied), status=201)
 
 
 async def merge_node(request: web.Request) -> web.Response:

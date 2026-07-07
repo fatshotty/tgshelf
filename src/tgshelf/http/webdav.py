@@ -302,7 +302,7 @@ async def _copy(request: web.Request, fs: FileSystem) -> web.Response:
     created = existing is None
     if existing is not None:
         await fs.delete(existing.id, purge=False)
-    new = await fs.copy(src.id, dest_parent.id)  # dedups only on a live collision
+    new = await fs.copy(src.id, dest_parent.id, force_copy=True)
     if new.name != dest_name:
         await fs.rename(new.id, dest_name)
     log.info("[webdav] COPY %s → %s", _drive_path(request), dest_name)

@@ -8,6 +8,7 @@ against a fake-backed fs; `run()` only wires config → fs.
 
 from __future__ import annotations
 
+import logging
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -15,8 +16,11 @@ from typing import Callable
 
 from tgshelf.config import Config
 from tgshelf.core.fs import FileSystem
+from tgshelf.core.mirror import MirrorPlan
 from tgshelf.db.engine import create_engine, create_session_factory
 from tgshelf.db.repo import NodeRepo
+
+log = logging.getLogger("tgshelf.fsops")
 
 
 def _err(msg: str) -> int:
@@ -168,11 +172,95 @@ async def _do_mv(fs: FileSystem, src: str, dst: str) -> int:
     return await _move_or_copy(fs, src, dst, copy=False)
 
 
-async def _do_cp(fs: FileSystem, src: str, dst: str) -> int:
-    return await _move_or_copy(fs, src, dst, copy=True)
+async def _do_cp(fs: FileSystem, src: str, dst: str, *, force_copy: bool = False) -> int:
+    if "*" in dst:
+        return _err("wildcard is only supported in the source path")
+    if src.endswith("/*"):
+        base_path = src[:-2].rstrip("/") or "/"
+        source = await fs.resolve(base_path)
+        if source is None:
+            return _err(f"source not found: {base_path}")
+        if not source.is_folder:
+            return _err(f"source is not a folder: {base_path}")
+        dest = await fs.resolve(dst)
+        if dest is None:
+            return _err(f"destination not found: {dst}")
+        if not dest.is_folder:
+            return _err(f"destination is not a folder: {dst}")
+
+        log.debug("[copy] cli src=%s dst=%s force_copy=%s", src, dst, force_copy)
+        children = await fs.list_children(source.id)
+        log.debug(
+            "[copy] cli copying %d child item(s) from %s into %s",
+            len(children), src, dst,
+        )
+        file_ids = [node.id for node in children if not node.is_folder]
+        folder_ids = [node.id for node in children if node.is_folder]
+        if file_ids:
+            await fs.copy_files(file_ids, dest.id, force_copy=force_copy)
+        for folder_id in folder_ids:
+            await fs.copy(folder_id, dest.id, force_copy=force_copy)
+        log.debug("[copy] cli completed src=%s dst=%s force_copy=%s", src, dst, force_copy)
+        print(f"copied {src} -> {dst}")
+        return 0
+    if "*" in src:
+        return _err("wildcard is only supported as a trailing source /*")
+    return await _move_or_copy(fs, src, dst, copy=True, force_copy=force_copy)
 
 
-async def _move_or_copy(fs: FileSystem, src: str, dst: str, *, copy: bool) -> int:
+async def _do_mirror(fs: FileSystem, source_path: str, dest_path: str, *, dry_run: bool) -> int:
+    source = await fs.resolve(source_path)
+    if source is None:
+        return _err(f"source not found: {source_path}")
+    if not source.is_folder:
+        return _err(f"source is not a folder: {source_path}")
+    dest = await fs.resolve(dest_path)
+    if dest is None:
+        return _err(f"destination not found: {dest_path}")
+    if not dest.is_folder:
+        return _err(f"destination is not a folder: {dest_path}")
+
+    log.info("[mirror] cli source=%s dest=%s dry_run=%s", source_path, dest_path, dry_run)
+    plan = await fs.mirror(source.id, dest.id, dry_run=dry_run)
+    counts = _mirror_counts(plan)
+    print(f"mirror {source_path} -> {dest_path}")
+    print(
+        "created={created} copied={copied} replaced={replaced} deleted={deleted} "
+        "skipped={skipped} dry_run={dry_run}".format(
+            **counts,
+            dry_run=str(dry_run).lower(),
+        )
+    )
+    if dry_run:
+        for action in plan.actions:
+            if action.kind != "skip":
+                print(f"{action.kind}\t{action.path}")
+    return 0
+
+
+def _mirror_counts(plan: MirrorPlan) -> dict[str, int]:
+    replaced_kinds = {
+        "replace_file",
+        "replace_file_with_folder",
+        "replace_folder_with_file",
+    }
+    return {
+        "created": plan.count("create_folder") + plan.count("replace_file_with_folder"),
+        "copied": plan.count("copy_file"),
+        "replaced": sum(plan.count(kind) for kind in replaced_kinds),
+        "deleted": plan.count("delete_extra"),
+        "skipped": plan.count("skip"),
+    }
+
+
+async def _move_or_copy(
+    fs: FileSystem,
+    src: str,
+    dst: str,
+    *,
+    copy: bool,
+    force_copy: bool = False,
+) -> int:
     source = await fs.resolve(src)
     if source is None:
         return _err(f"source not found: {src}")
@@ -182,7 +270,7 @@ async def _move_or_copy(fs: FileSystem, src: str, dst: str, *, copy: bool) -> in
     if not dest.is_folder:
         return _err(f"destination is not a folder: {dst}")
     if copy:
-        await fs.copy(source.id, dest.id)
+        await fs.copy(source.id, dest.id, force_copy=force_copy)
         print(f"copied {src} -> {dst}")
     else:
         await fs.move(source.id, dest.id)
@@ -283,5 +371,9 @@ async def run(config: Config, args) -> int:
             return await _do_mv(fs, args.src, args.dst)
     if cmd == "cp":
         async with _telegram_fs(config) as fs:
-            return await _do_cp(fs, args.src, args.dst)
+            return await _do_cp(fs, args.src, args.dst, force_copy=args.force_copy)
+    if cmd == "mirror":
+        context = _db_fs if args.dry_run else _telegram_fs
+        async with context(config) as fs:
+            return await _do_mirror(fs, args.source, args.dest, dry_run=args.dry_run)
     return _err(f"unknown command {cmd}")

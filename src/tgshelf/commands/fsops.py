@@ -159,12 +159,15 @@ async def _do_rm(fs: FileSystem, path: str) -> int:
     return 0
 
 
-async def _do_purge(fs: FileSystem, path: str) -> int:
+async def _do_purge(fs: FileSystem, path: str, *, deleted_only: bool = False) -> int:
     node = await _resolve_any(fs, path)
     if node is None:
         return _err(f"path not found: {path}")
-    await fs.delete(node.id, purge=True)
-    print(f"purged {path}")
+    await fs.delete(node.id, purge=True, deleted_only=deleted_only)
+    if deleted_only:
+        print(f"purged deleted-only {path}")
+    else:
+        print(f"purged {path}")
     return 0
 
 
@@ -365,7 +368,7 @@ async def run(config: Config, args) -> int:
             return await _do_rm(fs, args.path)
     if cmd == "purge":
         async with _telegram_fs(config) as fs:
-            return await _do_purge(fs, args.path)
+            return await _do_purge(fs, args.path, deleted_only=args.deleted_only)
     if cmd == "mv":
         async with _telegram_fs(config) as fs:
             return await _do_mv(fs, args.src, args.dst)

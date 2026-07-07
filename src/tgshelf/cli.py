@@ -54,7 +54,14 @@ def build_parser() -> argparse.ArgumentParser:
         cmd = subparsers.add_parser(name, help=help_text)
         if name == "accounts":
             _add_accounts_subparsers(cmd)
-        elif name in ("ls", "rm", "purge", "mkdir"):
+        elif name in ("ls", "rm", "mkdir"):
+            cmd.add_argument("path", help="path of a folder or file")
+        elif name == "purge":
+            cmd.add_argument(
+                "--deleted-only",
+                action="store_true",
+                help="purge only soft-deleted nodes under the given path",
+            )
             cmd.add_argument("path", help="path of a folder or file")
         elif name == "search":
             cmd.add_argument("term", help="case-insensitive substring to search for")

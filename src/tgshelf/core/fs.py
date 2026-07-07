@@ -249,11 +249,40 @@ class FileSystem:
         # the subtree's DELETED nodes — the ACTIVE tree (and the root) survive. It
         # is the manual cleanup of a backup's discards after a mirror run.
         state = "DELETED" if deleted_only else None
+        node = await self.repo.get(node_id)
         parts = await self.repo.parts_in_subtree(node_id, state=state)
+        log.info(
+            "[purge] starting node=%s name=%s deleted_only=%s telegram_parts=%d gateway=%s",
+            node_id,
+            getattr(node, "name", "?"),
+            deleted_only,
+            len(parts),
+            "yes" if self._gateway is not None else "no",
+        )
         if parts and self._gateway is not None:
-            await channels.delete_originals(self._gateway, parts, notifier=self._notifier)
+            channels_count = len({part.channel_id for part in parts})
+            log.info(
+                "[purge] deleting %d Telegram-backed part messages across %d channels",
+                len(parts),
+                channels_count,
+            )
+            await _delete_purge_parts(self._gateway, parts)
+        elif parts:
+            log.warning("[purge] no gateway configured; %d Telegram messages were not deleted", len(parts))
+        log.info(
+            "[purge] deleting database subtree node=%s state=%s",
+            node_id,
+            state or "ANY",
+        )
         await self.repo.purge_subtree(node_id, state=state)
         await self.repo.session.commit()
+        log.info(
+            "[purge] done node=%s name=%s deleted_only=%s telegram_parts=%d",
+            node_id,
+            getattr(node, "name", "?"),
+            deleted_only,
+            len(parts),
+        )
 
     async def restore(self, node_id: str) -> None:
         try:
@@ -1095,6 +1124,25 @@ async def _copy_op(fs: FileSystem, pair: tuple[str, str, bool]) -> str | None:
         return None
     new = await fs._copy_file(src, dst_parent_id, force_copy=force_copy)
     return new.id
+
+
+async def _delete_purge_parts(gateway: Any, parts: Sequence[PartRecord]) -> None:
+    """Strict Telegram cleanup for purge.
+
+    Move cleanup is best-effort because the moved copy is already durable. Purge
+    is different: once DB rows are removed there is no reliable retry list for
+    Telegram messages left behind.
+    """
+    for part in parts:
+        try:
+            await gateway.delete_message(part.channel_id, part.message_id)
+        except Exception:
+            log.exception(
+                "[purge] failed deleting Telegram message %s in channel %s",
+                part.message_id,
+                part.channel_id,
+            )
+            raise
 
 
 def _raise_first_error(results: list) -> None:

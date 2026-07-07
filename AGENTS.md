@@ -32,6 +32,21 @@ user explicitly approves a change.
   The user normally reviews and commits completed points.
 - Keep unrelated refactors out of task work.
 
+## Branch Policy
+
+- `main` is a protected release branch. Never write feature code directly on
+  `main`, and never create direct code commits on `main`.
+- `main` may be updated only by merging from `develop` or by merging a
+  `hotfix/...` branch that was created from `main`.
+- Normal feature work must start from `develop` and use branch names under
+  `feature/...`.
+- Emergency release fixes must start from `main` and use branch names under
+  `hotfix/...`.
+- The only branch that accepts direct feature-code commits is `develop`, plus
+  `feature/...` branches created from `develop`.
+- Before starting any code change, verify the current branch. If the current
+  branch is `main`, switch away before editing files.
+
 ## Language
 
 - Write code comments, logs, exceptions, diagnostics, commit messages, branch

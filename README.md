@@ -184,6 +184,16 @@ v0.1.1
 v0.2.0
 ```
 
+Branch policy:
+
+- `main` is merge-only. Do not write feature code or create direct code commits
+  on `main`.
+- `develop` is the integration branch for normal development.
+- Feature branches must be created from `develop` and named `feature/...`.
+- Hotfix branches must be created from `main` and named `hotfix/...`.
+- Update `main` only by merging `develop` for releases, or by merging a
+  `hotfix/...` branch for emergency patch releases.
+
 ## Configuration
 
 `config.yaml` supports environment-variable references in any scalar string.

@@ -8,6 +8,7 @@ unique index uq_nodes_parent_lower_name_active.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Sequence
 
 from sqlalchemy import Select, bindparam, delete, func, literal, select, text, update
@@ -25,6 +26,15 @@ _ID_RETRIES = 3
 
 class DuplicateNameError(Exception):
     """An ACTIVE sibling with the same (case-insensitive) name already exists."""
+
+
+@dataclass(frozen=True)
+class PurgeFileSummary:
+    file_id: str
+    name: str
+    path: str
+    telegram_parts: int
+    channels: int
 
 
 class NodeRepo:
@@ -252,6 +262,86 @@ class NodeRepo:
             {"root": root_id, "state": state},
         )
         return [Part(**row._mapping) for row in result]
+
+    async def purge_file_summaries(
+        self, root_id: str, *, state: str | None = None
+    ) -> Sequence[PurgeFileSummary]:
+        """Files with Telegram parts in a purge scope, including full paths.
+
+        This is intentionally batched: purge logging needs per-file visibility,
+        but calling path_of() once per file would add avoidable round trips on
+        large cleanup runs.
+        """
+        node_filter = "" if state is None else " AND nodes.state = :state"
+        result = await self.session.execute(
+            text(
+                f"""
+                WITH RECURSIVE sub AS (
+                  SELECT id FROM nodes WHERE id = :root
+                  UNION ALL
+                  SELECT n.id FROM nodes n JOIN sub ON n.parent_id = sub.id
+                ),
+                files AS (
+                  SELECT
+                    nodes.id,
+                    nodes.name,
+                    COUNT(parts.*)::int AS telegram_parts,
+                    COUNT(DISTINCT parts.channel_id)::int AS channels
+                  FROM nodes
+                  JOIN parts ON parts.file_id = nodes.id
+                  WHERE nodes.id IN (SELECT id FROM sub){node_filter}
+                  GROUP BY nodes.id, nodes.name
+                ),
+                anc AS (
+                  SELECT
+                    files.id AS file_id,
+                    nodes.id,
+                    nodes.parent_id,
+                    nodes.name,
+                    0 AS depth
+                  FROM files
+                  JOIN nodes ON nodes.id = files.id
+                  UNION ALL
+                  SELECT
+                    anc.file_id,
+                    nodes.id,
+                    nodes.parent_id,
+                    nodes.name,
+                    anc.depth + 1
+                  FROM nodes
+                  JOIN anc ON nodes.id = anc.parent_id
+                )
+                SELECT
+                  files.id AS file_id,
+                  files.name AS name,
+                  COALESCE(
+                    '/' || NULLIF(
+                      string_agg(anc.name, '/' ORDER BY anc.depth DESC)
+                        FILTER (WHERE anc.id <> :root_id),
+                      ''
+                    ),
+                    '/'
+                  ) AS path,
+                  files.telegram_parts AS telegram_parts,
+                  files.channels AS channels
+                FROM files
+                JOIN anc ON anc.file_id = files.id
+                GROUP BY files.id, files.name, files.telegram_parts, files.channels
+                ORDER BY path
+                """
+            ),
+            {"root": root_id, "root_id": ROOT_ID, "state": state},
+        )
+        return [
+            PurgeFileSummary(
+                file_id=str(row.file_id),
+                name=str(row.name),
+                path=str(row.path),
+                telegram_parts=int(row.telegram_parts),
+                channels=int(row.channels),
+            )
+            for row in result
+        ]
 
     # -- recursive subtree state changes -----------------------------------
 

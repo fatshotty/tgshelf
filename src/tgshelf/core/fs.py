@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import mimetypes
 import re
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Iterable, Sequence
 
 from sqlalchemy import func
@@ -34,6 +35,16 @@ DEFAULT_MIME = "application/octet-stream"
 # Not a closed registry (new types appear); just rejects garbage (no slash,
 # empty side, spaces, multiple slashes).
 _MIME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9!#$&^_+.-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_+.-]*(\s*;.*)?$")
+
+
+@dataclass(frozen=True)
+class _PurgeFilePlan:
+    file_id: str
+    name: str
+    path: str
+    telegram_parts: int
+    channels: int
+    parts: tuple[Any, ...]
 
 
 def is_valid_mime(mime: str) -> bool:
@@ -250,23 +261,46 @@ class FileSystem:
         # is the manual cleanup of a backup's discards after a mirror run.
         state = "DELETED" if deleted_only else None
         node = await self.repo.get(node_id)
+        node_path = await self.repo.path_of(node_id)
         parts = await self.repo.parts_in_subtree(node_id, state=state)
+        files = await self.repo.purge_file_summaries(node_id, state=state)
+        purge_plan = _build_purge_file_plan(files, parts)
         log.info(
-            "[purge] starting node=%s name=%s deleted_only=%s telegram_parts=%d gateway=%s",
+            "[purge] starting node=%s path=%s name=%s deleted_only=%s telegram_parts=%d gateway=%s",
             node_id,
+            node_path or "?",
             getattr(node, "name", "?"),
             deleted_only,
             len(parts),
-            "yes" if self._gateway is not None else "no",
+            "yes" if self._gateway is not None or self._executor is not None else "no",
         )
-        if parts and self._gateway is not None:
+        for file_plan in purge_plan:
+            log.info(
+                "[purge] file node=%s path=%s name=%s telegram_parts=%d channels=%d",
+                file_plan.file_id,
+                file_plan.path,
+                file_plan.name,
+                file_plan.telegram_parts,
+                file_plan.channels,
+            )
+        if parts and (self._gateway is not None or self._executor is not None):
+            _validate_purge_plan(parts, purge_plan)
+        if parts and self._executor is not None:
+            channels_count = len({part.channel_id for part in parts})
+            log.info(
+                "[purge] deleting %d Telegram-backed part messages across %d channels using executor",
+                len(parts),
+                channels_count,
+            )
+            _raise_first_error(await self._executor.run(purge_plan, _purge_file_op))
+        elif parts and self._gateway is not None:
             channels_count = len({part.channel_id for part in parts})
             log.info(
                 "[purge] deleting %d Telegram-backed part messages across %d channels",
                 len(parts),
                 channels_count,
             )
-            await _delete_purge_parts(self._gateway, parts)
+            await _delete_purge_file_plans(self._gateway, purge_plan)
         elif parts:
             log.warning("[purge] no gateway configured; %d Telegram messages were not deleted", len(parts))
         log.info(
@@ -277,8 +311,9 @@ class FileSystem:
         await self.repo.purge_subtree(node_id, state=state)
         await self.repo.session.commit()
         log.info(
-            "[purge] done node=%s name=%s deleted_only=%s telegram_parts=%d",
+            "[purge] done node=%s path=%s name=%s deleted_only=%s telegram_parts=%d",
             node_id,
+            node_path or "?",
             getattr(node, "name", "?"),
             deleted_only,
             len(parts),
@@ -1124,6 +1159,74 @@ async def _copy_op(fs: FileSystem, pair: tuple[str, str, bool]) -> str | None:
         return None
     new = await fs._copy_file(src, dst_parent_id, force_copy=force_copy)
     return new.id
+
+
+def _build_purge_file_plan(files: Sequence[Any], parts: Sequence[Any]) -> list[_PurgeFilePlan]:
+    parts_by_file: dict[str, list[Any]] = {}
+    for part in parts:
+        file_id = getattr(part, "file_id", None)
+        if file_id is None:
+            continue
+        parts_by_file.setdefault(str(file_id), []).append(part)
+
+    plan: list[_PurgeFilePlan] = []
+    for file in files:
+        file_id = str(file.file_id)
+        file_parts = tuple(parts_by_file.get(file_id, ()))
+        if not file_parts:
+            continue
+        plan.append(
+            _PurgeFilePlan(
+                file_id=file_id,
+                name=str(file.name),
+                path=str(file.path),
+                telegram_parts=int(getattr(file, "telegram_parts", len(file_parts))),
+                channels=int(getattr(file, "channels", len({p.channel_id for p in file_parts}))),
+                parts=file_parts,
+            )
+        )
+    return plan
+
+
+def _validate_purge_plan(parts: Sequence[Any], plan: Sequence[_PurgeFilePlan]) -> None:
+    planned_parts = sum(len(file.parts) for file in plan)
+    if planned_parts != len(parts):
+        raise RuntimeError(
+            "purge plan does not cover all Telegram parts: "
+            f"planned={planned_parts} actual={len(parts)}"
+        )
+
+
+async def _purge_file_op(fs: FileSystem, file: _PurgeFilePlan) -> None:
+    if fs._gateway is None:
+        raise RuntimeError(f"no gateway available for purge file {file.path}")
+    await _delete_purge_file_plan(fs._gateway, file)
+
+
+async def _delete_purge_file_plans(
+    gateway: Any, files: Sequence[_PurgeFilePlan]
+) -> None:
+    for file in files:
+        await _delete_purge_file_plan(gateway, file)
+
+
+async def _delete_purge_file_plan(gateway: Any, file: _PurgeFilePlan) -> None:
+    log.info(
+        "[purge] deleting file node=%s path=%s telegram_parts=%d",
+        file.file_id,
+        file.path,
+        len(file.parts),
+    )
+    try:
+        await _delete_purge_parts(gateway, file.parts)
+    except Exception:
+        log.exception(
+            "[purge] failed deleting file node=%s path=%s telegram_parts=%d",
+            file.file_id,
+            file.path,
+            len(file.parts),
+        )
+        raise
 
 
 async def _delete_purge_parts(gateway: Any, parts: Sequence[PartRecord]) -> None:

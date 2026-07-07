@@ -20,7 +20,12 @@ from sqlalchemy.exc import IntegrityError
 
 from tgshelf.constants import ROOT_ID
 from tgshelf.core import channels
-from tgshelf.core.captions import logical_part_caption
+from tgshelf.core.captions import (
+    DEFAULT_CAPTION_TEMPLATE,
+    CaptionRenderContext,
+    caption_template_depends_on,
+    render_caption,
+)
 from tgshelf.core.download import RangeNotSatisfiable, StreamPlan
 from tgshelf.core.mirror import MirrorPlan, build_mirror_plan
 from tgshelf.core.upload import PartRecord
@@ -84,6 +89,7 @@ class FileSystem:
         min_size: int = 0,
         executor: Any = None,
         notifier: Any = None,
+        caption_template: str = DEFAULT_CAPTION_TEMPLATE,
     ):
         self.repo = repo
         self._master_channel = master_channel
@@ -94,6 +100,7 @@ class FileSystem:
         # optional Notifier: critical move/copy cleanup failures get pushed to the
         # alert channel (see channels.delete_originals); None -> log-only.
         self._notifier = notifier
+        self._caption_template = caption_template
         # FsExecutor: when set, folder move/copy fan out per-file (each on its own
         # session + leased account). Without it, the fallback runs sequentially on
         # this instance's session/gateway.
@@ -209,13 +216,21 @@ class FileSystem:
         raise DuplicateNameError(f"cannot allocate a unique name for {desired!r}")
 
     async def rename(self, node_id: str, new_name: str) -> Node:
+        node = await self.repo.get(node_id)
+        old_mime = getattr(node, "mime", None) if node is not None else None
+        fields: dict[str, Any] = {"name": new_name}
+        if node is not None and not node.is_folder:
+            fields["mime"] = mimetypes.guess_type(new_name)[0] or DEFAULT_MIME
         try:
-            await self.repo.set_fields(node_id, name=new_name)
+            await self.repo.set_fields(node_id, **fields)
             await self.repo.session.commit()
         except IntegrityError as exc:
             await self.repo.session.rollback()
             raise DuplicateNameError(f"name '{new_name}' already exists") from exc
-        await self._sync_part_captions(node_id)
+        changed = {"filename"}
+        if fields.get("mime") != old_mime:
+            changed.add("mime")
+        await self._sync_part_captions(node_id, changed_fields=changed)
         return await self.repo.get(node_id)
 
     async def set_channel(self, node_id: str, channel_id: int | None) -> Node:
@@ -246,6 +261,7 @@ class FileSystem:
             resolved = mimetypes.guess_type(node.name)[0] or DEFAULT_MIME
         await self.repo.set_fields(node_id, mime=resolved)
         await self.repo.session.commit()
+        await self._sync_part_captions(node_id, changed_fields={"mime"})
         return await self.repo.get(node_id)
 
     async def delete(
@@ -477,6 +493,7 @@ class FileSystem:
         source = file.channel_id
         dest = await self.effective_channel(file.id, skip_current=True)
         if dest == source:
+            await self._sync_part_captions(file.id, changed_fields={"path"})
             return
 
         parts = await self.repo.parts_of(file.id)
@@ -486,9 +503,10 @@ class FileSystem:
             return
 
         total = len(parts)
+        parent_path = await self._parent_path(file)
         captions = {
-            (p.channel_id, p.message_id): logical_part_caption(
-                file.name, idx=i, total_parts=total
+            (p.channel_id, p.message_id): self._render_part_caption(
+                file, p, i, total, parent_path=parent_path, channel_id=dest
             )
             for i, p in enumerate(parts)
         }
@@ -627,9 +645,17 @@ class FileSystem:
         )
         await self.repo.session.commit()
         total = len(src_parts)
+        parent_path = await self._path_of_folder(dst_parent_id)
         captions = {
-            (p.channel_id, p.message_id): logical_part_caption(
-                name, idx=i, total_parts=total
+            (p.channel_id, p.message_id): self._render_part_caption_values(
+                node_id=new.id,
+                parent_path=parent_path,
+                logical_name=name,
+                idx=i,
+                total_parts=total,
+                part=p,
+                mime=src.mime,
+                channel_id=dest_channel,
             )
             for i, p in enumerate(src_parts)
         }
@@ -760,7 +786,8 @@ class FileSystem:
             result = await self._uploader.upload(
                 source_factory, filename=name, mime=mime, channel_id=channel,
                 min_size=self._min_size, on_part=persist_part, on_reset=reset_parts,
-                on_account=on_account,
+                on_account=on_account, caption_template=self._caption_template,
+                node_id=node.id, parent_path=await self._path_of_folder(parent_id),
             )
         except BaseException:
             await self.repo.purge(node.id)  # drop TEMP (parts cascade)
@@ -783,6 +810,8 @@ class FileSystem:
         else:
             await self.repo.set_fields(node.id, size=result.size, state="ACTIVE")
         await self.repo.session.commit()
+        if result.inline_content is None:
+            await self._sync_part_captions(node.id)
         # post-write sanity: the persisted parts must sum back to the expected
         # size (catches a part row that failed to persist). Always holds for a
         # correct write; a guard, not a recovery path.
@@ -849,6 +878,9 @@ class FileSystem:
         result = await self._uploader.upload(
             source_factory, filename=node.name, mime=node.mime, channel_id=channel,
             min_size=self._min_size, on_part=persist_part, on_reset=reset_parts,
+            caption_template=self._caption_template,
+            node_id=node_id,
+            parent_path=await self._path_of_folder(node.parent_id),
         )
         # Drop the inline body now that the parts are durable; size follows the
         # parts. (force-path data is always > min_size, so it never stays inline.)
@@ -856,6 +888,7 @@ class FileSystem:
             node_id, content=None, size=result.size, mtime=func.now()
         )
         await self.repo.session.commit()
+        await self._sync_part_captions(node_id)
         await self.check_size(node_id)
         return await self.repo.get(node_id)
 
@@ -944,7 +977,15 @@ class FileSystem:
         await self.repo.session.commit()
         return await self.repo.get(node.id)
 
-    async def _sync_part_captions(self, file_id: str) -> None:
+    async def _sync_part_captions(
+        self, file_id: str, *, changed_fields: set[str] | None = None
+    ) -> None:
+        if self._caption_template == "":
+            return
+        if changed_fields is not None and not caption_template_depends_on(
+            self._caption_template, changed_fields
+        ):
+            return
         node = await self.repo.get(file_id)
         if node is None or node.is_folder:
             return
@@ -957,12 +998,71 @@ class FileSystem:
             raise ValueError("gateway unavailable: cannot sync Telegram captions")
 
         total = len(parts)
+        parent_path = await self._parent_path(node)
         for pos, part in enumerate(parts):
             await self._gateway.edit_message_caption(
                 part.channel_id,
                 part.message_id,
-                logical_part_caption(node.name, idx=pos, total_parts=total),
+                self._render_part_caption(
+                    node, part, pos, total, parent_path=parent_path
+                ),
             )
+
+    async def _path_of_folder(self, folder_id: str | None) -> str:
+        if folder_id is None:
+            return "/"
+        path = await self.repo.path_of(folder_id)
+        return path or "/"
+
+    async def _parent_path(self, node: Node) -> str:
+        return await self._path_of_folder(node.parent_id)
+
+    def _render_part_caption(
+        self,
+        node: Node,
+        part: Any,
+        idx: int,
+        total_parts: int,
+        *,
+        parent_path: str,
+        channel_id: int | None = None,
+    ) -> str:
+        return self._render_part_caption_values(
+            node_id=node.id,
+            parent_path=parent_path,
+            logical_name=node.name,
+            idx=idx,
+            total_parts=total_parts,
+            part=part,
+            mime=node.mime,
+            channel_id=channel_id,
+        )
+
+    def _render_part_caption_values(
+        self,
+        *,
+        node_id: str,
+        parent_path: str,
+        logical_name: str,
+        idx: int,
+        total_parts: int,
+        part: Any,
+        mime: str | None,
+        channel_id: int | None = None,
+    ) -> str:
+        return render_caption(
+            self._caption_template,
+            CaptionRenderContext(
+                node_id=node_id,
+                parent_path=parent_path,
+                logical_name=logical_name,
+                idx=idx,
+                total_parts=total_parts,
+                part_size=part.size,
+                mime=mime,
+                channel_id=part.channel_id if channel_id is None else channel_id,
+            ),
+        )
 
     async def merge_parts(
         self,

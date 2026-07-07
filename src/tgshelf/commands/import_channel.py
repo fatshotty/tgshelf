@@ -93,6 +93,7 @@ async def run(config: Config, args) -> int:
                 master_channel=master,
                 gateway=gateway,
                 min_size=config.telegram.upload.min_size,
+                caption_template=config.caption.template,
             )
             log.info("[import] scanning master channel %s (limit=%s)", master, limit or "all")
             stats = await reconcile(raw.iter_messages(master, limit=limit), fs, master)

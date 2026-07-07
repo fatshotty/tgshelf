@@ -102,6 +102,35 @@ telegram:
       Host: {host}
       Key: {key}
     warning_window: 300
+
+caption:
+  # template:
+  #   Complete Telegram caption template for every Telegram-backed file part.
+  #   The value is rendered for new uploads and copies, and re-rendered after
+  #   rename, move, MIME updates, merge, split, or reorder only when the
+  #   operation changes a value referenced by the template.
+  #
+  #   Set template: "" to disable tgshelf-managed Telegram captions. Changing
+  #   this value affects future operations only; historical Telegram messages
+  #   are not rewritten automatically.
+  #
+  # Supported placeholders:
+  #   {id}         — stable logical tgshelf node id (nodes.id)
+  #   {path}       — logical parent folder path, root = /; no filename included
+  #   {filename}   — logical part filename, e.g. Movie.mkv.001
+  #   {part_idx}   — 1-based index of this part
+  #   {parts}      — total number of parts in the logical file
+  #   {size}       — current Telegram part size in bytes, not aggregate file size
+  #   {mime}       — MIME stored on the node
+  #   {channel_id} — physical Telegram channel id for this part
+  #
+  # {info} is reserved for future plugin/Web UI metadata work and is rejected
+  # until its JSON-to-text representation is defined.
+  #
+  # See docs/telegram-captions.md for detailed operation semantics.
+  template: |
+    fileName: {filename}
+
 download:
   multi_bot_download: 3         # parallel bots per stream (1 = sequential)
   allow_user_fallback: false    # use user accounts when the bot pool is exhausted

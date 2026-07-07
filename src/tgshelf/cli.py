@@ -62,6 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="purge only soft-deleted nodes under the given path",
             )
+            cmd.add_argument(
+                "--dry-run",
+                action="store_true",
+                help="show what would be purged without deleting Telegram messages or DB rows",
+            )
             cmd.add_argument("path", help="path of a folder or file")
         elif name == "search":
             cmd.add_argument("term", help="case-insensitive substring to search for")

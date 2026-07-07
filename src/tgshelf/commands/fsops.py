@@ -159,10 +159,31 @@ async def _do_rm(fs: FileSystem, path: str) -> int:
     return 0
 
 
-async def _do_purge(fs: FileSystem, path: str, *, deleted_only: bool = False) -> int:
+async def _do_purge(
+    fs: FileSystem, path: str, *, deleted_only: bool = False, dry_run: bool = False
+) -> int:
     node = await _resolve_any(fs, path)
     if node is None:
         return _err(f"path not found: {path}")
+    if dry_run:
+        state = "DELETED" if deleted_only else None
+        descendants = list(await fs.walk(node.id, state=state))
+        nodes = len(descendants)
+        if state is None or getattr(node, "state", None) == state:
+            nodes += 1
+        parts = list(await fs.repo.parts_in_subtree(node.id, state=state))
+        channels = len({part.channel_id for part in parts})
+        print(f"purge dry-run {path}")
+        print(
+            "nodes={nodes} telegram_parts={telegram_parts} channels={channels} "
+            "deleted_only={deleted_only}".format(
+                nodes=nodes,
+                telegram_parts=len(parts),
+                channels=channels,
+                deleted_only=str(deleted_only).lower(),
+            )
+        )
+        return 0
     await fs.delete(node.id, purge=True, deleted_only=deleted_only)
     if deleted_only:
         print(f"purged deleted-only {path}")
@@ -368,7 +389,9 @@ async def run(config: Config, args) -> int:
             return await _do_rm(fs, args.path)
     if cmd == "purge":
         async with _telegram_fs(config) as fs:
-            return await _do_purge(fs, args.path, deleted_only=args.deleted_only)
+            return await _do_purge(
+                fs, args.path, deleted_only=args.deleted_only, dry_run=args.dry_run
+            )
     if cmd == "mv":
         async with _telegram_fs(config) as fs:
             return await _do_mv(fs, args.src, args.dst)

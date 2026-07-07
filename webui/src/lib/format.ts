@@ -17,9 +17,14 @@ export function humanRate(bytesPerSec: number): string {
 // text/* plus the common structured-text application/* types; everything else
 // (images, video, octet-stream, …) is treated as binary → view only.
 const TEXT_APPLICATION = /^application\/(json|xml|x-yaml|yaml|javascript|x-sh|toml|x-ndjson|sql)$/
+const TEXT_EXT = /\.(nfo|srt|vtt|ass|ssa|txt|md|json|xml|yml|yaml|toml|csv|tsv|log)$/i
 
 export function isTextMime(mime: string | null): boolean {
   if (!mime) return false
   const m = mime.split(';')[0].trim().toLowerCase()
   return m.startsWith('text/') || m.endsWith('+json') || m.endsWith('+xml') || TEXT_APPLICATION.test(m)
+}
+
+export function isTextFile(name: string, mime: string | null): boolean {
+  return isTextMime(mime) || TEXT_EXT.test(name)
 }

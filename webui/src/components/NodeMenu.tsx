@@ -5,7 +5,7 @@
 import { useEffect, useRef, useState } from 'react'
 
 import type { FsNode } from '../api/types'
-import { isTextMime } from '../lib/format'
+import { isTextFile } from '../lib/format'
 import { MoreIcon } from './Icons'
 
 export type NodeAction =
@@ -14,6 +14,7 @@ export type NodeAction =
   | 'split'
   | 'rename'
   | 'setChannel'
+  | 'strm'
   | 'move'
   | 'copy'
   | 'delete'
@@ -49,11 +50,12 @@ export function NodeMenu({ node, onAction }: { node: FsNode; onAction: (a: NodeA
           ...(node.is_folder ? [{ a: 'size' as NodeAction, label: 'Disk usage' }] : []),
           // inline (DB-stored) files are editable in place; text → edit, binary → view
           ...(!node.is_folder && node.inline
-            ? [{ a: 'edit' as NodeAction, label: isTextMime(node.mime) ? 'Edit' : 'View' }]
+            ? [{ a: 'edit' as NodeAction, label: isTextFile(node.name, node.mime) ? 'Edit' : 'View' }]
             : []),
           ...(!node.is_folder && !node.inline ? [{ a: 'split' as NodeAction, label: 'Split' }] : []),
           { a: 'rename', label: 'Rename' },
           ...(node.is_folder ? [{ a: 'setChannel' as NodeAction, label: 'Set channel' }] : []),
+          { a: 'strm', label: 'STRM' },
           { a: 'move', label: 'Move…' },
           { a: 'copy', label: 'Copy…' },
           { a: 'delete', label: 'Delete', danger: true },

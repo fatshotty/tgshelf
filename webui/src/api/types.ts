@@ -44,6 +44,15 @@ export interface SplitPartsResult {
   extracted: FsNode[]
 }
 
+export interface StrmResult {
+  destination: string
+  created: number
+  updated: number
+  skipped: number
+  removed: number
+  inline: number
+}
+
 // move/copy on a folder answers 202 with this instead of a node
 export interface AcceptedOp {
   status: 'accepted'

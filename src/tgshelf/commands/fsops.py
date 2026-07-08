@@ -371,6 +371,7 @@ async def _telegram_fs(config: Config):
                 executor=runtime["executor"],
                 gateway=runtime["write_gateway"],
                 caption_template=config.caption.template,
+                plugin_manager=runtime["plugin_manager"],
             )
     finally:
         await engine.dispose()

@@ -30,6 +30,8 @@ aiohttp APIs, HTTP download endpoints, WebDAV/rclone, and a React Web UI.
   the PostgreSQL changes feed.
 - Optional live watcher that imports files posted to the master channel while
   the server is running.
+- Trusted in-process Python plugin hooks for file upload, move, copy, rename,
+  delete, and import workflows.
 - Observability through `/status`, `/metrics`, `/metrics.txt`, Web UI SSE
   metrics, structured logs, and optional Telegram notifications.
 
@@ -306,6 +308,16 @@ caption:
   # See docs/telegram-captions.md for full semantics.
   template: |
     fileName: {filename}
+
+plugins:
+  # Trusted Python plugins loaded in-process. Disabled means no plugin module is
+  # imported. See docs/plugins.md for the public Host API and hook semantics.
+  enabled: false
+  # Extra import roots added before loading plugin modules.
+  paths: []
+  # Plugin classes or factories loaded in order with "module:attribute" syntax.
+  # Hooks run in the same order.
+  modules: []
 
 download:
   multi_bot_download: 3         # parallel bots per download; 1 = sequential

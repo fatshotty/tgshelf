@@ -129,6 +129,21 @@ caption:
   template: |
     fileName: {filename}
 
+plugins:
+  # Trusted Python plugins loaded in-process. This is not a sandbox boundary:
+  # only enable plugins you control. Disabled means no plugin module is imported.
+  enabled: false
+  # Extra import roots added before loading plugin modules. Paths are resolved
+  # relative to the current working directory used to start tgshelf.
+  paths: []
+  # Plugin classes or factories loaded in order with "module:attribute" syntax.
+  # Hooks run in the same order. Example:
+  #   paths:
+  #     - ./plugins
+  #   modules:
+  #     - tmdb_notes:TmdbNotesPlugin
+  modules: []
+
 download:
   multi_bot_download: 3         # parallel bots per stream (1 = sequential)
   allow_user_fallback: false    # use user accounts when the bot pool is exhausted

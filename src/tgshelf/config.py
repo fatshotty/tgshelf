@@ -198,6 +198,13 @@ class CaptionConfig:
 
 
 @dataclass(frozen=True)
+class PluginsConfig:
+    enabled: bool = False
+    paths: tuple[str, ...] = ()
+    modules: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Config:
     db: str
     telegram: TelegramConfig
@@ -216,6 +223,7 @@ class Config:
     changes_feed: ChangesFeedConfig = ChangesFeedConfig()
     rclone: RcloneConfig = RcloneConfig()
     caption: CaptionConfig = CaptionConfig()
+    plugins: PluginsConfig = PluginsConfig()
 
 
 def _section(raw: Mapping[str, Any], key: str) -> Mapping[str, Any]:
@@ -259,6 +267,18 @@ def _str(section: Mapping[str, Any], key: str, default: str, *, path: str) -> st
     if not isinstance(value, str):
         raise ConfigError(f"'{path}.{key}' must be a string, got {value!r}")
     return value
+
+
+def _str_tuple(section: Mapping[str, Any], key: str, *, path: str) -> tuple[str, ...]:
+    value = section.get(key) or []
+    if not isinstance(value, list):
+        raise ConfigError(f"'{path}.{key}' must be a list of strings")
+    result = []
+    for idx, item in enumerate(value):
+        if not isinstance(item, str) or not item.strip():
+            raise ConfigError(f"'{path}.{key}[{idx}]' must be a non-empty string")
+        result.append(item)
+    return tuple(result)
 
 
 def _notify_channel(value: Any, *, master_channel: int) -> int | str | None:
@@ -447,6 +467,21 @@ def _parse_caption(raw: Mapping[str, Any]) -> CaptionConfig:
     return CaptionConfig(template=template)
 
 
+def _parse_plugins(raw: Mapping[str, Any]) -> PluginsConfig:
+    section = _section(raw, "plugins")
+    modules = _str_tuple(section, "modules", path="plugins")
+    for idx, spec in enumerate(modules):
+        if ":" not in spec:
+            raise ConfigError(
+                f"'plugins.modules[{idx}]' must use 'module:attribute' syntax"
+            )
+    return PluginsConfig(
+        enabled=_bool(section, "enabled", PluginsConfig.enabled, path="plugins"),
+        paths=_str_tuple(section, "paths", path="plugins"),
+        modules=modules,
+    )
+
+
 def _parse_changes_feed(raw: Mapping[str, Any]) -> ChangesFeedConfig:
     section = _section(raw, "changes_feed")
     return ChangesFeedConfig(
@@ -556,4 +591,5 @@ def load_config(path: str | Path, env: Mapping[str, str] | None = None) -> Confi
         changes_feed=_parse_changes_feed(raw),
         rclone=_parse_rclone(raw),
         caption=_parse_caption(raw),
+        plugins=_parse_plugins(raw),
     )

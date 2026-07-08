@@ -126,11 +126,21 @@ def recap_extra(stats: "Stats") -> str:
     return f"+ {stats.overwritten} overwritten, {stats.deleted} deleted"
 
 
-def _fs(session, *, master_channel, min_size, uploader, streamer, caption_template) -> FileSystem:
+def _fs(
+    session,
+    *,
+    master_channel,
+    min_size,
+    uploader,
+    streamer,
+    caption_template,
+    plugin_manager=None,
+) -> FileSystem:
     return FileSystem(
         NodeRepo(session), master_channel=master_channel,
         uploader=uploader, streamer=streamer, min_size=min_size,
         caption_template=caption_template,
+        plugin_manager=plugin_manager,
     )
 
 
@@ -138,7 +148,8 @@ async def sync(session_factory, uploader, *, master_channel: int, min_size: int,
                local_dir, dest: str = "/", concurrent: int = 1, streamer=None,
                delete_source: bool = False, overwrite: bool = False,
                state: ProgressState | None = None,
-               caption_template: str = "fileName: {filename}") -> Stats:
+               caption_template: str = "fileName: {filename}",
+               plugin_manager=None) -> Stats:
     root_dir = Path(local_dir)
     files = scan_local(local_dir)
     stats = Stats()
@@ -147,7 +158,8 @@ async def sync(session_factory, uploader, *, master_channel: int, min_size: int,
     def make_fs(session) -> FileSystem:
         return _fs(session, master_channel=master_channel, min_size=min_size,
                    uploader=uploader, streamer=streamer,
-                   caption_template=caption_template)
+                   caption_template=caption_template,
+                   plugin_manager=plugin_manager)
 
     # The reference folder is created WHEN a file is processed, not up front. To
     # stay race-safe when concurrent workers need the same (or a prefix-sharing)
@@ -293,6 +305,7 @@ async def run(config: Config, args) -> int:
             overwrite=getattr(args, "overwrite", False),
             state=state,
             caption_template=config.caption.template,
+            plugin_manager=runtime["plugin_manager"],
         )
     finally:
         stop.set()

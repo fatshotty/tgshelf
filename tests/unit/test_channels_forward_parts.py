@@ -372,6 +372,21 @@ async def test_set_info_notes_skips_caption_when_template_ignores_info():
 
 
 @pytest.mark.asyncio
+async def test_resync_caption_forces_caption_update():
+    repo = FakeRepo()
+    gateway = RecordingGateway()
+    repo.nodes["root"] = FakeNode(id="root", name="", parent_id=None, is_folder=True)
+    repo.nodes["file"] = FakeNode(
+        id="file", name="Movie.mkv", parent_id="root", size=20, info={"notes": "TMDB: 33333"}
+    )
+    repo.parts["file"] = [FakePart("file", 0, -100, 11, 101, 20, "Movie.mkv")]
+
+    await make_fs(repo, gateway, caption_template="{info}").resync_caption("file")
+
+    assert gateway.caption_edits == [(-100, 11, "TMDB: 33333")]
+
+
+@pytest.mark.asyncio
 async def test_merge_syncs_caption_to_final_logical_name_and_preserves_original_filenames():
     repo = FakeRepo()
     gateway = RecordingGateway()

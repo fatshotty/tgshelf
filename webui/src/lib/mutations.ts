@@ -39,6 +39,12 @@ export function useTreeActions(folderId: string | undefined, path: string) {
     restore: (id: string) => api.restoreNode(id).then(invalidate),
     move: (id: string, destId: string) => api.moveNode(id, destId).then((r) => afterMoveCopy(r, 'Move')),
     copy: (id: string, destId: string) => api.copyNode(id, destId).then((r) => afterMoveCopy(r, 'Copy')),
+    updateNode: (id: string, body: Parameters<typeof api.updateNode>[1]) =>
+      api.updateNode(id, body).then((node) => {
+        invalidate()
+        qc.invalidateQueries({ queryKey: ['content', id] })
+        return node
+      }),
     setContent: (id: string, data: string | Blob, force = false) =>
       api.setContent(id, data, force).then(invalidate),
     mergeParts: (id: string, donorIds: string[], name?: string, parts?: FilePartRef[]) =>

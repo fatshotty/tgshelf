@@ -42,14 +42,11 @@
 ## Plugin Hooks And info.notes Captions
 
 - Implement the design recorded in `docs/dev/plugins-and-info-notes.md`.
-- Render only `nodes.info["notes"]` below the canonical `fileName:` caption line.
-- Keep `info.notes` free-form: allow long text, line breaks, and empty lines;
-  do not trim or silently truncate it. If Telegram rejects the caption, surface
-  the error.
-- Add a centralized caption renderer and update upload, rename, copy/move,
-  merge, reorder, split, sanitizer, and recovery tooling to use it.
-- Add a core helper to update `info.notes` and resync Telegram captions for
-  Telegram-backed files.
+- Support editing text content above `telegram.upload.min_size` by converting or
+  replacing it as Telegram-backed content. The first composite edit endpoint
+  intentionally returns 409 for oversized inline text edits.
+- Extend plugin work on top of the implemented `nodes.info["notes"]` field.
+  Notes are rendered by `{info}` and capped at 200 characters.
 - Add a plugin manager with ordered hook chains and a single public
   `PluginError` exception type.
 - Add initial file-level hooks for upload, move, copy, rename, delete, and

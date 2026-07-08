@@ -15,8 +15,9 @@ CAPTION_PLACEHOLDERS = (
     "size",
     "mime",
     "channel_id",
+    "info",
 )
-RESERVED_CAPTION_PLACEHOLDERS = ("info",)
+RESERVED_CAPTION_PLACEHOLDERS = ()
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class CaptionRenderContext:
     part_size: int
     mime: str | None
     channel_id: int
+    info_notes: str = ""
 
 
 def logical_part_filename(name: str, *, idx: int, total_parts: int) -> str:
@@ -51,6 +53,7 @@ def render_caption(template: str, context: CaptionRenderContext) -> str:
         "size": str(context.part_size),
         "mime": context.mime or "",
         "channel_id": str(context.channel_id),
+        "info": context.info_notes,
     }
     return template.format(**values)
 

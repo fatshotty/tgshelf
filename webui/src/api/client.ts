@@ -24,6 +24,13 @@ export class ApiError extends Error {
 }
 
 type Query = Record<string, string | number | boolean | undefined>
+export interface NodeUpdate {
+  name?: string
+  mime?: string | null
+  channel_id?: number | null
+  info?: { notes?: string | null }
+  content?: string
+}
 
 async function request<T>(
   method: string,
@@ -63,6 +70,8 @@ export const api = {
   // -- tree management
   createFolder: (parentId: string, name: string) =>
     request<FsNode>('POST', '/api/v1/folders', { body: { parent_id: parentId, name } }),
+  updateNode: (nodeId: string, body: NodeUpdate) =>
+    request<FsNode>('PUT', `/api/v1/nodes/${id(nodeId)}`, { body }),
   rename: (nodeId: string, name: string) =>
     request<FsNode>('PUT', `/api/v1/nodes/${id(nodeId)}`, { body: { name } }),
   setFolderChannel: (nodeId: string, channelId: number | null) =>

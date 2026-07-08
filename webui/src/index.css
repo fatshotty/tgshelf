@@ -230,6 +230,15 @@ body {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.85rem; line-height: 1.4; tab-size: 2;
 }
+.notes-editor {
+  width: 100%; min-height: 4.5rem; resize: vertical; box-sizing: border-box;
+  padding: 0.55rem; border: 1px solid var(--border); border-radius: 7px;
+  background: var(--bg); color: var(--text); font: inherit;
+}
+.readonly-box {
+  border: 1px solid var(--border); border-radius: 7px; padding: 0.75rem;
+  color: var(--muted); background: color-mix(in srgb, var(--panel) 80%, transparent);
+}
 .modal:has(.parts-dialog) { width: min(64rem, 96vw); }
 .parts-dialog { gap: 1rem; }
 .parts-section { display: flex; flex-direction: column; gap: 0.5rem; }

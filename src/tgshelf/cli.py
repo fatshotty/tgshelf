@@ -34,6 +34,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "mv": ("move files/folders", "C2"),
     "rm": ("delete files/folders (soft delete)", "C2"),
     "purge": ("permanently delete soft-deleted items", "C2"),
+    "notes": ("show or update file notes stored in info.notes", "priority-info-notes"),
     "import-channel": ("reconcile/catalog a channel history into the drive", "C5"),
 }
 
@@ -68,6 +69,10 @@ def build_parser() -> argparse.ArgumentParser:
                 help="show what would be purged without deleting Telegram messages or DB rows",
             )
             cmd.add_argument("path", help="path of a folder or file")
+        elif name == "notes":
+            cmd.add_argument("--clear", action="store_true", help="clear the file notes")
+            cmd.add_argument("path", help="path of the file")
+            cmd.add_argument("notes", nargs="?", help="new notes text")
         elif name == "search":
             cmd.add_argument("term", help="case-insensitive substring to search for")
         elif name == "cat":
@@ -187,6 +192,7 @@ def _dispatch(config: Config, args: argparse.Namespace) -> int:
         "mv",
         "rm",
         "purge",
+        "notes",
         "search",
     ):
         from tgshelf.commands import fsops

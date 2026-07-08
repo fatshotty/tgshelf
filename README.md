@@ -302,7 +302,7 @@ caption:
   #   {size}       current Telegram part size in bytes
   #   {mime}       node MIME
   #   {channel_id} physical Telegram channel id for this part
-  # {info} is reserved and not implemented yet.
+  #   {info}       nodes.info["notes"], editable from CLI/Web UI; max 200 chars
   # See docs/telegram-captions.md for full semantics.
   template: |
     fileName: {filename}

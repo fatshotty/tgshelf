@@ -35,6 +35,7 @@ from tgshelf.db.repo import DuplicateNameError, NodeRepo
 log = logging.getLogger("tgshelf.fs")
 
 DEFAULT_MIME = "application/octet-stream"
+INFO_NOTES_MAX_LENGTH = 200
 
 # structural mime validation: type/subtype as RFC tokens, optional ";params".
 # Not a closed registry (new types appear); just rejects garbage (no slash,
@@ -56,6 +57,14 @@ def is_valid_mime(mime: str) -> bool:
     return bool(_MIME_RE.match(mime))
 
 
+def _info_notes(node: Any) -> str:
+    info = getattr(node, "info", None)
+    if not isinstance(info, dict):
+        return ""
+    notes = info.get("notes", "")
+    return notes if isinstance(notes, str) else ""
+
+
 class NotAReadableFile(Exception):
     """The node is missing, a folder, or not ACTIVE."""
 
@@ -75,6 +84,10 @@ class IntegrityViolation(Exception):
     disagrees with its effective size (inline = len(content); parts =
     sum(parts.size)). Signals a lost/corrupted part row or a denormalisation
     bug — surfaced by check_size, never raised on the read path."""
+
+
+class InfoNotesTooLong(ValueError):
+    """The free-form notes field exceeds the domain cap."""
 
 
 class FileSystem:
@@ -262,6 +275,24 @@ class FileSystem:
         await self.repo.set_fields(node_id, mime=resolved)
         await self.repo.session.commit()
         await self._sync_part_captions(node_id, changed_fields={"mime"})
+        return await self.repo.get(node_id)
+
+    async def set_info_notes(self, node_id: str, notes: str) -> Node:
+        """Set nodes.info["notes"] and resync captions that render {info}."""
+        node = await self.repo.get(node_id)
+        if node is None or node.is_folder or node.state != "ACTIVE":
+            raise NotAReadableFile(f"node {node_id} is not a readable file")
+        if not isinstance(notes, str):
+            raise ValueError("info.notes must be a string")
+        if len(notes) > INFO_NOTES_MAX_LENGTH:
+            raise InfoNotesTooLong(
+                f"info.notes exceeds {INFO_NOTES_MAX_LENGTH} characters"
+            )
+        info = dict(node.info or {})
+        info["notes"] = notes
+        await self.repo.set_fields(node_id, info=info, mtime=func.now())
+        await self.repo.session.commit()
+        await self._sync_part_captions(node_id, changed_fields={"info"})
         return await self.repo.get(node_id)
 
     async def delete(
@@ -630,6 +661,7 @@ class FileSystem:
             new = await self.repo.create(
                 name=name, parent_id=dst_parent_id, is_folder=False, mime=src.mime,
                 channel_id=dest_channel, state="ACTIVE", size=len(content), content=content,
+                info=dict(getattr(src, "info", None) or {}),
             )
             await self.repo.session.commit()
             log.info(
@@ -641,7 +673,7 @@ class FileSystem:
         src_parts = await self.repo.parts_of(src.id)
         new = await self.repo.create(
             name=name, parent_id=dst_parent_id, is_folder=False, mime=src.mime,
-            channel_id=dest_channel, state="TEMP",
+            channel_id=dest_channel, state="TEMP", info=dict(getattr(src, "info", None) or {}),
         )
         await self.repo.session.commit()
         total = len(src_parts)
@@ -655,6 +687,7 @@ class FileSystem:
                 total_parts=total,
                 part=p,
                 mime=src.mime,
+                info_notes=_info_notes(src),
                 channel_id=dest_channel,
             )
             for i, p in enumerate(src_parts)
@@ -1035,6 +1068,7 @@ class FileSystem:
             total_parts=total_parts,
             part=part,
             mime=node.mime,
+            info_notes=_info_notes(node),
             channel_id=channel_id,
         )
 
@@ -1048,6 +1082,7 @@ class FileSystem:
         total_parts: int,
         part: Any,
         mime: str | None,
+        info_notes: str = "",
         channel_id: int | None = None,
     ) -> str:
         return render_caption(
@@ -1061,6 +1096,7 @@ class FileSystem:
                 part_size=part.size,
                 mime=mime,
                 channel_id=part.channel_id if channel_id is None else channel_id,
+                info_notes=info_notes,
             ),
         )
 

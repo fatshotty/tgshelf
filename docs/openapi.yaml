@@ -180,11 +180,14 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
     put:
       tags: [tree]
-      summary: Update a node (rename / mime / channel).
+      summary: Update a node.
       description: |
-        - **File**: `name` and/or `mime` only. An empty `mime` is deduced from the
-          name. Sending `channel_id` for a file → 400 (a file's channel changes
-          only via move).
+        - **File**: `name`, `mime`, `info.notes`, and/or inline text `content`.
+          An empty `mime` is deduced from the name. Sending `channel_id` for a
+          file → 400 (a file's channel changes only via move).
+          `content` is accepted only for text files currently stored inline in
+          the database. If the UTF-8 body exceeds `telegram.upload.min_size`,
+          the response is 409.
         - **Folder**: `name` and/or `channel_id` (`null` = inherit from ancestors).
       requestBody:
         content:
@@ -197,6 +200,18 @@ paths:
                 channel_id:
                   type: [integer, "null"]
                   description: "Folder only. null = inherit."
+                info:
+                  type: object
+                  description: "File metadata patch. Only notes is writable here."
+                  additionalProperties: false
+                  properties:
+                    notes:
+                      type: [string, "null"]
+                      maxLength: 200
+                      description: "Free-form file notes rendered by caption {info}."
+                content:
+                  type: string
+                  description: "File only. UTF-8 text content for inline text files."
       responses:
         "200": { $ref: "#/components/responses/NodeResponse" }
         "400": { $ref: "#/components/responses/BadRequest" }
@@ -227,8 +242,12 @@ paths:
       - $ref: "#/components/parameters/NodeId"
     put:
       tags: [tree]
+      deprecated: true
       summary: Replace an inline file's body in place.
       description: |
+        Deprecated. New clients should use `PUT /api/v1/nodes/{id}` with the
+        JSON `content` field.
+
         Overwrite the body of an **inline** (DB-stored) file with the raw request
         body. Only inline files are editable — a Telegram-backed file → 400. A body
         within `min_size` keeps the file inline; a larger body needs `force=true`

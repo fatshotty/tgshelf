@@ -9,16 +9,25 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from contextlib import asynccontextmanager
 
 from aiohttp import web
 
-from tgshelf.core.fs import FileSystem
+from tgshelf.core.fs import FileSystem, INFO_NOTES_MAX_LENGTH, InlineTooLarge
 from tgshelf.db.repo import NodeRepo
 from tgshelf.http.app import RUNTIME
 from tgshelf.http.schemas import node_to_dict
 
 log = logging.getLogger("tgshelf.http.api")
+
+_TEXT_APPLICATION_RE = re.compile(
+    r"^application/(json|xml|x-yaml|yaml|javascript|x-sh|toml|x-ndjson|sql)$"
+)
+_TEXT_EXT_RE = re.compile(
+    r"\.(nfo|srt|vtt|ass|ssa|txt|md|json|xml|yml|yaml|toml|csv|tsv|log)$",
+    re.IGNORECASE,
+)
 
 
 def _runtime_fs(rt: dict, session) -> FileSystem:
@@ -108,6 +117,19 @@ def _search_result_sort_key(result: dict) -> tuple[int, str]:
     return (0 if node["is_folder"] else 1, result["path"].casefold())
 
 
+def _is_text_file(name: str, mime: str | None) -> bool:
+    if mime:
+        normalized = mime.split(";", 1)[0].strip().lower()
+        if (
+            normalized.startswith("text/")
+            or normalized.endswith("+json")
+            or normalized.endswith("+xml")
+            or _TEXT_APPLICATION_RE.match(normalized)
+        ):
+            return True
+    return bool(_TEXT_EXT_RE.search(name))
+
+
 _LIST_STATES = ("ACTIVE", "DELETED", "TEMP")
 
 
@@ -187,8 +209,11 @@ async def create_folder(request: web.Request) -> web.Response:
 
 
 async def update_node(request: web.Request) -> web.Response:
-    """PUT contract: file -> name + mime (empty mime deduced from the name);
-    folder -> name + channel_id. A file's channel is immutable here (use move)."""
+    """Composite node update.
+
+    Files accept name, mime, info.notes, and inline text content. Folders accept
+    name and channel_id. A file's channel is immutable here (use move).
+    """
     node_id = request.match_info["id"]
     body = await _json_body(request)
     async with open_fs(request) as fs:
@@ -197,6 +222,47 @@ async def update_node(request: web.Request) -> web.Response:
             return _not_found(f"node {node_id} not found")
         if not node.is_folder and "channel_id" in body:
             return _bad_request("a file's channel can only be changed by moving it")
+        if node.is_folder and "content" in body:
+            return _bad_request("a folder has no content")
+
+        content_data: bytes | None = None
+        if "content" in body:
+            if not isinstance(body["content"], str):
+                return _bad_request("'content' must be a string")
+            if not _is_text_file(node.name, node.mime):
+                return _bad_request("content can only be edited for text files")
+            if await fs.repo.content_of(node_id) is None:
+                return _bad_request("content can only be edited for inline files")
+            content_data = body["content"].encode("utf-8")
+            limit = int(request.app[RUNTIME].get("min_size", 0))
+            if len(content_data) > limit:
+                raise InlineTooLarge(
+                    f"content ({len(content_data)} bytes) exceeds the inline limit "
+                    f"({limit})"
+                )
+
+        notes: str | None = None
+        if "info" in body:
+            info = body["info"]
+            if not isinstance(info, dict):
+                return _bad_request("'info' must be an object")
+            unsupported = set(info) - {"notes"}
+            if unsupported:
+                return _bad_request(
+                    "unsupported info field(s): " + ", ".join(sorted(unsupported))
+                )
+            if "notes" in info:
+                raw_notes = info["notes"]
+                if raw_notes is None:
+                    notes = ""
+                elif isinstance(raw_notes, str):
+                    if len(raw_notes) > INFO_NOTES_MAX_LENGTH:
+                        return _bad_request(
+                            f"'info.notes' must be at most {INFO_NOTES_MAX_LENGTH} characters"
+                        )
+                    notes = raw_notes
+                else:
+                    return _bad_request("'info.notes' must be a string")
 
         if body.get("name"):
             await fs.rename(node_id, body["name"])
@@ -204,22 +270,21 @@ async def update_node(request: web.Request) -> web.Response:
             await fs.set_channel(node_id, body["channel_id"])
         if not node.is_folder and "mime" in body:  # empty -> deduced from the name
             await fs.set_mime(node_id, body["mime"])
+        if not node.is_folder and notes is not None:
+            await fs.set_info_notes(node_id, notes)
+        if content_data is not None:
+            await fs.replace_content(node_id, content_data, force=False)
         log.info("updated node %s %s", node_id, sorted(body))
         return web.json_response(node_to_dict(await fs.get(node_id)))
 
 
-_MAX_INLINE_EDIT = 256 * 1024 * 1024  # cap the in-memory read for an edit
-
-
 async def replace_content(request: web.Request) -> web.Response:
-    """PUT raw body = the new file body. Only INLINE (DB-stored) files are
+    """Deprecated: PUT raw body = the new file body. Only INLINE (DB-stored) files are
     editable; a body within min_size stays inline, a larger one needs `?force=`
     to convert the file to Telegram-backed (fs raises InlineTooLarge → 409
     otherwise). Telegram-backed files are rejected (ValueError → 400)."""
     node_id = request.match_info["id"]
     force = _truthy(request.query.get("force", ""))
-    if request.content_length is not None and request.content_length > _MAX_INLINE_EDIT:
-        return _bad_request(f"content exceeds the {_MAX_INLINE_EDIT}-byte edit limit")
     data = await request.read()
     async with open_fs(request) as fs:
         node = await fs.get(node_id)

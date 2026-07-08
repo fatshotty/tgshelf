@@ -171,7 +171,7 @@ export default function BrowseView() {
         <FileEditDialog
           node={dialog.node}
           onClose={() => setDialog(null)}
-          onSave={(data, force) => actions.setContent(dialog.node.id, data, force)}
+          onSave={(body) => actions.updateNode(dialog.node.id, body).then(() => undefined)}
         />
       )}
       {dialog?.kind === 'mergeParts' && (

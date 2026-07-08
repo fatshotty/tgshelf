@@ -62,14 +62,16 @@ The first implementation supports these placeholders:
 | `{size}` | Size in bytes of the current Telegram part. |
 | `{mime}` | MIME type stored on the node, as calculated or normalized by tgshelf. |
 | `{channel_id}` | Physical Telegram channel id for the current part. |
+| `{info}` | `nodes.info["notes"]`, a user/plugin editable free-text note capped at 200 characters. |
 
 `{size}` intentionally means the current part size only. There is no aggregate
 logical file size placeholder in this phase.
 
-`{info}` is reserved for future work and is not implemented yet. The node
-metadata field is JSON, and its text representation is still undecided. Until
-that design is completed, configuration validation should reject `{info}` with a
-clear error.
+`{info}` intentionally renders only `nodes.info["notes"]`, not the full
+`nodes.info` JSON object. Other metadata keys may exist for plugins or future
+features, but they are not serialized into Telegram captions by this
+placeholder. When notes are empty or absent, `{info}` renders as an empty
+string; if the template puts `{info}` on its own line, that line remains blank.
 
 ## Example
 
@@ -179,18 +181,20 @@ Reorder changes logical part positions. If the template depends on position
 derived values, such as `{filename}` or `{part_idx}`, affected captions are
 updated.
 
-## Future `{info}` Placeholder
+## `{info}` Notes
 
-The future `{info}` placeholder will depend on `nodes.info`, which belongs to
-the logical node rather than an individual Telegram part.
+`{info}` depends on `nodes.info["notes"]`, which belongs to the logical node
+rather than an individual Telegram part.
 
-When `{info}` is implemented, updating metadata through plugins, the Web UI, or
-another domain API should re-render all captions for a Telegram-backed file if
-the active template uses `{info}`. For a five-part file, that means five
-Telegram caption edits. If the active template does not use `{info}`, metadata
-updates should not touch Telegram captions.
+Updating notes through the CLI, Web UI, plugins, or another domain API
+re-renders all captions for a Telegram-backed file if the active template uses
+`{info}`. For a five-part file, that means five Telegram caption edits. If the
+active template does not use `{info}`, notes updates do not touch Telegram
+captions.
 
-The exact text representation of `nodes.info` is intentionally left open.
+Notes are capped at 200 characters. They may be empty. The rest of `nodes.info`
+remains a JSON metadata container and has no caption representation in this
+phase.
 
 ## Historical Captions
 

@@ -175,6 +175,21 @@ async def start_clients(config: Config, write_limiter) -> list[tuple[Any, Any]]:
                 log.warning("session for '%s' is not authorized; re-login", account.name)
                 await tele.disconnect()
                 continue
+            if not account.is_bot:
+                caps = await fetch_caps(tele)
+                await store.save(
+                    account.name,
+                    tele.session.save(),
+                    kind="user",
+                    api_id=account.api_id,
+                    api_hash=account.api_hash,
+                    dc_id=caps.dc_id,
+                    is_premium=caps.is_premium,
+                )
+                log.info(
+                    "[premium] account '%s' checked at startup: premium=%s, max parts=%d",
+                    account.name, caps.is_premium, caps.max_upload_parts,
+                )
             # Bots are leased only by the streamer (which fails over on cooldown).
             # Telegram's "natural" sub-second FloodWaits are absorbed inline (DEBUG,
             # no warning, no bot swap) — the read-ahead buffer covers them; only a
@@ -191,18 +206,8 @@ async def start_clients(config: Config, write_limiter) -> list[tuple[Any, Any]]:
                 tcp_connections=config.concurrent_tcp_connections, **tg_kwargs,
             )
             if not account.is_bot:
-                caps = await fetch_caps(tele)
                 tg_client.is_premium = caps.is_premium
                 tg_client.max_upload_parts = caps.max_upload_parts
-                await store.save(
-                    account.name,
-                    tele.session.save(),
-                    kind="user",
-                    api_id=account.api_id,
-                    api_hash=account.api_hash,
-                    dc_id=caps.dc_id,
-                    is_premium=caps.is_premium,
-                )
             clients.append((account, tg_client))
     finally:
         if store_session is not None:
@@ -279,6 +284,7 @@ async def run_server(config: Config) -> None:
         session_factory=session_factory,
         master_channel=config.telegram.upload.channel,
         min_size=config.telegram.upload.min_size,
+        operations_concurrent=config.operations.concurrent,
         executor=runtime["executor"],
         uploader=runtime["uploader"],
         streamer=runtime["streamer"],

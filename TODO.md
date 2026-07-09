@@ -1,5 +1,14 @@
 # TODO
 
+## Da fare quanto prima
+
+- finire di pianificare il placeholder {info} nella caption
+- formalizzare l'uso dei plugin con gli hook necessari
+- impostare l'upload per processare i file in ordine di peso (dal piu' piccolo al piu' grande)
+- creare il plugin che scrive nelle {info}
+- modificare template caption nel file config.yaml
+- bonificare tutte le caption su telegram
+
 ## Mirror Follow Ups
 
 - Consider an explicit option to create the missing destination root for
@@ -7,6 +16,20 @@
   destination folder does not already exist.
 - Consider a Web UI entry point for the existing virtual-to-virtual mirror
   workflow.
+
+## Batch Delete / Purge CLI
+
+- Allow the `delete`/`rm` and `purge` CLI commands to accept multiple file or
+  folder paths in a single process run, for example:
+  `tgshelf purge /media/a.mkv /other/folder/b.mkv /archive/old`.
+- This avoids restarting the tool once per path when the operator needs to
+  delete or purge several unrelated nodes, which currently causes repeated
+  startup/login work.
+- Resolve every requested path before mutating data, report missing paths
+  clearly, and define whether the command should fail-fast or continue with
+  the remaining valid paths.
+- Keep logs grouped and readable per target path, especially for purge operations
+  that delete Telegram-backed parts.
 
 ## Telegram Caption Reconciliation
 

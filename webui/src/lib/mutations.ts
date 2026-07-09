@@ -63,14 +63,14 @@ export function useTreeActions(folderId: string | undefined, path: string) {
         qc.invalidateQueries({ queryKey: ['parts', id] })
       }),
     generateStrm: (id: string) =>
-      api.generateStrm(id).then((stats) => {
-        toast(`STRM generated: ${strmSummary(stats)}`, 'info')
-        return stats
+      api.generateStrm(id).then((r) => {
+        toast(`STRM generated: ${strmSummary(r)}`, 'info')
+        return r
       }),
     deleteStrm: (id: string) =>
-      api.deleteStrm(id).then((stats) => {
-        toast(`STRM deleted: ${strmSummary(stats)}`, 'info')
-        return stats
+      api.deleteStrm(id).then((r) => {
+        toast(`STRM deleted: ${strmSummary(r)}`, 'info')
+        return r
       }),
   }
 }

@@ -92,8 +92,10 @@ export const api = {
     request<SplitPartsResult>('POST', `/api/v1/nodes/${id(nodeId)}/parts/split`, { body: { part_indices: partIndices } }),
   reorderParts: (nodeId: string, order: number[]) =>
     request<FsNode>('PUT', `/api/v1/nodes/${id(nodeId)}/parts`, { body: { order } }),
-  generateStrm: (nodeId: string) => request<StrmResult>('POST', `/api/v1/nodes/${id(nodeId)}/strm`),
-  deleteStrm: (nodeId: string) => request<StrmResult>('DELETE', `/api/v1/nodes/${id(nodeId)}/strm`),
+  generateStrm: (nodeId: string) =>
+    request<StrmResult>('POST', `/api/v1/nodes/${id(nodeId)}/strm`),
+  deleteStrm: (nodeId: string) =>
+    request<StrmResult>('DELETE', `/api/v1/nodes/${id(nodeId)}/strm`),
 
   // -- inline file content (edit)
   fileContent: async (nodeId: string): Promise<string> => {

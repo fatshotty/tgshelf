@@ -71,7 +71,13 @@ async def _run_op_background(
     *,
     force_copy: bool = False,
 ) -> None:
-    log.info("[bg] starting %s of folder %s -> %s", op, node_id, parent_id)
+    log.info(
+        "[bg] starting %s of folder %s -> %s force_copy=%s",
+        op,
+        node_id,
+        parent_id,
+        force_copy,
+    )
     try:
         async with rt["session_factory"]() as session:
             fs = _runtime_fs(rt, session)
@@ -79,7 +85,13 @@ async def _run_op_background(
                 await fs.move(node_id, parent_id)
             else:
                 await fs.copy(node_id, parent_id, force_copy=force_copy)
-        log.info("[bg] %s of folder %s -> %s completed", op, node_id, parent_id)
+        log.info(
+            "[bg] %s of folder %s -> %s completed force_copy=%s",
+            op,
+            node_id,
+            parent_id,
+            force_copy,
+        )
     except Exception:  # noqa: BLE001 - fire-and-forget: log, never crash the loop
         log.exception("[bg] %s of folder %s -> %s FAILED", op, node_id, parent_id)
 
@@ -106,6 +118,11 @@ async def _json_body(request: web.Request) -> dict:
 
 def _truthy(value: str) -> bool:
     return value.lower() in ("1", "true", "yes")
+
+
+def _body_bool(body: dict, key: str) -> bool:
+    value = body.get(key, False)
+    return _truthy(value) if isinstance(value, str) else bool(value)
 
 
 def _parent_path(path: str) -> str:
@@ -345,16 +362,21 @@ async def copy_node(request: web.Request) -> web.Response:
     node_id = request.match_info["id"]
     body = await _json_body(request)
     parent_id = body.get("parent_id")
+    force_copy = _body_bool(body, "force_copy")
     if not parent_id:
         return _bad_request("'parent_id' is required")
-    force_copy = bool(body.get("force_copy", False))
     async with open_fs(request) as fs:
         node = await fs.get(node_id)
         if node is None:
             return _not_found(f"node {node_id} not found")
         await fs.ensure_move_target(parent_id)  # sync 400/404 before any 202
         if node.is_folder:  # may take hours -> fire-and-forget, respond now
-            log.info("copy folder %s -> %s: accepted (background)", node_id, parent_id)
+            log.info(
+                "[copy] folder %s -> %s: accepted (background) force_copy=%s",
+                node_id,
+                parent_id,
+                force_copy,
+            )
             _spawn_background(
                 request.app,
                 _run_op_background(
@@ -368,9 +390,11 @@ async def copy_node(request: web.Request) -> web.Response:
             return web.json_response(
                 {"status": "accepted", "operation": "copy", "node_id": node_id}, status=202
             )
-        log.info("copy file %s -> %s", node_id, parent_id)
-        copied = await fs.copy(node_id, parent_id, force_copy=force_copy)
-        return web.json_response(node_to_dict(copied), status=201)
+        log.info("[copy] file %s -> %s force_copy=%s", node_id, parent_id, force_copy)
+        return web.json_response(
+            node_to_dict(await fs.copy(node_id, parent_id, force_copy=force_copy)),
+            status=201,
+        )
 
 
 async def merge_node(request: web.Request) -> web.Response:
@@ -445,7 +469,12 @@ async def strm_node(request: web.Request) -> web.Response:
             return _bad_request(f"node is not under strm.source ({cfg.source})")
         # clear only makes sense for a folder; for a file it would wipe siblings
         stats = await strm_cmd.generate(
-            fs.repo, node, base, cfg.template, clear=clear and node.is_folder
+            fs.repo,
+            node,
+            base,
+            cfg.template,
+            clear=clear and node.is_folder,
+            concurrent=request.app[RUNTIME].get("operations_concurrent", 1),
         )
         log.info("strm generated for %s -> %s (%s)", node_id, base, stats)
         return web.json_response(
@@ -461,10 +490,8 @@ async def strm_node(request: web.Request) -> web.Response:
 
 
 async def delete_strm_node(request: web.Request) -> web.Response:
-    """Delete .strm outputs for one folder/file from the global destination tree.
-
-    Deletion is guarded by expected content: files edited by hand are preserved.
-    """
+    """Delete .strm/raw-inline outputs for one folder/file from the configured
+    destination tree. Deletion is guarded by expected generated content."""
     from tgshelf.commands import strm as strm_cmd
 
     node_id = request.match_info["id"]
@@ -479,7 +506,13 @@ async def delete_strm_node(request: web.Request) -> web.Response:
         base = strm_cmd.strm_base(cfg.destination, cfg.source, node_path, node.is_folder)
         if base is None:
             return _bad_request(f"node is not under strm.source ({cfg.source})")
-        stats = await strm_cmd.delete_outputs(fs.repo, node, base, cfg.template)
+        stats = await strm_cmd.delete_outputs(
+            fs.repo,
+            node,
+            base,
+            cfg.template,
+            concurrent=request.app[RUNTIME].get("operations_concurrent", 1),
+        )
         log.info("strm deleted for %s -> %s (%s)", node_id, base, stats)
         return web.json_response(
             {

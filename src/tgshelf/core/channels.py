@@ -98,11 +98,15 @@ async def forward_parts(
 
 
 async def delete_originals(
-    gateway: Any, parts: Sequence[PartRecord], *, notifier: Any = None
+    gateway: Any,
+    parts: Sequence[PartRecord],
+    *,
+    notifier: Any = None,
+    context: str = "move",
 ) -> None:
-    """Best-effort deletion of the original messages after a move's DB commit.
+    """Best-effort deletion of original messages after the caller's DB commit.
 
-    Deletion never fails the move — the move is already committed; at worst a
+    Deletion never fails the caller — the DB write is already committed; at worst a
     duplicate is leaked in the old channel. But not all failures are equal:
 
     - a *benign* failure (message already gone out-of-band, transient) is just a
@@ -114,23 +118,27 @@ async def delete_originals(
     """
     for part in parts:
         try:
+            log.debug(
+                "[%s] deleting Telegram message channel=%s message=%s part=%s",
+                context, part.channel_id, part.message_id, part.idx,
+            )
             await gateway.delete_message(part.channel_id, part.message_id)
         except TgError as exc:
             if exc.severity in (Severity.ERROR, Severity.CRITICAL):
                 msg = (
                     f"could not delete original message {part.message_id} in "
-                    f"channel {part.channel_id} after move: {exc}"
+                    f"channel {part.channel_id} after {context}: {exc}"
                 )
-                log.error("[move] %s", msg)
+                log.error("[%s] %s", context, msg)
                 if notifier is not None:
                     await notifier.notify(msg, severity=exc.severity)
             else:  # WARNING-class domain error (flood/transient): best-effort
                 log.warning(
-                    "could not delete original message %s in channel %s: %s",
-                    part.message_id, part.channel_id, exc,
+                    "[%s] could not delete original message %s in channel %s: %s",
+                    context, part.message_id, part.channel_id, exc,
                 )
         except Exception as exc:  # noqa: BLE001 - best-effort, never fail the move
             log.warning(
-                "could not delete original message %s in channel %s: %s",
-                part.message_id, part.channel_id, exc,
+                "[%s] could not delete original message %s in channel %s: %s",
+                context, part.message_id, part.channel_id, exc,
             )

@@ -35,6 +35,7 @@ class PoolMember:
         self.last_lease_seq = 0
         self.ineligible_channels: set[int] = set()
         self.is_premium = False  # account tier (user accounts; set at login/recheck)
+        self.max_upload_parts = 0
 
     @property
     def load(self) -> float:

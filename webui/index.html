@@ -12,7 +12,7 @@
             configurable: true,
             value: function hasOwn(object, property) {
               if (object == null) {
-                throw new TypeError('hasOwn called on null or undefined')
+                throw new TypeError('Object.hasOwn called on null or undefined')
               }
               return Object.prototype.hasOwnProperty.call(Object(object), property)
             },

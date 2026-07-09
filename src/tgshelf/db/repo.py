@@ -138,6 +138,14 @@ class NodeRepo:
         )
         return result.scalar_one_or_none()
 
+    async def contents_of(self, node_ids: Sequence[str]) -> dict[str, bytes | None]:
+        if not node_ids:
+            return {}
+        result = await self.session.execute(
+            select(Node.id, Node.content).where(Node.id.in_(list(node_ids)))
+        )
+        return {node_id: content for node_id, content in result.all()}
+
     # -- parts -------------------------------------------------------------
 
     async def add_part(
@@ -171,6 +179,19 @@ class NodeRepo:
             select(Part).where(Part.file_id == file_id).order_by(Part.idx)
         )
         return result.scalars().all()
+
+    async def parts_by_file(self, file_ids: Sequence[str]) -> dict[str, list[Part]]:
+        if not file_ids:
+            return {}
+        result = await self.session.execute(
+            select(Part)
+            .where(Part.file_id.in_(list(file_ids)))
+            .order_by(Part.file_id, Part.idx)
+        )
+        grouped: dict[str, list[Part]] = {file_id: [] for file_id in file_ids}
+        for part in result.scalars():
+            grouped.setdefault(part.file_id, []).append(part)
+        return grouped
 
     async def set_part_original_filename(
         self, file_id: str, idx: int, original_filename: str

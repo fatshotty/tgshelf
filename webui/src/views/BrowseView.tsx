@@ -4,13 +4,14 @@ import { useLocation, useNavigate } from 'react-router-dom'
 
 import { api, ApiError } from '../api/client'
 import type { FsNode } from '../api/types'
-import { ConfirmDialog, PromptDialog, SizeDialog, StrmDialog } from '../components/dialogs'
+import { ConfirmDialog, PromptDialog, SizeDialog } from '../components/dialogs'
 import { FileEditDialog } from '../components/FileEditDialog'
 import { FolderPicker } from '../components/FolderPicker'
 import { MergePartsDialog } from '../components/MergePartsDialog'
 import { NodeList } from '../components/NodeList'
 import type { NodeAction } from '../components/NodeMenu'
 import { SplitPartsDialog } from '../components/SplitPartsDialog'
+import { StrmDialog } from '../components/StrmDialog'
 import { useToast } from '../components/Toast'
 import { useTreeActions } from '../lib/mutations'
 import { filterNodesByName } from '../lib/nodeFilter'
@@ -211,13 +212,13 @@ export default function BrowseView() {
       )}
       {dialog?.kind === 'strm' && (
         <StrmDialog
-          name={dialog.node.name}
+          node={dialog.node}
           onClose={() => setDialog(null)}
-          onDelete={async () => {
-            await actions.deleteStrm(dialog.node.id)
-          }}
           onGenerate={async () => {
             await actions.generateStrm(dialog.node.id)
+          }}
+          onDelete={async () => {
+            await actions.deleteStrm(dialog.node.id)
           }}
         />
       )}

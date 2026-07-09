@@ -380,6 +380,11 @@ All commands accept `--config`; the default is `./config.yaml`.
 # Inspect configured accounts and saved sessions.
 tgshelf --config config.yaml accounts list
 
+# Validate saved user sessions and print live Telegram account caps, including
+# Premium: True/False, max upload parts, DC, and user id.
+tgshelf --config config.yaml accounts check
+tgshelf --config config.yaml accounts check main backup
+
 # Create every missing user and bot session from telegram.users.
 tgshelf --config config.yaml accounts setup
 

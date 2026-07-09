@@ -21,7 +21,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "sync": ("upload a local directory tree to the drive", "C3"),
     "strm": ("generate .strm files from the virtual filesystem", "C3"),
     "download": ("download a file/folder from the drive to local disk", "C-download"),
-    "accounts": ("manage Telegram accounts/sessions (setup, login, add-bot, list)", "A3"),
+    "accounts": ("manage Telegram accounts/sessions (setup, login, add-bot, list, check)", "A3"),
     "create-bots": ("create bots via BotFather and join them to channels", "C4"),
     "bots": ("check/repair bot membership on all channels in use", "C4"),
     "search": ("search files and folders by name", "C2"),
@@ -148,6 +148,12 @@ def _add_bots_subparsers(cmd: argparse.ArgumentParser) -> None:
 def _add_accounts_subparsers(cmd: argparse.ArgumentParser) -> None:
     sub = cmd.add_subparsers(dest="accounts_cmd", required=True)
     sub.add_parser("list", help="list configured accounts and session status")
+    check = sub.add_parser("check", help="validate user sessions and show live account caps")
+    check.add_argument(
+        "names",
+        nargs="*",
+        help="user account names from config (default: every configured user account)",
+    )
     setup = sub.add_parser("setup", help="create missing user and bot sessions from config")
     setup.add_argument("--force", action="store_true", help="recreate sessions even when one already exists")
     login = sub.add_parser("login", help="interactive user login")

@@ -126,19 +126,32 @@ def recap_extra(stats: "Stats") -> str:
     return f"+ {stats.overwritten} overwritten, {stats.deleted} deleted"
 
 
-def _fs(session, *, master_channel, min_size, uploader, streamer, caption_template) -> FileSystem:
+def _fs(
+    session,
+    *,
+    master_channel,
+    min_size,
+    uploader,
+    streamer,
+    gateway,
+    caption_template,
+    plugin_manager=None,
+) -> FileSystem:
     return FileSystem(
         NodeRepo(session), master_channel=master_channel,
-        uploader=uploader, streamer=streamer, min_size=min_size,
+        uploader=uploader, streamer=streamer, gateway=gateway, min_size=min_size,
         caption_template=caption_template,
+        plugin_manager=plugin_manager,
     )
 
 
 async def sync(session_factory, uploader, *, master_channel: int, min_size: int,
                local_dir, dest: str = "/", concurrent: int = 1, streamer=None,
+               gateway=None,
                delete_source: bool = False, overwrite: bool = False,
                state: ProgressState | None = None,
-               caption_template: str = "fileName: {filename}") -> Stats:
+               caption_template: str = "fileName: {filename}",
+               plugin_manager=None) -> Stats:
     root_dir = Path(local_dir)
     files = scan_local(local_dir)
     stats = Stats()
@@ -146,8 +159,9 @@ async def sync(session_factory, uploader, *, master_channel: int, min_size: int,
 
     def make_fs(session) -> FileSystem:
         return _fs(session, master_channel=master_channel, min_size=min_size,
-                   uploader=uploader, streamer=streamer,
-                   caption_template=caption_template)
+                   uploader=uploader, streamer=streamer, gateway=gateway,
+                   caption_template=caption_template,
+                   plugin_manager=plugin_manager)
 
     # The reference folder is created WHEN a file is processed, not up front. To
     # stay race-safe when concurrent workers need the same (or a prefix-sharing)
@@ -166,6 +180,21 @@ async def sync(session_factory, uploader, *, master_channel: int, min_size: int,
 
     sem = asyncio.Semaphore(max(1, concurrent))
 
+    def delete_local_source(lf: LocalFile, stored_size: int) -> None:
+        if stored_size != lf.size:
+            log.warning(
+                "[sync] not deleting source %s: size %d != node %d",
+                lf.path, lf.size, stored_size,
+            )
+            return
+        try:
+            lf.path.unlink()
+            stats.deleted += 1
+            prune_empty_dirs(lf.path.parent, root_dir)
+            log.info("[sync] deleted source %s", lf.path)
+        except OSError:
+            log.warning("[sync] could not delete source %s", lf.path)
+
     async def process(idx: int, lf: LocalFile) -> None:
         key = str(idx)
         async with sem:
@@ -178,6 +207,8 @@ async def sync(session_factory, uploader, *, master_channel: int, min_size: int,
                     if existing is not None and not overwrite:
                         if existing.size == lf.size:
                             stats.skipped += 1
+                            if delete_source:
+                                delete_local_source(lf, existing.size)
                         else:
                             log.warning(
                                 "[sync] size mismatch for %s/%s (drive %d != local %d); skipping",
@@ -198,19 +229,7 @@ async def sync(session_factory, uploader, *, master_channel: int, min_size: int,
                     log.info("[sync] uploaded %s", lf.name)
                 st.finish(key, "ok")
                 if delete_source:
-                    if node.size != lf.size:
-                        log.warning(
-                            "[sync] not deleting source %s: size %d != node %d",
-                            lf.path, lf.size, node.size,
-                        )
-                    else:
-                        try:
-                            lf.path.unlink()
-                            stats.deleted += 1
-                            prune_empty_dirs(lf.path.parent, root_dir)
-                            log.info("[sync] deleted source %s", lf.path)
-                        except OSError:
-                            log.warning("[sync] could not delete source %s", lf.path)
+                    delete_local_source(lf, node.size)
             except Exception:  # noqa: BLE001 - one bad file never aborts the run
                 stats.failed += 1
                 st.finish(key, "failed")
@@ -286,6 +305,7 @@ async def run(config: Config, args) -> int:
             master_channel=config.telegram.upload.channel,
             min_size=config.telegram.upload.min_size,
             streamer=runtime["streamer"],
+            gateway=runtime["write_gateway"],
             local_dir=local_dir,
             dest=dest,
             concurrent=concurrent,
@@ -293,6 +313,7 @@ async def run(config: Config, args) -> int:
             overwrite=getattr(args, "overwrite", False),
             state=state,
             caption_template=config.caption.template,
+            plugin_manager=runtime["plugin_manager"],
         )
     finally:
         stop.set()

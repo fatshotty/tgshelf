@@ -23,6 +23,7 @@ from tgshelf.db.engine import check_connection, create_engine, create_session_fa
 from tgshelf.http.app import make_app
 from tgshelf.log import describe_exc
 from tgshelf.looplag import start_loop_lag_monitor, stop_loop_lag_monitor
+from tgshelf.plugins import load_plugins
 from tgshelf.telegram.pool import BotPool, ClientPool, PoolMember
 from tgshelf.telegram.ratelimit import TokenBucketRateLimiter
 from tgshelf.telegram.write_gateway import AccountWriteGateway
@@ -100,6 +101,7 @@ def build_runtime(
         allow_user_fallback=config.download.allow_user_fallback,
         memory_soft_limit=config.download.memory_soft_limit,
     )
+    plugin_manager = load_plugins(config.plugins)
     executor = FsExecutor(
         session_factory,
         client_pool,
@@ -110,6 +112,7 @@ def build_runtime(
         streamer=streamer,
         gateway=write_gateway,
         caption_template=config.caption.template,
+        plugin_manager=plugin_manager,
     )
     return {
         "config": config,
@@ -120,6 +123,7 @@ def build_runtime(
         "streamer": streamer,
         "write_gateway": write_gateway,
         "executor": executor,
+        "plugin_manager": plugin_manager,
     }
 
 
@@ -289,6 +293,7 @@ async def run_server(config: Config) -> None:
         bot_pool=runtime["bot_pool"],
         notifier=notifier,
         caption_template=config.caption.template,
+        plugin_manager=runtime["plugin_manager"],
         strm=config.strm,
         rclone=config.rclone,
         rc_registry=rc_registry,

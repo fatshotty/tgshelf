@@ -1,15 +1,14 @@
-// View / edit the body of an INLINE (DB-stored) file. Text mimes load into a
-// textarea and can be saved in place; binary mimes are view-only (size + mime +
-// a download link). A save that would push the file past the inline threshold is
-// rejected with 409 — we then offer to "force" it onto Telegram (the file stops
-// being inline). Only shown for inline files (see NodeMenu).
+// Composite file editor: filename + info.notes + inline text content through
+// PUT /api/v1/nodes/{id}. Binary files remain metadata-only here.
 import { useQuery } from '@tanstack/react-query'
-import { useState } from 'react'
+import { type FormEvent, useState } from 'react'
 
-import { api, ApiError, downloadUrl } from '../api/client'
+import { api, downloadUrl, type NodeUpdate } from '../api/client'
 import type { FsNode } from '../api/types'
 import { humanBytes, isTextFile } from '../lib/format'
 import { Modal } from './Modal'
+
+const NOTES_MAX = 200
 
 export function FileEditDialog({
   node,
@@ -17,64 +16,41 @@ export function FileEditDialog({
   onClose,
 }: {
   node: FsNode
-  onSave: (data: string, force: boolean) => Promise<void>
+  onSave: (body: NodeUpdate) => Promise<void>
   onClose: () => void
 }) {
-  const editable = isTextFile(node.name, node.mime)
-
-  if (!editable) {
-    return (
-      <Modal title={`View — ${node.name}`} onClose={onClose}>
-        <div className="dialog">
-          <p>
-            This is a binary file ({node.mime ?? 'unknown type'}, {humanBytes(node.size)}) — it
-            can't be edited as text.
-          </p>
-          <div className="dialog-actions">
-            <a className="btn" href={downloadUrl(node.id, node.name)} target="_blank" rel="noreferrer">
-              Download
-            </a>
-            <button type="button" onClick={onClose}>
-              Close
-            </button>
-          </div>
-        </div>
-      </Modal>
-    )
-  }
-  return <TextEditor node={node} onSave={onSave} onClose={onClose} />
-}
-
-function TextEditor({
-  node,
-  onSave,
-  onClose,
-}: {
-  node: FsNode
-  onSave: (data: string, force: boolean) => Promise<void>
-  onClose: () => void
-}) {
-  const contentQ = useQuery({ queryKey: ['content', node.id], queryFn: () => api.fileContent(node.id) })
-  const [value, setValue] = useState<string | null>(null)
+  const isText = isTextFile(node.name, node.mime)
+  const contentEditable = isText && node.inline
+  const notes = typeof node.info?.notes === 'string' ? node.info.notes : ''
+  const contentQ = useQuery({
+    queryKey: ['content', node.id],
+    queryFn: () => api.fileContent(node.id),
+    enabled: contentEditable,
+  })
+  const [name, setName] = useState(node.name)
+  const [notesValue, setNotesValue] = useState(notes)
+  const [contentValue, setContentValue] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [askForce, setAskForce] = useState(false)
 
-  // seed the textarea once the content has loaded
-  const text = value ?? contentQ.data ?? ''
+  const text = contentValue ?? contentQ.data ?? ''
+  const notesTooLong = notesValue.length > NOTES_MAX
 
-  const save = async (force: boolean) => {
+  const submit = async (e: FormEvent) => {
+    e.preventDefault()
+    if (notesTooLong) return
     setBusy(true)
     setErr(null)
     try {
-      await onSave(text, force)
+      const body: NodeUpdate = {
+        name,
+        info: { notes: notesValue },
+      }
+      if (contentEditable) body.content = text
+      await onSave(body)
       onClose()
     } catch (ex) {
-      if (ex instanceof ApiError && ex.status === 409 && !force) {
-        setAskForce(true) // too large to stay inline — offer to push to Telegram
-      } else {
-        setErr(ex instanceof Error ? ex.message : String(ex))
-      }
+      setErr(ex instanceof Error ? ex.message : String(ex))
     } finally {
       setBusy(false)
     }
@@ -82,43 +58,56 @@ function TextEditor({
 
   return (
     <Modal title={`Edit — ${node.name}`} onClose={onClose} className="file-edit-modal">
-      <div className="dialog">
-        {contentQ.isLoading && <p>Loading…</p>}
-        {contentQ.error && <div className="error">{String(contentQ.error)}</div>}
-        {!contentQ.isLoading && !contentQ.error && (
+      <form className="dialog" onSubmit={submit}>
+        <label className="dialog-label">Filename</label>
+        <input autoFocus value={name} onChange={(e) => setName(e.target.value)} />
+
+        <label className="dialog-label">Notes</label>
+        <textarea
+          className="notes-editor"
+          value={notesValue}
+          maxLength={NOTES_MAX + 1}
+          onChange={(e) => setNotesValue(e.target.value)}
+        />
+        <div className={notesTooLong ? 'error compact' : 'muted compact'}>
+          {notesValue.length}/{NOTES_MAX}
+        </div>
+
+        <label className="dialog-label">Content</label>
+        {!isText ? (
+          <div className="readonly-box">
+            Binary file ({node.mime ?? 'unknown type'}, {humanBytes(node.size)})
+          </div>
+        ) : !node.inline ? (
+          <div className="readonly-box">
+            Text file stored on Telegram ({humanBytes(node.size)})
+          </div>
+        ) : contentQ.isLoading ? (
+          <div className="info compact">Loading...</div>
+        ) : contentQ.error ? (
+          <div className="error">{String(contentQ.error)}</div>
+        ) : (
           <textarea
             className="editor"
-            autoFocus
             spellCheck={false}
             value={text}
-            onChange={(e) => {
-              setValue(e.target.value)
-              setAskForce(false)
-            }}
+            onChange={(e) => setContentValue(e.target.value)}
           />
         )}
+
         {err ? <div className="error">{err}</div> : null}
-        {askForce ? (
-          <div className="warn">
-            The new content exceeds the inline limit. Saving will move this file onto Telegram
-            (it stops being a DB-stored file).
-          </div>
-        ) : null}
         <div className="dialog-actions">
+          <a className="btn" href={downloadUrl(node.id, node.name)} target="_blank" rel="noreferrer">
+            Download
+          </a>
           <button type="button" onClick={onClose}>
             Cancel
           </button>
-          {askForce ? (
-            <button className="danger" disabled={busy} onClick={() => save(true)}>
-              Save to Telegram
-            </button>
-          ) : (
-            <button disabled={busy || contentQ.isLoading} onClick={() => save(false)}>
-              Save
-            </button>
-          )}
+          <button type="submit" disabled={busy || notesTooLong || contentQ.isLoading}>
+            Save
+          </button>
         </div>
-      </div>
+      </form>
     </Modal>
   )
 }

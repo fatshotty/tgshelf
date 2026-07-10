@@ -1,4 +1,4 @@
-"""`tgshelf ls | search | cp | mv | rm | purge` — thin management wrappers over FileSystem.
+"""`tgshelf ls | search | cp | mv | rm | purge | notes` — thin wrappers over FileSystem.
 
 Path-addressed (like the rest of the UX). ls/rm touch only Postgres; cp/mv/purge
 also need Telegram (forward parts / delete messages), so they connect the user
@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from tgshelf.config import Config
-from tgshelf.core.fs import FileSystem
+from tgshelf.core.fs import FileSystem, INFO_NOTES_MAX_LENGTH
 from tgshelf.core.mirror import MirrorPlan
 from tgshelf.db.engine import create_engine, create_session_factory
 from tgshelf.db.repo import NodeRepo
@@ -262,6 +262,30 @@ async def _do_mirror(fs: FileSystem, source_path: str, dest_path: str, *, dry_ru
     return 0
 
 
+async def _do_notes(
+    fs: FileSystem, path: str, notes: str | None = None, *, clear: bool = False
+) -> int:
+    node = await fs.resolve(path)
+    if node is None:
+        return _err(f"path not found: {path}")
+    if node.is_folder:
+        return _err(f"path is a folder, not a file: {path}")
+    if clear and notes is not None:
+        return _err("provide either notes text or --clear, not both")
+    if notes is None and not clear:
+        current = ""
+        if isinstance(node.info, dict) and isinstance(node.info.get("notes"), str):
+            current = node.info["notes"]
+        print(current)
+        return 0
+    updated = await fs.set_info_notes(node.id, "" if clear else notes or "")
+    value = ""
+    if isinstance(updated.info, dict) and isinstance(updated.info.get("notes"), str):
+        value = updated.info["notes"]
+    print(f"notes updated {path} ({len(value)}/{INFO_NOTES_MAX_LENGTH})")
+    return 0
+
+
 def _mirror_counts(plan: MirrorPlan) -> dict[str, int]:
     replaced_kinds = {
         "replace_file",
@@ -347,6 +371,7 @@ async def _telegram_fs(config: Config):
                 executor=runtime["executor"],
                 gateway=runtime["write_gateway"],
                 caption_template=config.caption.template,
+                plugin_manager=runtime["plugin_manager"],
             )
     finally:
         await engine.dispose()
@@ -394,6 +419,9 @@ async def run(config: Config, args) -> int:
             return await _do_purge(
                 fs, args.path, deleted_only=args.deleted_only, dry_run=args.dry_run
             )
+    if cmd == "notes":
+        async with _telegram_fs(config) as fs:
+            return await _do_notes(fs, args.path, args.notes, clear=args.clear)
     if cmd == "mv":
         async with _telegram_fs(config) as fs:
             return await _do_mv(fs, args.src, args.dst)

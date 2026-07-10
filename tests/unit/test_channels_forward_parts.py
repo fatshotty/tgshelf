@@ -72,7 +72,7 @@ def test_multi_part_caption_uses_one_based_three_digit_suffix():
 
 def test_caption_template_renders_parent_path_and_part_metadata():
     caption = render_caption(
-        "{path}\nfileName: {filename}\npart: {part_idx}/{parts}\nsize: {size}\n{id}\n{mime}\n{channel_id}",
+        "{path}\nfileName: {filename}\npart: {part_idx}/{parts}\nsize: {size}\n{id}\n{mime}\n{channel_id}\n{info}",
         CaptionRenderContext(
             node_id="abc123def4",
             parent_path="/backup/movies-bk-1",
@@ -82,6 +82,7 @@ def test_caption_template_renders_parent_path_and_part_metadata():
             part_size=2097152,
             mime="video/x-matroska",
             channel_id=-100123,
+            info_notes="Director cut",
         ),
     )
 
@@ -92,7 +93,8 @@ def test_caption_template_renders_parent_path_and_part_metadata():
         "size: 2097152\n"
         "abc123def4\n"
         "video/x-matroska\n"
-        "-100123"
+        "-100123\n"
+        "Director cut"
     )
 
 
@@ -124,6 +126,7 @@ class FakeNode:
     size: int = 0
     channel_id: int | None = -100
     mime: str | None = "video/x-matroska"
+    info: dict[str, Any] | None = None
     mtime: Any = None
 
 
@@ -333,6 +336,54 @@ async def test_set_mime_syncs_caption_when_template_depends_on_mime():
 
     assert node.mime == "video/x-msvideo"
     assert gateway.caption_edits == [(-100, 11, "video/x-msvideo")]
+
+
+@pytest.mark.asyncio
+async def test_set_info_notes_syncs_caption_when_template_depends_on_info():
+    repo = FakeRepo()
+    gateway = RecordingGateway()
+    repo.nodes["root"] = FakeNode(id="root", name="", parent_id=None, is_folder=True)
+    repo.nodes["file"] = FakeNode(
+        id="file", name="Movie.mkv", parent_id="root", size=20, info={"rating": "ok"}
+    )
+    repo.parts["file"] = [FakePart("file", 0, -100, 11, 101, 20, "Movie.mkv")]
+
+    node = await make_fs(
+        repo, gateway, caption_template="fileName: {filename}\n{info}"
+    ).set_info_notes("file", "Director cut")
+
+    assert node.info == {"rating": "ok", "notes": "Director cut"}
+    assert gateway.caption_edits == [(-100, 11, "fileName: Movie.mkv\nDirector cut")]
+
+
+@pytest.mark.asyncio
+async def test_set_info_notes_skips_caption_when_template_ignores_info():
+    repo = FakeRepo()
+    gateway = RecordingGateway()
+    repo.nodes["file"] = FakeNode(id="file", name="Movie.mkv", size=20)
+    repo.parts["file"] = [FakePart("file", 0, -100, 11, 101, 20, "Movie.mkv")]
+
+    node = await make_fs(
+        repo, gateway, caption_template="fileName: {filename}"
+    ).set_info_notes("file", "Director cut")
+
+    assert node.info == {"notes": "Director cut"}
+    assert gateway.caption_edits == []
+
+
+@pytest.mark.asyncio
+async def test_resync_caption_forces_caption_update():
+    repo = FakeRepo()
+    gateway = RecordingGateway()
+    repo.nodes["root"] = FakeNode(id="root", name="", parent_id=None, is_folder=True)
+    repo.nodes["file"] = FakeNode(
+        id="file", name="Movie.mkv", parent_id="root", size=20, info={"notes": "TMDB: 33333"}
+    )
+    repo.parts["file"] = [FakePart("file", 0, -100, 11, 101, 20, "Movie.mkv")]
+
+    await make_fs(repo, gateway, caption_template="{info}").resync_caption("file")
+
+    assert gateway.caption_edits == [(-100, 11, "TMDB: 33333")]
 
 
 @pytest.mark.asyncio

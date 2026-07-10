@@ -31,29 +31,12 @@
 - Keep logs grouped and readable per target path, especially for purge operations
   that delete Telegram-backed parts.
 
-## Telegram Caption Consistency
+## Telegram Caption Reconciliation
 
-- Track and implement Telegram caption updates when a Telegram-backed file is
-  renamed in tgshelf.
-- Current upload captions store the original physical part names, for example:
-  `filename: Inception (2010) - WebDL 1080p AC3 10.1 GB.mkv.001`.
-- A later tgshelf rename updates the database node name only; the Telegram
-  message captions for the uploaded parts remain unchanged.
-- This makes Telegram channel re-indexing/disaster recovery unsafe: rebuilding
-  the database from channel history would recover stale names and could create
-  serious inconsistencies with the latest logical filesystem state.
-- Define a stable caption format that contains both immutable identity metadata
-  and the current logical filename, then update captions on rename operations.
-- Include the current logical full path in Telegram captions, in addition to
-  the filename, so disaster recovery can rebuild both file names and tree
-  placement from channel history.
-- Consider a dedicated configuration section for Telegram caption rendering.
-- Support configurable caption placeholders, for example `{file_id}`,
-  `{filename}`, `{path}`, `{channel_id}`, `{part_idx}`, `{parts}`, `{size}`,
-  and `{mime}`, so operators can decide which recovery metadata is written into
-  Telegram captions.
 - Add a migration/reconciliation command to detect stale captions and repair
-  them from the database.
+  them from the database. Runtime caption templates, placeholders, path-aware
+  captions, and caption updates for new mutations are implemented; historical
+  channel history still needs an explicit repair flow.
 
 ## Flood Logging
 
@@ -62,23 +45,11 @@
   behavior during the historical cleanup, but regular service operations must
   keep flood/cooldown events visible in logs.
 
-## Plugin Hooks And info.notes Captions
+## Plugin Follow Ups
 
-- Implement the design recorded in `docs/dev/plugins-and-info-notes.md`.
-- Render only `nodes.info["notes"]` below the canonical `fileName:` caption line.
-- Keep `info.notes` free-form: allow long text, line breaks, and empty lines;
-  do not trim or silently truncate it. If Telegram rejects the caption, surface
-  the error.
-- Add a centralized caption renderer and update upload, rename, copy/move,
-  merge, reorder, split, sanitizer, and recovery tooling to use it.
-- Add a core helper to update `info.notes` and resync Telegram captions for
-  Telegram-backed files.
-- Add a plugin manager with ordered hook chains and a single public
-  `PluginError` exception type.
-- Add initial file-level hooks for upload, move, copy, rename, delete, and
-  import.
-- Wire the plugin manager through every `FileSystem` construction path,
-  including HTTP, WebDAV, CLI sync, CLI fs operations, watcher/import-channel,
-  and `FsExecutor`.
-- Add an `install_plugin` or `plugins` command flow to make local plugin code
-  available and validate configured plugin modules.
+- Support editing text content above `telegram.upload.min_size` by converting or
+  replacing it as Telegram-backed content. The first composite edit endpoint
+  intentionally returns 409 for oversized inline text edits.
+- Wire the plugin manager into watcher and `import-channel` construction paths
+  so `after_file_import` also runs for Telegram channel imports. HTTP/WebDAV,
+  CLI sync, CLI fs operations, and `FsExecutor` are already wired.

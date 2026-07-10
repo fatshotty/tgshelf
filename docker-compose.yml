@@ -1,0 +1,18 @@
+services:
+  tgshelf:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: tgshelf:local
+    container_name: tgshelf
+    restart: unless-stopped
+    ports:
+      - "${TGSHELF_HTTP_PORT:-3000}:3000"
+    environment:
+      DB: "${TGSHELF_DB:?set TGSHELF_DB to the PostgreSQL async DSN}"
+      TGSHELF_CONFIG: /config/config.yaml
+      TGSHELF_RUN_MIGRATIONS: "${TGSHELF_RUN_MIGRATIONS:-1}"
+    volumes:
+      - "${TGSHELF_CONFIG_DIR:-./deploy/config}:/config:ro"
+      - "${TGSHELF_DATA_DIR:-./deploy/data}:/data"
+      - "${TGSHELF_PLUGIN_DIR:-./deploy/plugins}:/plugins:ro"

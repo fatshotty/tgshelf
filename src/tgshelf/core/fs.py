@@ -35,6 +35,7 @@ from tgshelf.db.repo import DuplicateNameError, NodeRepo
 log = logging.getLogger("tgshelf.fs")
 
 DEFAULT_MIME = "application/octet-stream"
+INFO_NOTES_MAX_LENGTH = 200
 
 # structural mime validation: type/subtype as RFC tokens, optional ";params".
 # Not a closed registry (new types appear); just rejects garbage (no slash,
@@ -54,6 +55,14 @@ class _PurgeFilePlan:
 
 def is_valid_mime(mime: str) -> bool:
     return bool(_MIME_RE.match(mime))
+
+
+def _info_notes(node: Any) -> str:
+    info = getattr(node, "info", None)
+    if not isinstance(info, dict):
+        return ""
+    notes = info.get("notes", "")
+    return notes if isinstance(notes, str) else ""
 
 
 class NotAReadableFile(Exception):
@@ -77,6 +86,10 @@ class IntegrityViolation(Exception):
     bug — surfaced by check_size, never raised on the read path."""
 
 
+class InfoNotesTooLong(ValueError):
+    """The free-form notes field exceeds the domain cap."""
+
+
 class FileSystem:
     def __init__(
         self,
@@ -90,6 +103,7 @@ class FileSystem:
         executor: Any = None,
         notifier: Any = None,
         caption_template: str = DEFAULT_CAPTION_TEMPLATE,
+        plugin_manager: Any = None,
     ):
         self.repo = repo
         self._master_channel = master_channel
@@ -101,6 +115,7 @@ class FileSystem:
         # alert channel (see channels.delete_originals); None -> log-only.
         self._notifier = notifier
         self._caption_template = caption_template
+        self._plugin_manager = plugin_manager
         # FsExecutor: when set, folder move/copy fan out per-file (each on its own
         # session + leased account). Without it, the fallback runs sequentially on
         # this instance's session/gateway.
@@ -218,6 +233,21 @@ class FileSystem:
     async def rename(self, node_id: str, new_name: str) -> Node:
         node = await self.repo.get(node_id)
         old_mime = getattr(node, "mime", None) if node is not None else None
+        hooks_enabled = self._plugins_enabled()
+        old_path = new_path = None
+        if hooks_enabled and node is not None:
+            old_path = await self.path_of(node_id)
+            new_path = await self._logical_child_path(node.parent_id, new_name)
+        if hooks_enabled and node is not None and not node.is_folder:
+            await self._run_before_plugin(
+                "before_file_rename",
+                operation="file_rename",
+                node=node,
+                old_parent_id=node.parent_id,
+                new_parent_id=node.parent_id,
+                old_path=old_path,
+                new_path=new_path,
+            )
         fields: dict[str, Any] = {"name": new_name}
         if node is not None and not node.is_folder:
             fields["mime"] = mimetypes.guess_type(new_name)[0] or DEFAULT_MIME
@@ -231,7 +261,18 @@ class FileSystem:
         if fields.get("mime") != old_mime:
             changed.add("mime")
         await self._sync_part_captions(node_id, changed_fields=changed)
-        return await self.repo.get(node_id)
+        updated = await self.repo.get(node_id)
+        if hooks_enabled and node is not None and not node.is_folder:
+            await self._run_after_plugin(
+                "after_file_rename",
+                operation="file_rename",
+                node=updated,
+                old_parent_id=node.parent_id,
+                new_parent_id=node.parent_id,
+                old_path=old_path,
+                new_path=new_path,
+            )
+        return updated
 
     async def set_channel(self, node_id: str, channel_id: int | None) -> Node:
         node = await self.repo.get(node_id)
@@ -264,12 +305,59 @@ class FileSystem:
         await self._sync_part_captions(node_id, changed_fields={"mime"})
         return await self.repo.get(node_id)
 
+    async def set_info_notes(self, node_id: str, notes: str) -> Node:
+        """Set nodes.info["notes"] and resync captions that render {info}."""
+        node = await self.repo.get(node_id)
+        if node is None or node.is_folder or node.state != "ACTIVE":
+            raise NotAReadableFile(f"node {node_id} is not a readable file")
+        if not isinstance(notes, str):
+            raise ValueError("info.notes must be a string")
+        if len(notes) > INFO_NOTES_MAX_LENGTH:
+            raise InfoNotesTooLong(
+                f"info.notes exceeds {INFO_NOTES_MAX_LENGTH} characters"
+            )
+        info = dict(node.info or {})
+        info["notes"] = notes
+        await self.repo.set_fields(node_id, info=info, mtime=func.now())
+        await self.repo.session.commit()
+        await self._sync_part_captions(node_id, changed_fields={"info"})
+        return await self.repo.get(node_id)
+
+    async def resync_caption(self, node_id: str) -> None:
+        """Force a Telegram caption render for every part of a Telegram-backed file."""
+        await self._sync_part_captions(node_id)
+
     async def delete(
         self, node_id: str, *, purge: bool = False, deleted_only: bool = False
     ) -> None:
         if not purge:
+            hooks_enabled = self._plugins_enabled()
+            files = await self._file_hook_nodes_for_delete(node_id) if hooks_enabled else []
+            hook_paths = (
+                {file.id: await self.path_of(file.id) for file in files}
+                if hooks_enabled
+                else {}
+            )
+            if hooks_enabled:
+                for file in files:
+                    await self._run_before_plugin(
+                        "before_file_delete",
+                        operation="file_delete",
+                        node=file,
+                        old_parent_id=file.parent_id,
+                        old_path=hook_paths[file.id],
+                    )
             await self.repo.set_state_subtree(node_id, "DELETED", from_states=("ACTIVE", "TEMP"))
             await self.repo.session.commit()
+            if hooks_enabled:
+                for file in files:
+                    await self._run_after_plugin(
+                        "after_file_delete",
+                        operation="file_delete",
+                        node=await self.repo.get(file.id),
+                        old_parent_id=file.parent_id,
+                        old_path=hook_paths[file.id],
+                    )
             return
         # purge: remove the Telegram messages of every file in the subtree first.
         # deleted_only restricts both the Telegram deletion and the row removal to
@@ -452,6 +540,26 @@ class FileSystem:
             raise NotAReadableFile(f"node {node_id} not found")
         await self.ensure_move_target(new_parent_id)
         name, is_folder = node.name, node.is_folder  # before any rollback expires node
+        hooks_enabled = self._plugins_enabled()
+        move_hook_contexts: list[tuple[Any, str | None, str | None]] = []
+        if hooks_enabled:
+            old_path = await self.path_of(node_id)
+            new_path = await self._logical_child_path(new_parent_id, node.name)
+            move_hook_contexts = (
+                await self._folder_move_hook_contexts(node, old_path, new_path)
+                if is_folder
+                else [(node, old_path, new_path)]
+            )
+            for file, file_old_path, file_new_path in move_hook_contexts:
+                await self._run_before_plugin(
+                    "before_file_move",
+                    operation="file_move",
+                    node=file,
+                    old_parent_id=file.parent_id,
+                    new_parent_id=file.parent_id if is_folder else new_parent_id,
+                    old_path=file_old_path,
+                    new_path=file_new_path,
+                )
 
         try:
             await self.repo.set_fields(node_id, parent_id=new_parent_id)
@@ -471,7 +579,19 @@ class FileSystem:
             _log_failures(results, "move")
         else:
             _raise_first_error(results)  # single file: surface the error
-        return await self.repo.get(node_id)
+        updated = await self.repo.get(node_id)
+        if hooks_enabled:
+            for file, file_old_path, file_new_path in move_hook_contexts:
+                await self._run_after_plugin(
+                    "after_file_move",
+                    operation="file_move",
+                    node=await self.repo.get(file.id),
+                    old_parent_id=file.parent_id,
+                    new_parent_id=file.parent_id if is_folder else new_parent_id,
+                    old_path=file_old_path,
+                    new_path=file_new_path,
+                )
+        return updated
 
     async def _fan_out(self, items, op) -> list:
         """Run a per-file op across `items`: parallel via the executor (each on
@@ -624,24 +744,55 @@ class FileSystem:
     async def _copy_file(self, src: Node, dst_parent_id: str, *, force_copy: bool = False) -> Node:
         dest_channel = await self.effective_channel(dst_parent_id)
         name = await self._dedup_name(dst_parent_id, src.name, is_folder=False)
+        hooks_enabled = self._plugins_enabled()
+        old_path = new_path = None
+        source_plugin_node = None
+        if hooks_enabled:
+            old_path = await self.path_of(src.id)
+            new_path = await self._logical_child_path(dst_parent_id, name)
+            source_plugin_node = await self._plugin_node_snapshot(src.id)
+            await self._run_before_plugin(
+                "before_file_copy",
+                operation="file_copy",
+                node=src,
+                old_parent_id=src.parent_id,
+                new_parent_id=dst_parent_id,
+                old_path=old_path,
+                new_path=new_path,
+                source_node=source_plugin_node,
+            )
 
         content = await self.repo.content_of(src.id)
         if content is not None:
             new = await self.repo.create(
                 name=name, parent_id=dst_parent_id, is_folder=False, mime=src.mime,
                 channel_id=dest_channel, state="ACTIVE", size=len(content), content=content,
+                info=dict(getattr(src, "info", None) or {}),
             )
             await self.repo.session.commit()
             log.info(
                 "[copy] copied file '%s' (%s) -> parent %s as '%s' (%s) force_copy=%s",
                 src.name, src.id, dst_parent_id, new.name, new.id, force_copy,
             )
-            return await self.repo.get(new.id)
+            copied = await self.repo.get(new.id)
+            if hooks_enabled:
+                await self._run_after_plugin(
+                    "after_file_copy",
+                    operation="file_copy",
+                    node=copied,
+                    old_parent_id=src.parent_id,
+                    new_parent_id=dst_parent_id,
+                    old_path=old_path,
+                    new_path=await self.path_of(new.id),
+                    source_node=source_plugin_node,
+                    target_node=await self._plugin_node_snapshot(new.id),
+                )
+            return copied
 
         src_parts = await self.repo.parts_of(src.id)
         new = await self.repo.create(
             name=name, parent_id=dst_parent_id, is_folder=False, mime=src.mime,
-            channel_id=dest_channel, state="TEMP",
+            channel_id=dest_channel, state="TEMP", info=dict(getattr(src, "info", None) or {}),
         )
         await self.repo.session.commit()
         total = len(src_parts)
@@ -655,6 +806,7 @@ class FileSystem:
                 total_parts=total,
                 part=p,
                 mime=src.mime,
+                info_notes=_info_notes(src),
                 channel_id=dest_channel,
             )
             for i, p in enumerate(src_parts)
@@ -679,7 +831,20 @@ class FileSystem:
             "[copy] copied file '%s' (%s) -> parent %s as '%s' (%s) force_copy=%s",
             src.name, src.id, dst_parent_id, name, new.id, force_copy,
         )
-        return await self.repo.get(new.id)
+        copied = await self.repo.get(new.id)
+        if hooks_enabled:
+            await self._run_after_plugin(
+                "after_file_copy",
+                operation="file_copy",
+                node=copied,
+                old_parent_id=src.parent_id,
+                new_parent_id=dst_parent_id,
+                old_path=old_path,
+                new_path=await self.path_of(new.id),
+                source_node=source_plugin_node,
+                target_node=await self._plugin_node_snapshot(new.id),
+            )
+        return copied
 
     async def _ensure_folder(self, parent_id: str, name: str) -> str:
         """Reuse a same-name folder under parent (merge) or create it; return id."""
@@ -769,6 +934,19 @@ class FileSystem:
             mime=mime, channel_id=channel, state="TEMP",
         )
         await self.repo.session.commit()
+        if self._plugins_enabled():
+            try:
+                await self._run_before_plugin(
+                    "before_file_upload",
+                    operation="file_upload",
+                    node=node,
+                    new_parent_id=parent_id,
+                    new_path=await self._logical_child_path(parent_id, name),
+                )
+            except Exception:
+                await self.repo.purge(node.id)
+                await self.repo.session.commit()
+                raise
 
         async def persist_part(rec: PartRecord) -> None:
             await self.repo.add_part(
@@ -816,6 +994,14 @@ class FileSystem:
         # size (catches a part row that failed to persist). Always holds for a
         # correct write; a guard, not a recovery path.
         await self.check_size(node.id)
+        if self._plugins_enabled():
+            uploaded = await self.repo.get(node.id)
+            await self._run_after_plugin(
+                "after_file_upload",
+                operation="file_upload",
+                node=uploaded,
+                new_path=await self.path_of(node.id),
+            )
         return await self.repo.get(node.id)
 
     async def replace_content(
@@ -922,6 +1108,110 @@ class FileSystem:
             )
         return True
 
+    # -- plugin hooks -------------------------------------------------------
+
+    def _plugins_enabled(self) -> bool:
+        manager = self._plugin_manager
+        return manager is not None and bool(getattr(manager, "enabled", False))
+
+    async def _run_before_plugin(
+        self,
+        hook_name: str,
+        *,
+        operation: str,
+        node: Node | None,
+        **context_fields: Any,
+    ) -> None:
+        manager = self._plugin_manager
+        if node is None or not self._plugins_enabled():
+            return
+        ctx = await self._plugin_context(
+            operation=operation,
+            node=node,
+            **context_fields,
+        )
+        if ctx is not None:
+            await manager.run_before(hook_name, ctx)
+
+    async def _run_after_plugin(
+        self,
+        hook_name: str,
+        *,
+        operation: str,
+        node: Node | None,
+        **context_fields: Any,
+    ) -> None:
+        manager = self._plugin_manager
+        if node is None or not self._plugins_enabled():
+            return
+        ctx = await self._plugin_context(
+            operation=operation,
+            node=node,
+            **context_fields,
+        )
+        if ctx is not None:
+            await manager.run_after(hook_name, ctx)
+
+    async def _plugin_context(
+        self,
+        *,
+        operation: str,
+        node: Node,
+        **context_fields: Any,
+    ):
+        from tgshelf.plugins import PluginContext
+
+        plugin_node = await self._plugin_node_snapshot(node.id)
+        if plugin_node is None:
+            return None
+        return PluginContext(
+            operation=operation,
+            host=await self._plugin_host(),
+            node=plugin_node,
+            **context_fields,
+        )
+
+    async def _plugin_host(self):
+        from tgshelf.plugins import PluginHost
+
+        return PluginHost(self)
+
+    async def _plugin_node_snapshot(self, node_id: str):
+        host = await self._plugin_host()
+        return await host.get_node(node_id)
+
+    async def _logical_child_path(self, parent_id: str | None, name: str) -> str:
+        parent_path = await self._path_of_folder(parent_id)
+        return f"/{name}" if parent_path == "/" else f"{parent_path}/{name}"
+
+    async def _folder_move_hook_contexts(
+        self, folder: Node, old_folder_path: str | None, new_folder_path: str | None
+    ) -> list[tuple[Node, str | None, str | None]]:
+        descendants = await self.repo.subtree(folder.id, state="ACTIVE")
+        files = [node for node in descendants if not node.is_folder]
+        contexts = []
+        for file in files:
+            old_file_path = await self.path_of(file.id)
+            new_file_path = None
+            if old_file_path is not None and old_folder_path and new_folder_path:
+                suffix = old_file_path[len(old_folder_path):]
+                new_file_path = f"{new_folder_path}{suffix}"
+            contexts.append((file, old_file_path, new_file_path))
+        return contexts
+
+    async def _file_hook_nodes_for_delete(self, node_id: str) -> list[Node]:
+        node = await self.repo.get(node_id)
+        if node is None:
+            return []
+        if not node.is_folder:
+            return [node] if node.state in ("ACTIVE", "TEMP") else []
+        descendants = await self.repo.subtree(node_id, state=None)
+        return [
+            descendant
+            for descendant in descendants
+            if not descendant.is_folder and descendant.state in ("ACTIVE", "TEMP")
+        ]
+
     # -- import / merge -----------------------------------------------------
 
     async def import_message(
@@ -964,7 +1254,16 @@ class FileSystem:
                 sibling.id, state="ACTIVE", channel_id=channel_id, mime=mime, size=ref.size
             )
             await self.repo.session.commit()
-            return await self.repo.get(sibling.id)
+            imported = await self.repo.get(sibling.id)
+            if self._plugins_enabled():
+                await self._run_after_plugin(
+                    "after_file_import",
+                    operation="file_import",
+                    node=imported,
+                    new_parent_id=parent_id,
+                    new_path=await self.path_of(sibling.id),
+                )
+            return imported
 
         node = await self.repo.create(
             name=name, parent_id=parent_id, is_folder=False, mime=mime,
@@ -975,7 +1274,16 @@ class FileSystem:
             doc_id=ref.doc_id, size=ref.size, original_filename=name,
         )
         await self.repo.session.commit()
-        return await self.repo.get(node.id)
+        imported = await self.repo.get(node.id)
+        if self._plugins_enabled():
+            await self._run_after_plugin(
+                "after_file_import",
+                operation="file_import",
+                node=imported,
+                new_parent_id=parent_id,
+                new_path=await self.path_of(node.id),
+            )
+        return imported
 
     async def _sync_part_captions(
         self, file_id: str, *, changed_fields: set[str] | None = None
@@ -1035,6 +1343,7 @@ class FileSystem:
             total_parts=total_parts,
             part=part,
             mime=node.mime,
+            info_notes=_info_notes(node),
             channel_id=channel_id,
         )
 
@@ -1048,6 +1357,7 @@ class FileSystem:
         total_parts: int,
         part: Any,
         mime: str | None,
+        info_notes: str = "",
         channel_id: int | None = None,
     ) -> str:
         return render_caption(
@@ -1061,6 +1371,7 @@ class FileSystem:
                 part_size=part.size,
                 mime=mime,
                 channel_id=part.channel_id if channel_id is None else channel_id,
+                info_notes=info_notes,
             ),
         )
 

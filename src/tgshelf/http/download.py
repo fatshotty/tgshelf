@@ -23,7 +23,7 @@ from urllib.parse import quote
 from aiohttp import web
 
 from tgshelf.http.api import open_fs
-from tgshelf.log import CLIENT_DISCONNECT, new_request_id
+from tgshelf.log import CLIENT_DISCONNECT, current_request_id, new_request_id
 from tgshelf.telegram.errors import ChannelUnavailable, FloodCooldown, PartMissing
 
 log = logging.getLogger("tgshelf.http.download")
@@ -136,8 +136,14 @@ async def stream_node(request: web.Request, fs, node) -> web.StreamResponse:
         await resp.write_eof()
         return resp
 
-    log.info(
-        "download %s '%s' bytes %d-%d/%d", node.id, node.name, start, end, size
+    log_download_start(
+        node=node,
+        method=request.method,
+        status=status,
+        start=start,
+        end=end,
+        size=size,
+        length=length,
     )
     stream = fs.open_read(node.id, start, end)
     sent = 0
@@ -168,9 +174,39 @@ async def stream_node(request: web.Request, fs, node) -> web.StreamResponse:
         await stream.aclose()  # release the streamer's bots on disconnect too
         # one terminal line per request: how it ended + bytes actually served
         # (runs on every exit incl. cancellation, before it re-propagates).
-        log.info("[download] %s request ended: %s — %d/%d bytes sent",
-                 node.id, outcome, sent, length)
+        log.info(
+            "[download] done req=%s file=%s outcome=%s sent=%d/%d",
+            current_request_id(),
+            node.id,
+            outcome,
+            sent,
+            length,
+        )
     return resp
+
+
+def log_download_start(
+    *,
+    node,
+    method: str,
+    status: int,
+    start: int,
+    end: int,
+    size: int,
+    length: int,
+) -> None:
+    log.info(
+        "[download] start req=%s method=%s file=%s name=%r status=%d range=%d-%d/%d length=%d",
+        current_request_id(),
+        method,
+        node.id,
+        node.name,
+        status,
+        start,
+        end,
+        size,
+        length,
+    )
 
 
 def register_download_routes(app: web.Application) -> None:

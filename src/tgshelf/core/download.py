@@ -16,8 +16,9 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Sequence
 
 from tgshelf.constants import CHUNK_SIZE
+from tgshelf.log import current_request_id
 
-log = logging.getLogger("tgshelf.download")
+log = logging.getLogger("tgshelf.stream")
 from tgshelf.telegram.errors import (
     ChannelUnavailable,
     FileRefExpired,
@@ -199,6 +200,10 @@ class ParallelStreamer:
         self._buffered_bytes += reserve
         self._active_streams += 1
         self._streams_total += 1
+        req_id = current_request_id()
+        started_at = time.monotonic()
+        emitted_bytes = 0
+        outcome = "completed"
         try:
             state = _StreamState(cond=asyncio.Condition(), n=len(chunks), capacity=capacity)
             part_refs: dict[tuple[str, int], Any] = {}  # (bot name, part idx) -> DocRef
@@ -212,9 +217,18 @@ class ParallelStreamer:
             bots = self._bot_pool.lease(k, channel_id=channel_id)
             if not bots:
                 bots = [await self._replace(channel_id, exclude=[])]
-            log.debug(
-                "[stream] channel %s, %d chunk(s), K=%d, read-ahead=%d, clients %s",
-                channel_id, len(chunks), k, capacity, [b.name for b in bots],
+            log.info(
+                "[stream] start req=%s channel=%s range=%d-%d/%d chunks=%d k=%d "
+                "read_ahead=%d clients=%s",
+                req_id,
+                channel_id,
+                plan.range_start,
+                plan.range_end,
+                plan.total_size,
+                len(chunks),
+                k,
+                capacity,
+                ",".join(b.name for b in bots),
             )
 
             workers = [
@@ -236,17 +250,34 @@ class ParallelStreamer:
                         # bots are normal); ≈ 0 -> starving = bots can't keep up.
                         occupancy = state.next_dispatch - state.next_emit
                         state.cond.notify_all()
-                    if seq % 16 == 0 or occupancy == 0:
-                        log.debug("[buf] seq %d buffer %d/%d (ready %d)%s",
-                                  seq, occupancy, state.capacity, len(state.results),
-                                  "  STARVED" if occupancy == 0 else "")
+                    if occupancy == 0:
+                        log.debug("[buf] req=%s seq=%d buffer %d/%d ready=%d STARVED",
+                                  req_id, seq, occupancy, state.capacity, len(state.results))
                     self._bytes_total += len(data)
+                    emitted_bytes += len(data)
                     yield data
             finally:
                 for w in workers:
                     w.cancel()
                 await asyncio.gather(*workers, return_exceptions=True)
+        except BaseException as exc:
+            outcome = f"aborted:{exc.__class__.__name__}"
+            raise
         finally:
+            duration = max(time.monotonic() - started_at, 0.0)
+            avg = emitted_bytes / duration if duration > 0 else 0.0
+            log.info(
+                "[stream] done req=%s channel=%s outcome=%s bytes=%d/%d chunks=%d "
+                "duration=%.2fs avg=%.1fB/s",
+                req_id,
+                channel_id,
+                outcome,
+                emitted_bytes,
+                plan.content_length,
+                len(chunks),
+                duration,
+                avg,
+            )
             self._buffered_bytes -= reserve
             self._active_streams -= 1
 

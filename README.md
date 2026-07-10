@@ -49,6 +49,51 @@ Telegram-side limits. In local testing, parallel downloads can aggregate multipl
 bots/accounts to increase effective throughput until the deployment reaches
 Telegram or network limits.
 
+## Telegram Channels Bound To Folders
+
+tgshelf uses PostgreSQL to maintain the logical folder and file tree, and uses
+pre-existing Telegram channels as the physical storage backend for file content.
+
+The root folder `/` uses the main Telegram channel configured in:
+
+```yaml
+telegram:
+  upload:
+    channel: -1001234567890
+```
+
+Each folder can inherit the parent folder's channel or define its own Telegram
+channel. New files uploaded into that folder are stored in the folder's
+effective channel.
+
+Example:
+
+```text
+/                 -> main channel
+/photos           -> inherits the main channel
+/photos/raw       -> channel A
+/photos/raw/2026  -> inherits channel A
+/documents/pdf    -> channel B
+```
+
+tgshelf does not create Telegram channels. Channels must already exist and must
+be configured manually in Telegram before they are used by tgshelf.
+
+tgshelf does not currently rebuild a channel's history. If a mapped Telegram
+channel already contains files, those files are not cataloged automatically.
+tgshelf manages only new files uploaded through tgshelf after the channel has
+been configured.
+
+Every account declared in `telegram.users` must be able to access every channel
+used by the root folder or mapped folders. User accounts need read/write access
+because they handle uploads, copies, moves, and maintenance operations. Bots
+used for downloads may have read-only permissions because they do not write to
+channels.
+
+Changing the channel associated with a folder affects new uploads, but it does
+not automatically move files that were already stored. Existing Telegram file
+parts remain in the channel where they were created.
+
 ## Development Setup
 
 Clone the repository, create a virtual environment, and install the Python

@@ -8,6 +8,22 @@ files are split into parts and reassembled transparently.
 metadata in PostgreSQL. It exposes folders and files through the Python CLI,
 aiohttp APIs, HTTP download endpoints, WebDAV/rclone, and a React Web UI.
 
+## Contents
+
+- [Features](#features)
+- [Stack](#stack)
+- [Performance Notes](#performance-notes)
+- [Telegram Channels Bound To Folders](#telegram-channels-bound-to-folders)
+- [Telegram Accounts And Bots](#telegram-accounts-and-bots)
+- [Development Setup](#development-setup)
+- [Docker](#docker)
+- [Developing Plugins](#developing-plugins)
+- [Verification](#verification)
+- [Versioning And Releases](#versioning-and-releases)
+- [Configuration](#configuration)
+- [CLI Examples](#cli-examples)
+- [TODO list](#todo-list)
+
 ## Features
 
 - PostgreSQL metadata for a virtual tree with stable 10-character node IDs.
@@ -84,15 +100,31 @@ channel already contains files, those files are not cataloged automatically.
 tgshelf manages only new files uploaded through tgshelf after the channel has
 been configured.
 
-Every account declared in `telegram.users` must be able to access every channel
-used by the root folder or mapped folders. User accounts need read/write access
-because they handle uploads, copies, moves, and maintenance operations. Bots
-used for downloads may have read-only permissions because they do not write to
-channels.
-
 Changing the channel associated with a folder affects new uploads, but it does
 not automatically move files that were already stored. Existing Telegram file
 parts remain in the channel where they were created.
+
+## Telegram Accounts And Bots
+
+tgshelf requires at least one Telegram user account. User accounts handle
+read/write operations: uploads, copies, moves, deletes, and maintenance.
+
+Bots are optional. When configured, they are used only for downloads and
+streaming, so they may have read-only access to mapped channels.
+
+Multiple user accounts and multiple bots can be configured at the same time.
+tgshelf rotates them according to the operation type to distribute load and
+reduce the risk of flood waits.
+
+All user accounts must have read/write access to every mapped channel. Bots, if
+present, must be able to read all mapped channels.
+
+Without bots, downloads and streaming can use user accounts by enabling:
+
+```yaml
+download:
+  allow_user_fallback: true
+```
 
 ## Development Setup
 

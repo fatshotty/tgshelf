@@ -46,6 +46,10 @@
   the `[flood]` marker. The one-shot caption sanitizer may surface a different
   behavior during the historical cleanup, but regular service operations must
   keep flood/cooldown events visible in logs.
+- Calcolare `multi_bot_download` come `min(multi_bot_download, bot count e/o
+  user count)` in base al pool effettivamente usabile per la lettura.
+- Rendere `allow_user_fallback` implicitamente `true` quando non ci sono bot
+  configurati, notificando la scelta nel log.
 
 ## Plugin Follow Ups
 

@@ -28,12 +28,10 @@ aiohttp APIs, HTTP download endpoints, WebDAV/rclone, and a React Web UI.
   and Telegram-backed file-part management.
 - WebDAV endpoint for rclone, plus optional rclone rc cache invalidation through
   the PostgreSQL changes feed.
-- Optional live watcher that imports files posted to the master channel while
-  the server is running.
 - Trusted in-process Python plugin hooks for file upload, move, copy, rename,
   delete, and import workflows.
 - Observability through `/status`, `/metrics`, `/metrics.txt`, Web UI SSE
-  metrics, structured logs, and optional Telegram notifications.
+  metrics, and structured logs.
 
 ## Stack
 
@@ -386,17 +384,17 @@ telegram:
     # Master channel mapped to root "/". Dummy: replace with your -100...
     channel: -1001234567890
 
-  # Optional watcher: a dedicated bot, separate from telegram.users bots.
-  # It must be an admin of the master channel. It only imports files posted
-  # while `serve` is running.
+  # Reserved for a future channel watcher. The bot that listens to channel
+  # messages and catalogs them automatically is not managed yet, so this block
+  # is currently not used by the runtime.
   main_bot:
     api_id: 123456      # dummy
     api_hash: "0123456789abcdef0123456789abcdef"  # dummy
     bot_token: "987654321:AAyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"  # dummy
 
   notify:
-    # Optional Bot HTTP API sender for CRITICAL/ERROR notifications.
-    # Empty = local logs only.
+    # Reserved for future Telegram notifications. Notifications are not managed
+    # yet, so this block is currently not used by the runtime.
     bot_token:          # optional; dummy if set
     # Optional destination: numeric ID (-100.../-...) or @username.
     # Empty = the master channel configured above.
@@ -510,9 +508,9 @@ Required values are the PostgreSQL DSN and `telegram.upload.channel`. At least
 one user account is required for uploads and management operations. Bot accounts
 are optional, but they are what make parallel downloads useful.
 
-`telegram.main_bot` is a dedicated watcher bot, not one of the accounts under
-`telegram.users`. It imports only files posted to the master channel while
-`serve` is running.
+The `telegram.main_bot` and `telegram.notify` blocks are reserved for future
+work. tgshelf does not yet manage a bot that listens to channel messages and
+catalogs them automatically, and Telegram notifications are not wired yet.
 
 The `DB` environment variable overrides the `db` key, which is useful for
 deployment-specific database URLs.
@@ -544,7 +542,7 @@ tgshelf --config config.yaml accounts add-bot bot01
 tgshelf --config config.yaml accounts add-bot bot01 bot02 bot03
 tgshelf --config config.yaml accounts add-bot --all
 
-# Start the HTTP API, Web UI, watcher, metrics, and enabled WebDAV surfaces.
+# Start the HTTP API, Web UI, metrics, and enabled WebDAV surfaces.
 tgshelf --config config.yaml serve
 
 # Create folders in the virtual filesystem.
@@ -593,3 +591,9 @@ rclone config create tgshelf webdav \
 
 rclone mount tgshelf: /mnt/tgshelf
 ```
+
+## TODO list
+
+- Manage the Telegram bot that listens to channel messages and catalogs them
+  automatically.
+- Wire Telegram notifications.

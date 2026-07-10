@@ -46,19 +46,16 @@ telegram:
     min_size: 2097152
     # Master channel, mapped 1:1 to the root folder "/".
     channel: -1001234567890
-  # Optional channel watcher: a DEDICATED brand-new bot (its own BotFather token,
-  # NOT one of the `users` above) that watches the master channel LIVE and catalogs
-  # posted files into root. Started ONLY by `serve`, as a dedicated
-  # receive_updates=True instance; you must add it as an admin of the master
-  # channel. Files posted while serve is down are NOT recovered automatically —
-  # run `tgshelf import-channel`. Omit the whole block to disable.
+  # Reserved for a future channel watcher. The bot that listens to channel
+  # messages and catalogs them automatically is not managed yet, so this block
+  # is currently not used by the runtime.
   main_bot:
     api_id: 123456
     api_hash: "0123456789abcdef0123456789abcdef"
     bot_token: "987654321:AAyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
   notify:
-    # Optional Bot HTTP API sender for CRITICAL/ERROR notifications. Leave
-    # bot_token empty or omit it to keep notifications log-only.
+    # Reserved for future Telegram notifications. Notifications are not managed
+    # yet, so this block is currently not used by the runtime.
     bot_token:
     # Optional destination: numeric id (-100.../-...) or @username. Empty means
     # the master/root channel above.

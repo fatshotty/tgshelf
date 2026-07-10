@@ -53,9 +53,12 @@ Telegram or network limits.
 
 ## Development Setup
 
-Create a virtual environment and install the Python package in editable mode:
+Clone the repository, create a virtual environment, and install the Python
+package in editable mode:
 
 ```sh
+git clone <repo-url> tgshelf
+cd tgshelf
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e ".[dev]"
@@ -66,6 +69,16 @@ Create and edit the runtime configuration:
 ```sh
 cp config.example.yaml config.yaml
 ```
+
+PostgreSQL must be reachable before running migrations. Put the async PostgreSQL
+DSN in `config.yaml`:
+
+```yaml
+db: postgresql+asyncpg://DB_USER:DB_PASS@DB_HOST:5432/DB_NAME
+```
+
+Alternatively, set the `DB` environment variable; it overrides the `db` key in
+`config.yaml`.
 
 Prepare the database:
 
@@ -98,8 +111,86 @@ Web UI routes redirect to their `/webui/...` equivalents.
 
 ## Docker
 
-The Docker image contains only `tgshelf` and the built Web UI. PostgreSQL is
-external and is configured through the `DB` environment variable.
+The Docker image contains only `tgshelf` and the built Web UI. PostgreSQL is not
+included: use an existing PostgreSQL service and provide its async SQLAlchemy
+DSN through the `DB` environment variable.
+
+The DSN format is:
+
+```text
+postgresql+asyncpg://DB_USER:DB_PASS@DB_HOST:5432/DB_NAME
+```
+
+### Docker Compose / Portainer
+
+`docker-compose.yml` is ready for Portainer stacks and intentionally does not
+start PostgreSQL. In Portainer, set these stack environment variables:
+
+```text
+TGSHELF_DB=postgresql+asyncpg://DB_USER:DB_PASS@DB_HOST:5432/DB_NAME
+TGSHELF_CONFIG_DIR=/opt/tgshelf/config
+TGSHELF_DATA_DIR=/opt/tgshelf/data
+TGSHELF_PLUGIN_DIR=/opt/tgshelf/plugins
+TGSHELF_HTTP_PORT=3000
+TGSHELF_RUN_MIGRATIONS=1
+```
+
+`TGSHELF_DB` becomes the container `DB` environment variable and overrides the
+`db` value in `config.yaml`. Use the PostgreSQL hostname that is reachable from
+the tgshelf container, for example the service DNS name on a shared Docker
+network or the host name/IP of an external PostgreSQL server.
+
+Prepare the host directories:
+
+```sh
+mkdir -p /opt/tgshelf/config /opt/tgshelf/data /opt/tgshelf/plugins
+cp config.example.yaml /opt/tgshelf/config/config.yaml
+```
+
+For Docker and Portainer deployments, set these values in the mounted
+`config.yaml`:
+
+```yaml
+data: /data
+
+http:
+  enabled: true
+  host: 0.0.0.0
+  port: 3000
+```
+
+If you develop or deploy plugins in Docker, put plugin modules in
+`TGSHELF_PLUGIN_DIR` and reference the container path in `config.yaml`:
+
+```yaml
+plugins:
+  enabled: true
+  paths:
+    - /plugins
+  modules:
+    - my_plugin:MyPlugin
+```
+
+Deploy the stack from Portainer, or run it locally with Docker Compose:
+
+```sh
+TGSHELF_DB='postgresql+asyncpg://DB_USER:DB_PASS@DB_HOST:5432/DB_NAME' \
+docker compose up -d --build
+```
+
+On `serve`, the container runs `alembic upgrade head` before starting the HTTP
+server. Set `TGSHELF_RUN_MIGRATIONS=0` if migrations are handled externally.
+
+Interactive account setup can be run with the same Compose stack:
+
+```sh
+docker compose run --rm tgshelf accounts setup
+```
+
+When using bind mounts, make sure `TGSHELF_DATA_DIR` is writable by container
+UID `10001`.
+
+### Single Container
 
 Build the image:
 
@@ -121,21 +212,6 @@ docker run -d \
   tgshelf:local
 ```
 
-For Docker and Portainer deployments, set these values in the mounted
-`config.yaml`:
-
-```yaml
-data: /data
-
-http:
-  enabled: true
-  host: 0.0.0.0
-  port: 3000
-```
-
-On `serve`, the container runs `alembic upgrade head` before starting the HTTP
-server. Set `TGSHELF_RUN_MIGRATIONS=0` if migrations are handled externally.
-
 Interactive account setup can be run with the same image and mounted config:
 
 ```sh
@@ -149,6 +225,42 @@ docker run --rm -it \
 
 When using bind mounts, make sure `/opt/tgshelf/data` is writable by container
 UID `10001`.
+
+## Developing Plugins
+
+tgshelf plugins are trusted Python modules loaded in-process. They are not a
+sandbox boundary, so enable only plugins you control. The public plugin API,
+hook list, context fields, and `PluginHost` methods are documented in
+`docs/plugins.md`.
+
+For local development, create a plugin module in a directory outside tracked
+application code, then point `config.yaml` at that directory:
+
+```yaml
+plugins:
+  enabled: true
+  paths:
+    - ./plugin
+  modules:
+    - media_info:MediaInfoPlugin
+```
+
+Minimal plugin skeleton:
+
+```python
+class MediaInfoPlugin:
+    async def after_file_upload(self, ctx):
+        notes = await ctx.host.get_info_notes(ctx.node.id)
+        if "Uploaded by plugin" in notes:
+            return
+        lines = [line for line in notes.splitlines() if line]
+        lines.append("Uploaded by plugin")
+        await ctx.host.set_info_notes(ctx.node.id, "\n".join(lines))
+```
+
+Plugins share the same Python environment as tgshelf. In a local venv, install
+extra plugin dependencies into `.venv`. In Docker, build a custom image or
+install dependencies in the deployment environment before enabling the plugin.
 
 ## Verification
 
@@ -177,14 +289,35 @@ src/tgshelf/__init__.py
 `pyproject.toml` reads the version dynamically from that file, and
 `tgshelf --version` prints the same value.
 
-Release tags are created only from `main`, which is the official release branch.
-Use semantic versions with a `v` tag prefix:
+Stable release tags are created only from `main`, which is the official release
+branch. Test release tags may be created from `develop` only when the operator
+explicitly decides to freeze a beta build.
+
+Use semantic versions with a `v` tag prefix. Stable tags have no suffix:
 
 ```text
-v0.1.0
-v0.1.1
-v0.2.0
+v1.0.0
+v1.0.1
+v1.0.2
 ```
+
+Beta tags are reserved for manually selected `develop` snapshots and use the
+next stable version plus a `-betaN` suffix:
+
+```text
+v1.0.1-beta1
+v1.0.1-beta2
+v1.0.1-beta5
+```
+
+The first official public release is `v1.0.0` from `main`. While `main` is
+frozen at `1.0.0`, `develop` may prepare `1.0.1-betaN` builds. When `main`
+later freezes `v1.0.1`, `develop` moves on to `1.0.2-beta1`, and so on. Beta
+tags are never automatic; create them only by explicit manual release decision.
+
+Python packaging accepts versions such as `1.0.1-beta1` and normalizes them to
+PEP 440 form (`1.0.1b1`) during builds. Keep the human-readable `-betaN` suffix
+for Git tags.
 
 Branch policy:
 

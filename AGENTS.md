@@ -46,6 +46,13 @@ user explicitly approves a change.
   `feature/...` branches created from `develop`.
 - Before starting any code change, verify the current branch. If the current
   branch is `main`, switch away before editing files.
+- Stable release tags, such as `v1.0.0` and `v1.0.1`, are created only from
+  `main`.
+- Test release tags, such as `v1.0.1-beta1`, are created only from `develop`
+  and only after an explicit manual release decision by the user.
+- The first official public release is `v1.0.0` from `main`. While `main` is at
+  `1.0.0`, `develop` prepares `1.0.1-betaN` builds; after `main` freezes
+  `v1.0.1`, `develop` moves to `1.0.2-beta1`, and the same pattern repeats.
 
 ## Language
 

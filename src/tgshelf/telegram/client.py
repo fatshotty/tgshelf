@@ -404,10 +404,17 @@ class TgClient:
         rate_limit: bool = True,
     ) -> None:
         entity = await self._client.get_input_entity(channel_id)
-        await self._with_middleware(
-            lambda: self._client.edit_message(entity, message_id, text=caption),
-            rate_limit=rate_limit,
-        )
+        try:
+            await self._with_middleware(
+                lambda: self._client.edit_message(entity, message_id, text=caption),
+                rate_limit=rate_limit,
+            )
+        except tg_errors.MessageNotModifiedError:
+            log.debug(
+                "[caption] message caption already up to date: channel=%s message=%s",
+                channel_id,
+                message_id,
+            )
 
 
 def _filename_of(doc: Any) -> str | None:

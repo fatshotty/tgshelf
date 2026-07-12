@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from telethon import errors as tg_errors
 
 from tgshelf.telegram.client import TgClient
 from tgshelf.telegram.pool import ClientPool, PoolMember
@@ -17,8 +18,9 @@ class Clock:
 
 
 class FakeTelethonClient:
-    def __init__(self):
+    def __init__(self, *, fail_not_modified: bool = False):
         self.requests = []
+        self.fail_not_modified = fail_not_modified
         self.session = type("Session", (), {"dc_id": 1})()
 
     async def __call__(self, request):
@@ -39,6 +41,8 @@ class FakeTelethonClient:
 
     async def edit_message(self, entity, message_id, text):
         self.requests.append(("edit_message", entity, message_id, text))
+        if self.fail_not_modified:
+            raise tg_errors.MessageNotModifiedError(request=None)
         return fake_message()
 
 
@@ -242,4 +246,14 @@ async def test_edit_message_caption_rate_limits_the_write():
     await client.edit_message_caption(-100, 7, "fileName: canonical.mkv")
 
     assert limiter.accounts == ["main"]
+    assert ("edit_message", -100, 7, "fileName: canonical.mkv") in raw.requests
+
+
+@pytest.mark.asyncio
+async def test_edit_message_caption_treats_not_modified_as_success():
+    raw = FakeTelethonClient(fail_not_modified=True)
+    client = TgClient(raw, name="main")
+
+    await client.edit_message_caption(-100, 7, "fileName: canonical.mkv")
+
     assert ("edit_message", -100, 7, "fileName: canonical.mkv") in raw.requests

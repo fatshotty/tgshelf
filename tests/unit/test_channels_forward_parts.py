@@ -14,7 +14,7 @@ from tgshelf.core.captions import (
 )
 from tgshelf.core.channels import forward_parts
 from tgshelf.core.fs import FileSystem
-from tgshelf.core.upload import PartRecord
+from tgshelf.core.upload import PartRecord, UploadResult
 from tgshelf.telegram.gateway import DocRef
 
 
@@ -162,6 +162,15 @@ class FakeRepo:
     async def get(self, node_id: str) -> FakeNode | None:
         return self.nodes.get(node_id)
 
+    async def ancestors(self, node_id: str) -> list[FakeNode]:
+        ancestors = []
+        node = self.nodes.get(node_id)
+        while node is not None and node.parent_id is not None:
+            parent = self.nodes[node.parent_id]
+            ancestors.append(parent)
+            node = parent
+        return list(reversed(ancestors))
+
     async def children(
         self,
         parent_id: str,
@@ -186,6 +195,9 @@ class FakeRepo:
 
     async def parts_of(self, file_id: str) -> list[FakePart]:
         return sorted(self.parts.get(file_id, []), key=lambda part: part.idx)
+
+    async def parts_size(self, file_id: str) -> int:
+        return sum(part.size for part in self.parts.get(file_id, []))
 
     async def path_of(self, node_id: str) -> str | None:
         node = self.nodes.get(node_id)
@@ -240,6 +252,20 @@ class RecordingGateway:
         self.caption_edits.append((channel_id, message_id, caption))
 
 
+class TelegramBackedUploader:
+    async def upload(self, *args: Any, **kwargs: Any) -> UploadResult:
+        record = PartRecord(
+            idx=0,
+            channel_id=-100,
+            message_id=11,
+            doc_id=101,
+            size=20,
+            original_filename=kwargs["filename"],
+        )
+        await kwargs["on_part"](record)
+        return UploadResult(size=20, parts=(record,))
+
+
 def make_fs(
     repo: FakeRepo,
     gateway: RecordingGateway,
@@ -252,6 +278,29 @@ def make_fs(
         gateway=gateway,
         caption_template=caption_template,
     )
+
+
+async def source_chunks():
+    yield b"x" * 20
+
+
+@pytest.mark.asyncio
+async def test_write_does_not_resync_captions_after_telegram_upload():
+    repo = FakeRepo()
+    gateway = RecordingGateway()
+    repo.nodes["root"] = FakeNode(id="root", name="", parent_id=None, is_folder=True)
+
+    node = await FileSystem(
+        repo,
+        master_channel=-100,
+        gateway=gateway,
+        uploader=TelegramBackedUploader(),
+        min_size=1,
+        caption_template="fileName: {filename}",
+    ).write("root", "Movie.mkv", source_chunks)
+
+    assert node.name == "Movie.mkv"
+    assert gateway.caption_edits == []
 
 
 @pytest.mark.asyncio

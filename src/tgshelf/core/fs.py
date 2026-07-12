@@ -988,8 +988,6 @@ class FileSystem:
         else:
             await self.repo.set_fields(node.id, size=result.size, state="ACTIVE")
         await self.repo.session.commit()
-        if result.inline_content is None:
-            await self._sync_part_captions(node.id)
         # post-write sanity: the persisted parts must sum back to the expected
         # size (catches a part row that failed to persist). Always holds for a
         # correct write; a guard, not a recovery path.

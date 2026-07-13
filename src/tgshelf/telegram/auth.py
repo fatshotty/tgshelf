@@ -37,8 +37,14 @@ class AccountCaps:
 def pick_max_fileparts(app_config: dict[str, Any], *, is_premium: bool) -> int:
     """Max upload parts for the account tier (from help.GetAppConfig values)."""
     if is_premium:
-        return int(
-            app_config.get("upload_max_fileparts_premium", DEFAULT_MAX_FILEPARTS_PREMIUM)
+        return max(
+            int(
+                app_config.get(
+                    "upload_max_fileparts_premium",
+                    DEFAULT_MAX_FILEPARTS_PREMIUM,
+                )
+            ),
+            DEFAULT_MAX_FILEPARTS_PREMIUM,
         )
     return int(app_config.get("upload_max_fileparts_default", DEFAULT_MAX_FILEPARTS_FREE))
 

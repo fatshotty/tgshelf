@@ -50,7 +50,7 @@ class Uploader:
         premium_max_parts: int = 8000,
         part_size: int = PART_SIZE,
         max_in_flight: int = 3,
-        premium_check: Callable[[Any], Awaitable[bool]] | None = None,
+        premium_check: Callable[[Any], Awaitable[Any]] | None = None,
         notifier: Callable[[Exception], Any] | None = None,
         file_id_factory: Callable[[], int] = _default_file_id,
     ):
@@ -87,11 +87,13 @@ class Uploader:
         try:
             if on_account is not None:
                 await _maybe_await(on_account(member.name))
-            if self._premium_check is not None:
-                member.is_premium = await self._premium_check(member.client)
+            await self._refresh_member_caps(member)
             log.info(
-                "upload '%s' on account '%s' (premium=%s)",
-                filename, member.name, member.is_premium,
+                "upload '%s' on account '%s' (premium=%s, max_parts=%d)",
+                filename,
+                member.name,
+                member.is_premium,
+                self._max_upload_parts_for(member, is_premium=member.is_premium),
             )
             try:
                 return await self._attempt(
@@ -101,6 +103,24 @@ class Uploader:
                     node_id=node_id, parent_path=parent_path,
                 )
             except UploadLimitExceeded as exc:
+                if member.is_premium and self._premium_check is not None:
+                    checked = await self._refresh_member_caps(member)
+                    if member.is_premium or not checked:
+                        log.warning(
+                            "[premium] '%s' still treated as premium after upload limit error; "
+                            "retrying '%s' at the premium boundary",
+                            member.name,
+                            filename,
+                        )
+                        if on_reset is not None:
+                            await _maybe_await(on_reset())
+                        return await self._attempt(
+                            member, source_factory, filename, mime, channel_id,
+                            min_size, on_part, is_premium=True,
+                            resume_parts=resume_parts,
+                            caption_template=caption_template,
+                            node_id=node_id, parent_path=parent_path,
+                        )
                 # premium expired at runtime: downgrade, warn, reset, retry free
                 log.warning(
                     "[premium] '%s' is not premium after all; retrying '%s' at the free boundary",
@@ -120,6 +140,33 @@ class Uploader:
                 )
         finally:
             self._pool.release(member)
+
+    async def _refresh_member_caps(self, member: PoolMember) -> bool:
+        if self._premium_check is None:
+            return False
+        try:
+            caps = await self._premium_check(member.client)
+        except Exception as exc:  # noqa: BLE001 - keep current upload state
+            log.warning(
+                "[premium] could not refresh account '%s' caps; keeping premium=%s: %s",
+                member.name,
+                member.is_premium,
+                exc,
+            )
+            return False
+        if isinstance(caps, bool):
+            member.is_premium = caps
+            if caps and member.max_upload_parts <= self._free_max:
+                member.max_upload_parts = self._premium_max
+            return True
+        is_premium = bool(getattr(caps, "is_premium", False))
+        max_upload_parts = getattr(caps, "max_upload_parts", None)
+        member.is_premium = is_premium
+        if isinstance(max_upload_parts, int) and max_upload_parts > 0:
+            member.max_upload_parts = max_upload_parts
+        elif is_premium and member.max_upload_parts <= self._free_max:
+            member.max_upload_parts = self._premium_max
+        return True
 
     async def _attempt(
         self, member, source_factory, filename, mime, channel_id, min_size, on_part,
@@ -180,6 +227,9 @@ class Uploader:
 
     def _max_upload_parts_for(self, member: Any, *, is_premium: bool) -> int:
         live = getattr(member, "max_upload_parts", None)
-        if isinstance(live, int) and live > 0 and (is_premium or live <= self._free_max):
+        if is_premium:
+            live_parts = live if isinstance(live, int) and live > 0 else 0
+            return max(live_parts, self._premium_max)
+        if isinstance(live, int) and 0 < live <= self._free_max:
             return live
-        return self._premium_max if is_premium else self._free_max
+        return self._free_max

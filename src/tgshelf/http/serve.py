@@ -66,6 +66,16 @@ def make_write_limiter(operations: OperationsConfig):
     )
 
 
+async def refresh_upload_caps(client: Any):
+    from tgshelf.telegram.auth import fetch_caps
+
+    raw_client = getattr(client, "_client", client)
+    caps = await fetch_caps(raw_client)
+    setattr(client, "is_premium", caps.is_premium)
+    setattr(client, "max_upload_parts", caps.max_upload_parts)
+    return caps
+
+
 def build_runtime(
     config: Config,
     session_factory,
@@ -89,6 +99,7 @@ def build_runtime(
     uploader = Uploader(
         client_pool, part_size=PART_SIZE,
         max_in_flight=max(3, config.concurrent_tcp_connections),
+        premium_check=refresh_upload_caps,
     )
     streamer_pool = bot_pool if bot_pool.members else client_pool
     from tgshelf.core.download import ParallelStreamer

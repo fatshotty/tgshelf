@@ -22,6 +22,7 @@ from tgshelf.db.ids import generate_node_id
 from tgshelf.db.models import Node, Part
 
 _ID_RETRIES = 3
+_BULK_QUERY_BATCH_SIZE = 10_000
 
 
 class DuplicateNameError(Exception):
@@ -141,10 +142,16 @@ class NodeRepo:
     async def contents_of(self, node_ids: Sequence[str]) -> dict[str, bytes | None]:
         if not node_ids:
             return {}
-        result = await self.session.execute(
-            select(Node.id, Node.content).where(Node.id.in_(list(node_ids)))
-        )
-        return {node_id: content for node_id, content in result.all()}
+        unique_node_ids = tuple(dict.fromkeys(node_ids))
+        contents: dict[str, bytes | None] = {}
+        for start in range(0, len(unique_node_ids), _BULK_QUERY_BATCH_SIZE):
+            result = await self.session.execute(
+                select(Node.id, Node.content).where(
+                    Node.id.in_(list(unique_node_ids[start : start + _BULK_QUERY_BATCH_SIZE]))
+                )
+            )
+            contents.update(result.all())
+        return contents
 
     # -- parts -------------------------------------------------------------
 
@@ -183,14 +190,16 @@ class NodeRepo:
     async def parts_by_file(self, file_ids: Sequence[str]) -> dict[str, list[Part]]:
         if not file_ids:
             return {}
-        result = await self.session.execute(
-            select(Part)
-            .where(Part.file_id.in_(list(file_ids)))
-            .order_by(Part.file_id, Part.idx)
-        )
-        grouped: dict[str, list[Part]] = {file_id: [] for file_id in file_ids}
-        for part in result.scalars():
-            grouped.setdefault(part.file_id, []).append(part)
+        unique_file_ids = tuple(dict.fromkeys(file_ids))
+        grouped: dict[str, list[Part]] = {file_id: [] for file_id in unique_file_ids}
+        for start in range(0, len(unique_file_ids), _BULK_QUERY_BATCH_SIZE):
+            result = await self.session.execute(
+                select(Part)
+                .where(Part.file_id.in_(list(unique_file_ids[start : start + _BULK_QUERY_BATCH_SIZE])))
+                .order_by(Part.file_id, Part.idx)
+            )
+            for part in result.scalars():
+                grouped.setdefault(part.file_id, []).append(part)
         return grouped
 
     async def set_part_original_filename(

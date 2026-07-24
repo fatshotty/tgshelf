@@ -254,16 +254,27 @@ class RecordingGateway:
 
 class TelegramBackedUploader:
     async def upload(self, *args: Any, **kwargs: Any) -> UploadResult:
-        record = PartRecord(
-            idx=0,
-            channel_id=-100,
-            message_id=11,
-            doc_id=101,
-            size=20,
-            original_filename=kwargs["filename"],
+        records = (
+            PartRecord(
+                idx=0,
+                channel_id=-100,
+                message_id=11,
+                doc_id=101,
+                size=10,
+                original_filename=f"{kwargs['filename']}.001",
+            ),
+            PartRecord(
+                idx=1,
+                channel_id=-100,
+                message_id=12,
+                doc_id=102,
+                size=10,
+                original_filename=f"{kwargs['filename']}.002",
+            ),
         )
-        await kwargs["on_part"](record)
-        return UploadResult(size=20, parts=(record,))
+        for record in records:
+            await kwargs["on_part"](record)
+        return UploadResult(size=20, parts=records)
 
 
 def make_fs(
@@ -285,7 +296,7 @@ async def source_chunks():
 
 
 @pytest.mark.asyncio
-async def test_write_does_not_resync_captions_after_telegram_upload():
+async def test_write_resyncs_multipart_captions_after_telegram_upload():
     repo = FakeRepo()
     gateway = RecordingGateway()
     repo.nodes["root"] = FakeNode(id="root", name="", parent_id=None, is_folder=True)
@@ -296,11 +307,14 @@ async def test_write_does_not_resync_captions_after_telegram_upload():
         gateway=gateway,
         uploader=TelegramBackedUploader(),
         min_size=1,
-        caption_template="fileName: {filename}",
+        caption_template="fileName: {filename}; part: {part_idx}/{parts}",
     ).write("root", "Movie.mkv", source_chunks)
 
     assert node.name == "Movie.mkv"
-    assert gateway.caption_edits == []
+    assert gateway.caption_edits == [
+        (-100, 11, "fileName: Movie.mkv.001; part: 1/2"),
+        (-100, 12, "fileName: Movie.mkv.002; part: 2/2"),
+    ]
 
 
 @pytest.mark.asyncio

@@ -347,7 +347,7 @@ async def move_node(request: web.Request) -> web.Response:
         node = await fs.get(node_id)
         if node is None:
             return _not_found(f"node {node_id} not found")
-        await fs.ensure_move_target(parent_id)  # sync 400/404 before any 202
+        await fs.ensure_move_allowed(node_id, parent_id)  # sync 400/404 before any 202
         if node.is_folder:  # may take hours -> fire-and-forget, respond now
             log.info("move folder %s -> %s: accepted (background)", node_id, parent_id)
             _spawn_background(request.app, _run_op_background(request.app[RUNTIME], "move", node_id, parent_id))

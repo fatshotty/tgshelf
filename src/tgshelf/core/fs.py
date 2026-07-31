@@ -73,6 +73,10 @@ class NotAFolder(Exception):
     """The destination of a move/copy exists but is not a folder."""
 
 
+class InvalidMove(ValueError):
+    """A folder cannot be moved into itself or one of its descendants."""
+
+
 class InlineTooLarge(Exception):
     """An in-place content edit would push an inline (DB-stored) file past the
     inline threshold (min_size). The caller must opt in (force) to convert it to
@@ -531,14 +535,24 @@ class FileSystem:
         if not parent.is_folder:
             raise NotAFolder(f"destination {new_parent_id} is not a folder")
 
-    async def move(self, node_id: str, new_parent_id: str) -> Node:
-        """Move a node to a new parent. A file (or a folder's descendant files)
-        whose effective channel changes has its parts physically forwarded to
-        the new channel; a same-channel move is just a reparent."""
+    async def ensure_move_allowed(self, node_id: str, new_parent_id: str) -> Node:
+        """Validate a reparent operation before any mutation or plugin hook."""
         node = await self.repo.get(node_id)
         if node is None:
             raise NotAReadableFile(f"node {node_id} not found")
         await self.ensure_move_target(new_parent_id)
+        if node.is_folder and (
+            node.id == new_parent_id
+            or any(ancestor.id == node.id for ancestor in await self.repo.ancestors(new_parent_id))
+        ):
+            raise InvalidMove("cannot move a folder into itself or its descendant")
+        return node
+
+    async def move(self, node_id: str, new_parent_id: str) -> Node:
+        """Move a node to a new parent. A file (or a folder's descendant files)
+        whose effective channel changes has its parts physically forwarded to
+        the new channel; a same-channel move is just a reparent."""
+        node = await self.ensure_move_allowed(node_id, new_parent_id)
         name, is_folder = node.name, node.is_folder  # before any rollback expires node
         hooks_enabled = self._plugins_enabled()
         move_hook_contexts: list[tuple[Any, str | None, str | None]] = []

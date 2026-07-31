@@ -30,7 +30,7 @@ from xml.sax.saxutils import escape
 
 from aiohttp import web
 
-from tgshelf.core.fs import FileSystem, NotAFolder, NotAReadableFile
+from tgshelf.core.fs import FileSystem, InvalidMove, NotAFolder, NotAReadableFile
 from tgshelf.db.models import Node
 from tgshelf.db.repo import DuplicateNameError
 from tgshelf.http.api import open_fs
@@ -283,6 +283,7 @@ async def _resolve_move_copy(request: web.Request, fs: FileSystem):
 
 async def _move(request: web.Request, fs: FileSystem) -> web.Response:
     src, dest_parent, dest_name, existing = await _resolve_move_copy(request, fs)
+    await fs.ensure_move_allowed(src.id, dest_parent.id)
     created = existing is None
     if existing is not None:
         await fs.delete(existing.id, purge=False)
@@ -357,6 +358,8 @@ async def webdav_handler(request: web.Request) -> web.StreamResponse:
     except NotAReadableFile:
         raise web.HTTPNotFound()
     except NotAFolder:
+        raise web.HTTPConflict()
+    except InvalidMove:
         raise web.HTTPConflict()
     except DuplicateNameError:
         raise web.HTTPPreconditionFailed()

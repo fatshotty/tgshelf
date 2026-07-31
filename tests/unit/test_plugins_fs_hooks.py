@@ -336,3 +336,30 @@ async def test_folder_move_runs_file_move_hooks_for_descendant_files() -> None:
         ("before_file_move", "episode", "/src/Season 01/Episode.mkv", "/dst/Season 01/Episode.mkv"),
         ("after_file_move", "episode", "/src/Season 01/Episode.mkv", "/dst/Season 01/Episode.mkv"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_move_folder_into_its_descendant_fails_before_mutation_or_hooks() -> None:
+    repo = FakeRepo()
+    plugin = RecordingPlugin()
+    fs = FileSystem(
+        repo,
+        master_channel=-100,
+        plugin_manager=PluginManager([plugin]),
+    )
+    original_subtree = repo.subtree
+
+    async def fail_if_cycle_created(
+        node_id: str, *, state: str | None = "ACTIVE"
+    ) -> list[FakeNode]:
+        if repo.nodes["src"].parent_id == "season":
+            raise RuntimeError("cycle created before subtree traversal")
+        return await original_subtree(node_id, state=state)
+
+    repo.subtree = fail_if_cycle_created  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="cannot move a folder into itself or its descendant"):
+        await fs.move("src", "season")
+
+    assert repo.nodes["src"].parent_id == "root"
+    assert plugin.calls == []

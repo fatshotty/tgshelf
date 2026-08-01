@@ -109,6 +109,8 @@ def build_parser() -> argparse.ArgumentParser:
                 help="parallel local file operations (default: env CONCURRENCY, then config operations.concurrent)",
             )
         elif name == "sync":
+            from tgshelf.commands.sync import parse_overwrite_extensions
+
             cmd.add_argument("local_dir", help="local directory to upload")
             cmd.add_argument("--dest", help="drive destination folder (default: /)")
             cmd.add_argument(
@@ -117,8 +119,15 @@ def build_parser() -> argparse.ArgumentParser:
             )
             cmd.add_argument("--delete-source", action="store_true", dest="delete_source",
                              help="delete each uploaded file from disk (+ prune emptied dirs, not the root)")
-            cmd.add_argument("--overwrite", action="store_true",
-                             help="re-upload and replace an existing drive file (default: skip)")
+            overwrite_group = cmd.add_mutually_exclusive_group()
+            overwrite_group.add_argument(
+                "--overwrite", action="store_true",
+                help="re-upload and replace every existing drive file (default: skip)",
+            )
+            overwrite_group.add_argument(
+                "--overwrite-ext", dest="overwrite_ext", type=parse_overwrite_extensions,
+                help="re-upload existing files only for comma-separated extensions (e.g. nfo,jpg)",
+            )
             cmd.add_argument("--log-file", dest="log_file",
                              help="write a full run log (all [sync] events + recap) to this file")
         elif name == "download":

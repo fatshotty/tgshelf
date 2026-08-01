@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: tgshelf HTTP API
-  version: "1.0.5"
+  version: "1.0.6"
   description: |
     HTTP API for tgshelf — Telegram-as-cloud-storage. Two surfaces:
 

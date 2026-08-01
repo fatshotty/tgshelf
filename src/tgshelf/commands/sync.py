@@ -3,8 +3,8 @@
 Mirrors a local folder under a drive folder, creating the tree and uploading the
 files concurrently (up to `operations.concurrent`). A file already present with
 the **same size** is skipped (so a re-run resumes naturally); a size **mismatch**
-is logged and skipped — sync never overwrites an existing file (user decision,
-legacy-knowledge §11).
+is logged and skipped unless it is selected by `--overwrite` or
+`--overwrite-ext`.
 
 Uploads do NOT go through the FsExecutor: the Uploader already leases an account
 per file, so the executor would double-lease. Concurrency here is a plain
@@ -38,6 +38,25 @@ class LocalFile:
     name: str
     path: Path
     size: int
+
+
+def parse_overwrite_extensions(value: str) -> frozenset[str]:
+    """Normalize a comma-separated extension list for selective overwrites."""
+    extensions: set[str] = set()
+    for raw_extension in value.split(","):
+        extension = raw_extension.strip().casefold().lstrip(".")
+        if not extension:
+            raise ValueError("overwrite extensions must be non-empty")
+        extensions.add(f".{extension}")
+    return frozenset(extensions)
+
+
+def _matches_overwrite_extension(
+    name: str, extensions: frozenset[str] | None,
+) -> bool:
+    return bool(extensions) and any(
+        name.casefold().endswith(extension) for extension in extensions
+    )
 
 
 @dataclass
@@ -149,6 +168,7 @@ async def sync(session_factory, uploader, *, master_channel: int, min_size: int,
                local_dir, dest: str = "/", concurrent: int = 1, streamer=None,
                gateway=None,
                delete_source: bool = False, overwrite: bool = False,
+               overwrite_extensions: frozenset[str] | None = None,
                state: ProgressState | None = None,
                caption_template: str = "fileName: {filename}",
                plugin_manager=None) -> Stats:
@@ -204,7 +224,11 @@ async def sync(session_factory, uploader, *, master_channel: int, min_size: int,
                 async with session_factory() as session:
                     fs = make_fs(session)
                     existing = await fs.repo.get_child_by_name(parent_id, lf.name, state="ACTIVE")
-                    if existing is not None and not overwrite:
+                    selective_overwrite = _matches_overwrite_extension(
+                        lf.name, overwrite_extensions,
+                    )
+                    should_overwrite = overwrite or selective_overwrite
+                    if existing is not None and not should_overwrite:
                         if existing.size == lf.size:
                             stats.skipped += 1
                             if delete_source:
@@ -217,9 +241,9 @@ async def sync(session_factory, uploader, *, master_channel: int, min_size: int,
                             stats.mismatched += 1
                         st.finish(key, "skipped")
                         return
-                    replaced = existing is not None and overwrite
+                    replaced = existing is not None and should_overwrite
                     node = await fs.write(parent_id, lf.name,
-                                          counting_source(lf.path, key, st), overwrite=overwrite,
+                                          counting_source(lf.path, key, st), overwrite=should_overwrite,
                                           on_account=lambda name: st.set_account(key, name))
                 if replaced:
                     stats.overwritten += 1
@@ -311,6 +335,7 @@ async def run(config: Config, args) -> int:
             concurrent=concurrent,
             delete_source=getattr(args, "delete_source", False),
             overwrite=getattr(args, "overwrite", False),
+            overwrite_extensions=getattr(args, "overwrite_ext", None),
             state=state,
             caption_template=config.caption.template,
             plugin_manager=runtime["plugin_manager"],

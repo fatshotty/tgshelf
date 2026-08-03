@@ -34,6 +34,9 @@ from tgshelf.constants import ROOT_ID
 
 STATES = ("ACTIVE", "TEMP", "DELETED")
 CHANGE_OPS = ("CREATE", "UPDATE", "MOVE", "DELETE")
+JOB_OPERATIONS = ("move", "delete")
+JOB_STATES = ("queued", "running", "completed", "failed", "interrupted")
+JOB_ITEM_STATES = ("pending", "running", "succeeded", "failed", "skipped")
 
 
 class Base(DeclarativeBase):
@@ -168,4 +171,66 @@ class Change(Base):
         CheckConstraint(
             "op IN ('CREATE', 'UPDATE', 'MOVE', 'DELETE')", name="ck_changes_op"
         ),
+    )
+
+
+class OperationJob(Base):
+    """A durable, best-effort Web UI bulk operation."""
+
+    __tablename__ = "operation_jobs"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    operation: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default="queued")
+    # Snapshot the target id without an FK so job history survives a later purge.
+    parent_id: Mapped[str | None] = mapped_column(Text)
+    total: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    succeeded: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    failed: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    skipped: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("operation IN ('move', 'delete')", name="ck_operation_jobs_operation"),
+        CheckConstraint(
+            "state IN ('queued', 'running', 'completed', 'failed', 'interrupted')",
+            name="ck_operation_jobs_state",
+        ),
+        CheckConstraint(
+            "total >= 0 AND succeeded >= 0 AND failed >= 0 AND skipped >= 0",
+            name="ck_operation_jobs_counts_nonnegative",
+        ),
+        Index("ix_operation_jobs_created_at", "created_at"),
+    )
+
+
+class OperationJobItem(Base):
+    """One selected node and its durable result within an operation job."""
+
+    __tablename__ = "operation_job_items"
+
+    job_id: Mapped[str] = mapped_column(
+        ForeignKey("operation_jobs.id", ondelete="CASCADE"), primary_key=True
+    )
+    position: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # No node FK: job history must remain readable after a node is purged.
+    node_id: Mapped[str] = mapped_column(Text, nullable=False)
+    source_name: Mapped[str | None] = mapped_column(Text)
+    source_path: Mapped[str | None] = mapped_column(Text)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
+    error: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('pending', 'running', 'succeeded', 'failed', 'skipped')",
+            name="ck_operation_job_items_state",
+        ),
+        Index("ix_operation_job_items_job_position", "job_id", "position"),
     )

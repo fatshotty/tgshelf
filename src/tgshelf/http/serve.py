@@ -20,7 +20,7 @@ from tgshelf.constants import PART_SIZE
 from tgshelf.core.executor import FsExecutor
 from tgshelf.core.uploader import Uploader
 from tgshelf.db.engine import check_connection, create_engine, create_session_factory
-from tgshelf.http.app import make_app
+from tgshelf.http.app import RUNTIME, make_app
 from tgshelf.log import describe_exc
 from tgshelf.looplag import start_loop_lag_monitor, stop_loop_lag_monitor
 from tgshelf.plugins import load_plugins
@@ -275,8 +275,10 @@ async def run_server(config: Config) -> None:
     await notifier.start()
     runtime["executor"]._notifier = notifier
 
-    from tgshelf.http.api import register_routes
+    from tgshelf.core.jobs import OperationJobService
+    from tgshelf.http.api import register_routes, runtime_fs
     from tgshelf.http.download import register_download_routes
+    from tgshelf.http.jobs import register_job_routes
     from tgshelf.http.ops import register_ops_routes
     from tgshelf.http.rcregistry import RcRegistry
     from tgshelf.http.upload import register_upload_routes
@@ -309,7 +311,15 @@ async def run_server(config: Config) -> None:
         rclone=config.rclone,
         rc_registry=rc_registry,
     )
+    job_service = OperationJobService(
+        session_factory, lambda session: runtime_fs(app[RUNTIME], session)
+    )
+    await job_service.recover()
+    await job_service.cleanup()
+    job_service.start()
+    app[RUNTIME]["job_service"] = job_service
     register_routes(app)  # JSON metadata + tree (B2)
+    register_job_routes(app)
     register_download_routes(app)  # streaming download (B3)
     register_upload_routes(app)  # streaming upload (B3)
     register_ops_routes(app)  # /status (B3)
@@ -380,6 +390,7 @@ async def run_server(config: Config) -> None:
             monitor.cancel()
         if rcbridge_task is not None:
             rcbridge_task.cancel()
+        await job_service.aclose()
         await runner.cleanup()
         if watcher_client is not None:
             await watcher_client.disconnect()

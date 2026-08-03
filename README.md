@@ -41,7 +41,8 @@ aiohttp APIs, HTTP download endpoints, WebDAV/rclone, and a React Web UI.
 - CLI workflows for accounts/sessions, filesystem operations, sync, download,
   `.strm` generation, and bot checks.
 - Web UI for browsing, search, metrics, tree management, inline text editing,
-  and Telegram-backed file-part management.
+  Telegram-backed file-part management, and durable bulk move/soft-delete jobs
+  with per-item status and errors.
 - WebDAV endpoint for rclone, plus optional rclone rc cache invalidation through
   the PostgreSQL changes feed.
 - Trusted in-process Python plugin hooks for file upload, move, copy, rename,
@@ -182,7 +183,9 @@ http://127.0.0.1:3000/webui
 ```
 
 The server redirects `/` to `/webui`; older `/b/...`, `/search`, and `/stats`
-Web UI routes redirect to their `/webui/...` equivalents.
+Web UI routes redirect to their `/webui/...` equivalents. The Operations page at
+`/webui/operations` lists durable bulk move and soft-delete jobs for every
+authenticated user and retains item-level errors for inspection.
 
 ## Docker
 

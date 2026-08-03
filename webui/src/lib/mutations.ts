@@ -20,6 +20,13 @@ export function useTreeActions(folderId: string | undefined, path: string) {
     if (folderId) qc.invalidateQueries({ queryKey: ['children', folderId] })
     qc.invalidateQueries({ queryKey: ['resolve', path] })
   }
+  const invalidateAll = async () => {
+    await Promise.all([
+      qc.invalidateQueries({ queryKey: ['children'] }),
+      qc.invalidateQueries({ queryKey: ['resolve'] }),
+      qc.invalidateQueries({ queryKey: ['search'] }),
+    ])
+  }
 
   const afterMoveCopy = (r: FsNode | AcceptedOp, verb: string) => {
     if (isAccepted(r)) {
@@ -31,6 +38,7 @@ export function useTreeActions(folderId: string | undefined, path: string) {
   }
 
   return {
+    invalidateAll,
     createFolder: (name: string) => api.createFolder(folderId!, name).then(invalidate),
     rename: (id: string, name: string) => api.rename(id, name).then(invalidate),
     setChannel: (id: string, channelId: number | null) =>

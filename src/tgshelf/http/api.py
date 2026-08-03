@@ -30,7 +30,7 @@ _TEXT_EXT_RE = re.compile(
 )
 
 
-def _runtime_fs(rt: dict, session) -> FileSystem:
+def runtime_fs(rt: dict, session) -> FileSystem:
     return FileSystem(
         NodeRepo(session),
         master_channel=rt["master_channel"],
@@ -49,7 +49,7 @@ def _runtime_fs(rt: dict, session) -> FileSystem:
 async def open_fs(request: web.Request):
     rt = request.app[RUNTIME]
     async with rt["session_factory"]() as session:
-        yield _runtime_fs(rt, session)
+        yield runtime_fs(rt, session)
 
 
 def _spawn_background(app: web.Application, coro) -> None:
@@ -80,7 +80,7 @@ async def _run_op_background(
     )
     try:
         async with rt["session_factory"]() as session:
-            fs = _runtime_fs(rt, session)
+            fs = runtime_fs(rt, session)
             if op == "move":
                 await fs.move(node_id, parent_id)
             else:

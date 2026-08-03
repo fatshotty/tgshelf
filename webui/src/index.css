@@ -44,6 +44,11 @@ body {
 .nav a.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
 
 .content { flex: 1; min-height: 0; padding: 1rem; }
+.operations { display: grid; gap: 1rem; }
+.job-row { display: grid; grid-template-columns: 7rem 7rem 6rem minmax(0, 1fr); gap: .6rem; width: 100%; text-align: left; padding: .6rem; border: 0; border-bottom: 1px solid var(--border); background: none; color: inherit; cursor: pointer; }
+.job-row:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.job-detail { display: flex; flex-direction: column; gap: .5rem; }
+.job-item { display: grid; gap: .25rem; padding: .5rem 0; border-top: 1px solid var(--border); }
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -165,6 +170,7 @@ body {
 }
 .btn:disabled { opacity: 0.5; cursor: default; }
 .btn.small { padding: 0.2rem 0.55rem; font-size: 0.85em; text-decoration: none; white-space: nowrap; }
+.btn.danger { border-color: #d33; color: #d33; }
 .toggle { display: inline-flex; align-items: center; gap: 0.35rem; color: var(--muted); font-size: 0.85em; }
 
 .rowmain {

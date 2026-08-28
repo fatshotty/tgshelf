@@ -12,6 +12,7 @@ class MirrorAction:
     path: str
     source_id: str | None = None
     dest_id: str | None = None
+    dest_is_folder: bool | None = None
 
 
 @dataclass
@@ -24,10 +25,35 @@ class MirrorPlan:
         return sum(1 for action in self.actions if action.kind == kind)
 
 
+@dataclass(frozen=True)
+class MirrorFailure:
+    action: MirrorAction
+    error: str
+
+
+@dataclass(frozen=True)
+class MirrorRun:
+    plan: MirrorPlan
+    created: int
+    copied: int
+    replaced: int
+    deleted: int
+    skipped: int
+    deferred: int
+    completed: bool
+    failures: tuple[MirrorFailure, ...]
+
+    @property
+    def actions(self) -> list[MirrorAction]:
+        """Compatibility view of the planned actions."""
+        return self.plan.actions
+
+
 async def build_mirror_plan(repo: Any, source: Any, dest: Any) -> MirrorPlan:
     source_entries = _entries_by_key(source, await repo.subtree(source.id, state="ACTIVE"))
     dest_entries = _entries_by_key(dest, await repo.subtree(dest.id, state="ACTIVE"))
     actions: list[MirrorAction] = []
+    replaced_folder_keys: set[tuple[str, ...]] = set()
 
     for key in sorted(source_entries):
         path, source_node = source_entries[key]
@@ -50,15 +76,18 @@ async def build_mirror_plan(repo: Any, source: Any, dest: Any) -> MirrorPlan:
                     path,
                     source_id=source_node.id,
                     dest_id=dest_node.id,
+                    dest_is_folder=False,
                 )
             )
         elif not source_node.is_folder and dest_node.is_folder:
+            replaced_folder_keys.add(key)
             actions.append(
                 MirrorAction(
                     "replace_folder_with_file",
                     path,
                     source_id=source_node.id,
                     dest_id=dest_node.id,
+                    dest_is_folder=True,
                 )
             )
         elif source_node.is_folder:
@@ -76,14 +105,30 @@ async def build_mirror_plan(repo: Any, source: Any, dest: Any) -> MirrorPlan:
                     path,
                     source_id=source_node.id,
                     dest_id=dest_node.id,
+                    dest_is_folder=False,
                 )
             )
 
+    extra_folder_keys: set[tuple[str, ...]] = set()
     for key in sorted(dest_entries):
         if key in source_entries:
             continue
         path, dest_node = dest_entries[key]
-        actions.append(MirrorAction("delete_extra", path, dest_id=dest_node.id))
+        if any(
+            key[:depth] in extra_folder_keys or key[:depth] in replaced_folder_keys
+            for depth in range(1, len(key))
+        ):
+            continue
+        actions.append(
+            MirrorAction(
+                "delete_extra",
+                path,
+                dest_id=dest_node.id,
+                dest_is_folder=dest_node.is_folder,
+            )
+        )
+        if dest_node.is_folder:
+            extra_folder_keys.add(key)
 
     return MirrorPlan(source_id=source.id, dest_id=dest.id, actions=_sort_actions(actions))
 

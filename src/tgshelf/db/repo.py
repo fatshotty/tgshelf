@@ -393,6 +393,118 @@ class NodeRepo:
             {"root": root_id, "state": new_state, "from_states": list(from_states)},
         )
 
+    async def lock_active_path(
+        self,
+        dest_root_id: str,
+        path: str,
+        *,
+        is_folder: bool | None = None,
+    ) -> str | None:
+        """Lock and resolve one exact ACTIVE path below a destination root."""
+        result = await self.session.execute(
+            text(
+                """
+                WITH RECURSIVE segments AS (
+                  SELECT string_to_array(:path, '/') AS names
+                ), path_nodes AS (
+                  SELECT id, 0 AS depth
+                  FROM nodes
+                  WHERE id = :dest_root
+                    AND is_folder
+                    AND state = 'ACTIVE'
+                  UNION ALL
+                  SELECT child.id, path_nodes.depth + 1
+                  FROM path_nodes
+                  JOIN segments ON true
+                  JOIN nodes child ON child.parent_id = path_nodes.id
+                  WHERE path_nodes.depth < cardinality(segments.names)
+                    AND child.state = 'ACTIVE'
+                    AND lower(child.name) = lower(segments.names[path_nodes.depth + 1])
+                )
+                SELECT nodes.id, nodes.is_folder, path_nodes.depth
+                FROM nodes
+                JOIN path_nodes ON path_nodes.id = nodes.id
+                ORDER BY path_nodes.depth
+                FOR UPDATE OF nodes
+                """
+            ),
+            {"dest_root": dest_root_id, "path": path},
+        )
+        rows = result.all()
+        expected_depth = len([segment for segment in path.split("/") if segment])
+        if len(rows) != expected_depth + 1:
+            return None
+        target = rows[-1]
+        if target.depth != expected_depth or (
+            is_folder is not None and target.is_folder != is_folder
+        ):
+            return None
+        return str(target.id)
+
+    async def set_state_subtree_if_root_matches(
+        self,
+        root_id: str,
+        new_state: str,
+        *,
+        dest_root_id: str,
+        path: str,
+        is_folder: bool,
+        from_states: Sequence[str],
+    ) -> bool:
+        """Lock a planned ACTIVE path, then change its matching subtree."""
+        locked_target_id = await self.lock_active_path(
+            dest_root_id, path, is_folder=is_folder
+        )
+        if locked_target_id != root_id:
+            return False
+        parameters = {
+            "root": root_id,
+            "state": new_state,
+            "dest_root": dest_root_id,
+            "path": path,
+            "is_folder": is_folder,
+            "from_states": list(from_states),
+        }
+        result = await self.session.execute(
+            text(
+                """
+                WITH RECURSIVE segments AS (
+                  SELECT string_to_array(:path, '/') AS names
+                ), path_nodes AS (
+                  SELECT id, 0 AS depth
+                  FROM nodes
+                  WHERE id = :dest_root
+                    AND is_folder
+                    AND state = 'ACTIVE'
+                  UNION ALL
+                  SELECT child.id, path_nodes.depth + 1
+                  FROM path_nodes
+                  JOIN segments ON true
+                  JOIN nodes child ON child.parent_id = path_nodes.id
+                  WHERE path_nodes.depth < cardinality(segments.names)
+                    AND child.state = 'ACTIVE'
+                    AND lower(child.name) = lower(segments.names[path_nodes.depth + 1])
+                ), target AS (
+                  SELECT path_nodes.id
+                  FROM path_nodes
+                  JOIN segments ON true
+                  JOIN nodes target_node ON target_node.id = path_nodes.id
+                  WHERE path_nodes.id = :root
+                    AND path_nodes.depth = cardinality(segments.names)
+                    AND target_node.is_folder = :is_folder
+                ), sub AS (
+                  SELECT id FROM target
+                  UNION ALL
+                  SELECT n.id FROM nodes n JOIN sub ON n.parent_id = sub.id
+                )
+                UPDATE nodes SET state = :state, mtime = now()
+                WHERE id IN (SELECT id FROM sub) AND state = ANY(:from_states)
+                """
+            ),
+            parameters,
+        )
+        return result.rowcount > 0
+
     async def purge_subtree(self, root_id: str, *, state: str | None = None) -> None:
         """Hard-delete the subtree's nodes (parts cascade). `state` restricts the
         DELETE to nodes in that state (e.g. "DELETED" leaves the ACTIVE tree, and

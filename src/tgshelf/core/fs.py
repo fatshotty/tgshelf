@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import mimetypes
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Iterable, Sequence
 
@@ -27,7 +28,7 @@ from tgshelf.core.captions import (
     render_caption,
 )
 from tgshelf.core.download import RangeNotSatisfiable, StreamPlan
-from tgshelf.core.mirror import MirrorPlan, build_mirror_plan
+from tgshelf.core.mirror import MirrorAction, MirrorFailure, MirrorPlan, MirrorRun, build_mirror_plan
 from tgshelf.core.upload import PartRecord
 from tgshelf.db.models import Node
 from tgshelf.db.repo import DuplicateNameError, NodeRepo
@@ -51,6 +52,20 @@ class _PurgeFilePlan:
     telegram_parts: int
     channels: int
     parts: tuple[Any, ...]
+
+
+@dataclass
+class _MirrorApplyResult:
+    created: int = 0
+    copied: int = 0
+    replaced: int = 0
+    deleted: int = 0
+    deferred: int = 0
+    failures: list[MirrorFailure] | None = None
+
+    def __post_init__(self) -> None:
+        if self.failures is None:
+            self.failures = []
 
 
 def is_valid_mime(mime: str) -> bool:
@@ -335,33 +350,7 @@ class FileSystem:
         self, node_id: str, *, purge: bool = False, deleted_only: bool = False
     ) -> None:
         if not purge:
-            hooks_enabled = self._plugins_enabled()
-            files = await self._file_hook_nodes_for_delete(node_id) if hooks_enabled else []
-            hook_paths = (
-                {file.id: await self.path_of(file.id) for file in files}
-                if hooks_enabled
-                else {}
-            )
-            if hooks_enabled:
-                for file in files:
-                    await self._run_before_plugin(
-                        "before_file_delete",
-                        operation="file_delete",
-                        node=file,
-                        old_parent_id=file.parent_id,
-                        old_path=hook_paths[file.id],
-                    )
-            await self.repo.set_state_subtree(node_id, "DELETED", from_states=("ACTIVE", "TEMP"))
-            await self.repo.session.commit()
-            if hooks_enabled:
-                for file in files:
-                    await self._run_after_plugin(
-                        "after_file_delete",
-                        operation="file_delete",
-                        node=await self.repo.get(file.id),
-                        old_parent_id=file.parent_id,
-                        old_path=hook_paths[file.id],
-                    )
+            await self._soft_delete(node_id)
             return
         # purge: remove the Telegram messages of every file in the subtree first.
         # deleted_only restricts both the Telegram deletion and the row removal to
@@ -427,6 +416,61 @@ class FileSystem:
             len(parts),
         )
 
+    async def _soft_delete(
+        self,
+        node_id: str,
+        *,
+        dest_root_id: str | None = None,
+        path: str | None = None,
+        is_folder: bool | None = None,
+    ) -> bool:
+        """Soft-delete with the established hook lifecycle and optional path guard."""
+        hooks_enabled = self._plugins_enabled()
+        files = await self._file_hook_nodes_for_delete(node_id) if hooks_enabled else []
+        hook_paths = (
+            {file.id: await self.path_of(file.id) for file in files}
+            if hooks_enabled
+            else {}
+        )
+        if hooks_enabled:
+            for file in files:
+                await self._run_before_plugin(
+                    "before_file_delete",
+                    operation="file_delete",
+                    node=file,
+                    old_parent_id=file.parent_id,
+                    old_path=hook_paths[file.id],
+                )
+        if dest_root_id is None:
+            await self.repo.set_state_subtree(
+                node_id, "DELETED", from_states=("ACTIVE", "TEMP")
+            )
+            changed = True
+        else:
+            if path is None or is_folder is None:
+                raise ValueError("conditional soft delete requires a path and node kind")
+            changed = await self.repo.set_state_subtree_if_root_matches(
+                node_id,
+                "DELETED",
+                dest_root_id=dest_root_id,
+                path=path,
+                is_folder=is_folder,
+                from_states=("ACTIVE", "TEMP"),
+            )
+        if not changed:
+            return False
+        await self.repo.session.commit()
+        if hooks_enabled:
+            for file in files:
+                await self._run_after_plugin(
+                    "after_file_delete",
+                    operation="file_delete",
+                    node=await self.repo.get(file.id),
+                    old_parent_id=file.parent_id,
+                    old_path=hook_paths[file.id],
+                )
+        return True
+
     async def restore(self, node_id: str) -> None:
         try:
             await self.repo.set_state_subtree(node_id, "ACTIVE", from_states=("DELETED",))
@@ -437,7 +481,20 @@ class FileSystem:
                 f"cannot restore {node_id}: an active sibling has the same name"
             ) from exc
 
-    async def mirror(self, source_id: str, dest_id: str, *, dry_run: bool = False) -> MirrorPlan:
+    async def mirror(
+        self,
+        source_id: str,
+        dest_id: str,
+        *,
+        dry_run: bool = False,
+        max_hours: int | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
+        stop_requested: Callable[[], bool] | None = None,
+    ) -> MirrorRun:
+        if max_hours is not None and (type(max_hours) is not int or max_hours < 1):
+            raise ValueError("max_hours must be a positive integer")
+        deadline = None if max_hours is None else monotonic() + max_hours * 60 * 60
+
         source = await self.repo.get(source_id)
         if source is None or not source.is_folder or source.state != "ACTIVE":
             raise NotAReadableFile(f"source folder {source_id} not found")
@@ -460,56 +517,186 @@ class FileSystem:
             source_id, dest_id, len(plan.actions), dry_run,
         )
         if dry_run:
-            return plan
+            return MirrorRun(
+                plan=plan,
+                created=plan.count("create_folder") + plan.count("replace_file_with_folder"),
+                copied=plan.count("copy_file"),
+                replaced=(
+                    plan.count("replace_file")
+                    + plan.count("replace_file_with_folder")
+                    + plan.count("replace_folder_with_file")
+                ),
+                deleted=plan.count("delete_extra"),
+                skipped=plan.count("skip"),
+                deferred=0,
+                completed=True,
+                failures=(),
+            )
 
-        await self._apply_mirror_plan(plan)
-        log.info(
-            "[mirror] applied source=%s dest=%s actions=%d",
-            source_id, dest_id, len(plan.actions),
+        result = await self._apply_mirror_plan(
+            plan,
+            deadline=deadline,
+            monotonic=monotonic,
+            stop_requested=stop_requested or (lambda: False),
         )
-        return plan
+        log.info(
+            "[mirror] applied source=%s dest=%s actions=%d created=%d copied=%d "
+            "replaced=%d deleted=%d deferred=%d failures=%d",
+            source_id,
+            dest_id,
+            len(plan.actions),
+            result.created,
+            result.copied,
+            result.replaced,
+            result.deleted,
+            result.deferred,
+            len(result.failures),
+        )
+        return MirrorRun(
+            plan=plan,
+            created=result.created,
+            copied=result.copied,
+            replaced=result.replaced,
+            deleted=result.deleted,
+            skipped=plan.count("skip"),
+            deferred=result.deferred,
+            completed=not result.failures and result.deferred == 0,
+            failures=tuple(result.failures),
+        )
 
-    async def _apply_mirror_plan(self, plan: MirrorPlan) -> None:
-        delete_kinds = {
-            "delete_extra",
-            "replace_file",
-            "replace_folder_with_file",
-            "replace_file_with_folder",
-        }
-        for action in sorted(
-            [
-                action for action in plan.actions
-                if action.kind in delete_kinds and action.dest_id
-            ],
-            key=lambda action: (-_path_depth(action.path), action.path.lower()),
-        ):
-            await self.delete(action.dest_id, purge=False)
+    async def _apply_mirror_plan(
+        self,
+        plan: MirrorPlan,
+        *,
+        deadline: float | None,
+        monotonic: Callable[[], float],
+        stop_requested: Callable[[], bool],
+    ) -> _MirrorApplyResult:
+        result = _MirrorApplyResult()
+        file_kinds = {"copy_file", "replace_file", "replace_folder_with_file"}
+        blocked_paths: list[str] = []
+        index = 0
 
-        for action in sorted(
-            [
-                action for action in plan.actions
-                if action.kind in {"create_folder", "replace_file_with_folder"}
-            ],
-            key=lambda action: (_path_depth(action.path), action.path.lower()),
-        ):
-            parent_id = await self._mirror_parent_id(plan.dest_id, action.path)
-            name = action.path.rsplit("/", 1)[-1]
-            await self._ensure_folder(parent_id, name)
+        while index < len(plan.actions):
+            action = plan.actions[index]
+            if action.kind == "skip":
+                index += 1
+                continue
+            if _mirror_path_is_blocked(action.path, blocked_paths):
+                _record_mirror_failure(
+                    result,
+                    action,
+                    "a required destination folder action failed",
+                )
+                index += 1
+                continue
+            if stop_requested() or (deadline is not None and monotonic() >= deadline):
+                result.deferred = sum(
+                    candidate.kind != "skip" for candidate in plan.actions[index:]
+                )
+                if stop_requested():
+                    log.info("[mirror] graceful stop requested; no further actions will start")
+                break
 
-        for action in sorted(
-            [
-                action for action in plan.actions
-                if action.kind in {"copy_file", "replace_file", "replace_folder_with_file"}
-            ],
-            key=lambda action: (_path_depth(action.path), action.path.lower()),
-        ):
-            if action.source_id is None:
-                raise NotAReadableFile(f"mirror source for {action.path} not found")
-            source = await self.repo.get(action.source_id)
-            if source is None or source.is_folder:
-                raise NotAReadableFile(f"source file {action.source_id} not found")
-            parent_id = await self._mirror_parent_id(plan.dest_id, action.path)
-            await self._copy_file(source, parent_id)
+            if action.kind in file_kinds:
+                batch: list[MirrorAction] = []
+                width = self._executor.concurrent if self._executor is not None else 1
+                while (
+                    index < len(plan.actions)
+                    and plan.actions[index].kind in file_kinds
+                    and len(batch) < width
+                ):
+                    batch.append(plan.actions[index])
+                    index += 1
+                await self._apply_mirror_file_batch(
+                    plan.dest_id,
+                    batch,
+                    result,
+                    blocked_paths=blocked_paths,
+                )
+                continue
+
+            try:
+                if action.kind == "replace_file_with_folder":
+                    await self._conditionally_delete_mirror_destination(
+                        action, plan.dest_id
+                    )
+                    await self._ensure_mirror_folder(plan.dest_id, action.path)
+                    result.created += 1
+                    result.replaced += 1
+                elif action.kind == "create_folder":
+                    await self._ensure_mirror_folder(plan.dest_id, action.path)
+                    result.created += 1
+                elif action.kind == "delete_extra":
+                    await self._conditionally_delete_mirror_destination(
+                        action, plan.dest_id
+                    )
+                    result.deleted += 1
+                else:
+                    raise ValueError(f"unknown mirror action {action.kind}")
+            except Exception as exc:
+                _record_mirror_failure(result, action, str(exc))
+                if action.kind in {"replace_file_with_folder", "create_folder"}:
+                    blocked_paths.append(action.path)
+            index += 1
+
+        return result
+
+    async def _apply_mirror_file_batch(
+        self,
+        dest_root_id: str,
+        batch: Sequence[MirrorAction],
+        result: _MirrorApplyResult,
+        *,
+        blocked_paths: Sequence[str],
+    ) -> None:
+        runnable_actions = [
+            action for action in batch if not _mirror_path_is_blocked(action.path, blocked_paths)
+        ]
+        for action in batch:
+            if action not in runnable_actions:
+                _record_mirror_failure(
+                    result,
+                    action,
+                    "a required destination folder action failed",
+                )
+        items = [(action, dest_root_id) for action in runnable_actions]
+        if not items:
+            return
+        if self._executor is None:
+            outcomes = []
+            for item in items:
+                try:
+                    outcomes.append(await _mirror_file_op(self, item))
+                except Exception as exc:
+                    outcomes.append(exc)
+        else:
+            outcomes = await self._executor.run(items, _mirror_file_op)
+
+        for action, outcome in zip(runnable_actions, outcomes, strict=True):
+            if isinstance(outcome, Exception):
+                _record_mirror_failure(result, action, str(outcome))
+                continue
+            if outcome == "copy_file":
+                result.copied += 1
+            else:
+                result.replaced += 1
+
+    async def _conditionally_delete_mirror_destination(
+        self,
+        action: MirrorAction,
+        dest_root_id: str,
+    ) -> None:
+        if action.dest_id is None or action.dest_is_folder is None:
+            raise NotAReadableFile(f"mirror destination for {action.path} not found")
+        deleted = await self._soft_delete(
+            action.dest_id,
+            dest_root_id=dest_root_id,
+            path=action.path,
+            is_folder=action.dest_is_folder,
+        )
+        if not deleted:
+            raise NotAReadableFile(f"mirror destination for {action.path} no longer matches the plan")
 
     async def _mirror_parent_id(self, dest_root_id: str, action_path: str) -> str:
         parent_path = action_path.rpartition("/")[0]
@@ -522,6 +709,18 @@ class FileSystem:
                 raise NotAReadableFile(f"mirror destination folder {parent_path} not found")
             parent_id = node.id
         return parent_id
+
+    async def _ensure_mirror_folder(self, dest_root_id: str, action_path: str) -> str:
+        """Create or reuse a folder only while its planned parent path is locked."""
+        parent_path = action_path.rpartition("/")[0]
+        parent_id = await self.repo.lock_active_path(
+            dest_root_id, parent_path, is_folder=True
+        )
+        if parent_id is None:
+            raise NotAReadableFile(
+                f"mirror destination folder {parent_path or dest_root_id} no longer matches the plan"
+            )
+        return await self._ensure_folder(parent_id, action_path.rsplit("/", 1)[-1])
 
     # -- move ---------------------------------------------------------------
 
@@ -755,53 +954,17 @@ class FileSystem:
         children = await self.repo.children(parent_id, files_only=True)
         return {child.name.lower(): child for child in children}
 
-    async def _copy_file(self, src: Node, dst_parent_id: str, *, force_copy: bool = False) -> Node:
+    async def _stage_file_copy(self, src: Node, dst_parent_id: str, name: str) -> Node:
         dest_channel = await self.effective_channel(dst_parent_id)
-        name = await self._dedup_name(dst_parent_id, src.name, is_folder=False)
-        hooks_enabled = self._plugins_enabled()
-        old_path = new_path = None
-        source_plugin_node = None
-        if hooks_enabled:
-            old_path = await self.path_of(src.id)
-            new_path = await self._logical_child_path(dst_parent_id, name)
-            source_plugin_node = await self._plugin_node_snapshot(src.id)
-            await self._run_before_plugin(
-                "before_file_copy",
-                operation="file_copy",
-                node=src,
-                old_parent_id=src.parent_id,
-                new_parent_id=dst_parent_id,
-                old_path=old_path,
-                new_path=new_path,
-                source_node=source_plugin_node,
-            )
-
         content = await self.repo.content_of(src.id)
         if content is not None:
             new = await self.repo.create(
                 name=name, parent_id=dst_parent_id, is_folder=False, mime=src.mime,
-                channel_id=dest_channel, state="ACTIVE", size=len(content), content=content,
+                channel_id=dest_channel, state="TEMP", size=len(content), content=content,
                 info=dict(getattr(src, "info", None) or {}),
             )
             await self.repo.session.commit()
-            log.info(
-                "[copy] copied file '%s' (%s) -> parent %s as '%s' (%s) force_copy=%s",
-                src.name, src.id, dst_parent_id, new.name, new.id, force_copy,
-            )
-            copied = await self.repo.get(new.id)
-            if hooks_enabled:
-                await self._run_after_plugin(
-                    "after_file_copy",
-                    operation="file_copy",
-                    node=copied,
-                    old_parent_id=src.parent_id,
-                    new_parent_id=dst_parent_id,
-                    old_path=old_path,
-                    new_path=await self.path_of(new.id),
-                    source_node=source_plugin_node,
-                    target_node=await self._plugin_node_snapshot(new.id),
-                )
-            return copied
+            return new
 
         src_parts = await self.repo.parts_of(src.id)
         new = await self.repo.create(
@@ -837,13 +1000,118 @@ class FileSystem:
                 new.id, idx=np.idx, channel_id=np.channel_id, message_id=np.message_id,
                 doc_id=np.doc_id, size=np.size, original_filename=np.original_filename,
             )
-        await self.repo.set_fields(
-            new.id, state="ACTIVE", size=sum(p.size for p in new_parts)
-        )
+        await self.repo.set_fields(new.id, size=sum(p.size for p in new_parts))
+        await self.repo.session.commit()
+        return new
+
+    async def _copy_file(
+        self,
+        src: Node,
+        dst_parent_id: str,
+        *,
+        force_copy: bool = False,
+        planned_dest_root_id: str | None = None,
+        planned_path: str | None = None,
+    ) -> Node:
+        name = await self._dedup_name(dst_parent_id, src.name, is_folder=False)
+        hooks_enabled = self._plugins_enabled()
+        old_path = new_path = None
+        source_plugin_node = None
+        if hooks_enabled:
+            old_path = await self.path_of(src.id)
+            new_path = await self._logical_child_path(dst_parent_id, name)
+            source_plugin_node = await self._plugin_node_snapshot(src.id)
+            await self._run_before_plugin(
+                "before_file_copy",
+                operation="file_copy",
+                node=src,
+                old_parent_id=src.parent_id,
+                new_parent_id=dst_parent_id,
+                old_path=old_path,
+                new_path=new_path,
+                source_node=source_plugin_node,
+            )
+
+        new = await self._stage_file_copy(src, dst_parent_id, name)
+        if planned_dest_root_id is not None:
+            if planned_path is None:
+                raise ValueError("mirror copy activation requires a planned path")
+            parent_path = planned_path.rpartition("/")[0]
+            locked_parent_id = await self.repo.lock_active_path(
+                planned_dest_root_id, parent_path, is_folder=True
+            )
+            if locked_parent_id != dst_parent_id or new.parent_id != locked_parent_id:
+                raise NotAReadableFile(
+                    f"mirror destination folder for {planned_path} no longer matches the plan"
+                )
+        await self.repo.set_fields(new.id, state="ACTIVE")
         await self.repo.session.commit()
         log.info(
             "[copy] copied file '%s' (%s) -> parent %s as '%s' (%s) force_copy=%s",
             src.name, src.id, dst_parent_id, name, new.id, force_copy,
+        )
+        copied = await self.repo.get(new.id)
+        if hooks_enabled:
+            await self._run_after_plugin(
+                "after_file_copy",
+                operation="file_copy",
+                node=copied,
+                old_parent_id=src.parent_id,
+                new_parent_id=dst_parent_id,
+                old_path=old_path,
+                new_path=await self.path_of(new.id),
+                source_node=source_plugin_node,
+                target_node=await self._plugin_node_snapshot(new.id),
+            )
+        return copied
+
+    async def _copy_file_replacing(
+        self,
+        src: Node,
+        dst_parent_id: str,
+        old_dest_id: str,
+        *,
+        planned_dest_root_id: str,
+        planned_path: str,
+        expected_is_folder: bool,
+    ) -> Node:
+        """Stage a complete copy, then atomically swap it for the active target."""
+        hooks_enabled = self._plugins_enabled()
+        old_path = new_path = None
+        source_plugin_node = None
+        if hooks_enabled:
+            old_path = await self.path_of(src.id)
+            new_path = await self._logical_child_path(dst_parent_id, src.name)
+            source_plugin_node = await self._plugin_node_snapshot(src.id)
+            await self._run_before_plugin(
+                "before_file_copy",
+                operation="file_copy",
+                node=src,
+                old_parent_id=src.parent_id,
+                new_parent_id=dst_parent_id,
+                old_path=old_path,
+                new_path=new_path,
+                source_node=source_plugin_node,
+            )
+
+        new = await self._stage_file_copy(src, dst_parent_id, src.name)
+        deleted = await self.repo.set_state_subtree_if_root_matches(
+            old_dest_id,
+            "DELETED",
+            dest_root_id=planned_dest_root_id,
+            path=planned_path,
+            is_folder=expected_is_folder,
+            from_states=("ACTIVE", "TEMP"),
+        )
+        if not deleted:
+            raise NotAReadableFile(
+                f"mirror destination {old_dest_id} no longer matches the replacement plan"
+            )
+        await self.repo.set_fields(new.id, state="ACTIVE")
+        await self.repo.session.commit()
+        log.info(
+            "[copy] replaced destination %s with file '%s' (%s) as '%s' (%s)",
+            old_dest_id, src.name, src.id, new.name, new.id,
         )
         copied = await self.repo.get(new.id)
         if hooks_enabled:
@@ -1584,6 +1852,57 @@ async def _copy_op(fs: FileSystem, pair: tuple[str, str, bool]) -> str | None:
         return None
     new = await fs._copy_file(src, dst_parent_id, force_copy=force_copy)
     return new.id
+
+
+async def _mirror_file_op(fs: FileSystem, item: tuple[MirrorAction, str]) -> str:
+    """Run one planned mirror file action in the worker-local filesystem."""
+    action, dest_root_id = item
+    if action.source_id is None:
+        raise NotAReadableFile(f"mirror source for {action.path} not found")
+    source = await fs.get(action.source_id)
+    if source is None or source.is_folder or source.state != "ACTIVE":
+        raise NotAReadableFile(f"source file {action.source_id} not found")
+    destination_root = await fs.get(dest_root_id)
+    if destination_root is None or not destination_root.is_folder or destination_root.state != "ACTIVE":
+        raise NotAReadableFile(f"mirror destination folder {dest_root_id} not found")
+
+    if action.kind == "copy_file":
+        parent_id = await fs._mirror_parent_id(dest_root_id, action.path)
+        await fs._copy_file(
+            source,
+            parent_id,
+            planned_dest_root_id=dest_root_id,
+            planned_path=action.path,
+        )
+        return action.kind
+    if action.kind not in {"replace_file", "replace_folder_with_file"}:
+        raise ValueError(f"unknown mirror file action {action.kind}")
+    if action.dest_id is None or action.dest_is_folder is None:
+        raise NotAReadableFile(f"mirror destination for {action.path} not found")
+    parent_id = await fs._mirror_parent_id(dest_root_id, action.path)
+    await fs._copy_file_replacing(
+        source,
+        parent_id,
+        action.dest_id,
+        planned_dest_root_id=dest_root_id,
+        planned_path=action.path,
+        expected_is_folder=action.dest_is_folder,
+    )
+    return action.kind
+
+
+def _mirror_path_is_blocked(path: str, blocked_paths: Sequence[str]) -> bool:
+    path_key = path.lower()
+    return any(path_key.startswith(f"{blocked.lower()}/") for blocked in blocked_paths)
+
+
+def _record_mirror_failure(
+    result: _MirrorApplyResult,
+    action: MirrorAction,
+    error: str,
+) -> None:
+    result.failures.append(MirrorFailure(action, error))
+    log.error("[mirror] action failed path=%s error=%s", action.path, error)
 
 
 def _build_purge_file_plan(files: Sequence[Any], parts: Sequence[Any]) -> list[_PurgeFilePlan]:

@@ -12,6 +12,11 @@ import type {
   SearchResult,
   SplitPartsResult,
   StrmResult,
+  OperationJobAccepted,
+  OperationJobDetail,
+  OperationJobPage,
+  OperationJobState,
+  OperationKind,
 } from './types'
 
 export class ApiError extends Error {
@@ -96,6 +101,12 @@ export const api = {
     request<StrmResult>('POST', `/api/v1/nodes/${id(nodeId)}/strm`),
   deleteStrm: (nodeId: string) =>
     request<StrmResult>('DELETE', `/api/v1/nodes/${id(nodeId)}/strm`),
+
+  createJob: (body: { operation: OperationKind; node_ids: string[]; parent_id?: string }) =>
+    request<OperationJobAccepted>('POST', '/api/v1/jobs', { body }),
+  listJobs: (state?: OperationJobState, limit = 50, offset = 0) =>
+    request<OperationJobPage>('GET', '/api/v1/jobs', { query: { state, limit, offset } }),
+  getJob: (jobId: string) => request<OperationJobDetail>('GET', `/api/v1/jobs/${id(jobId)}`),
 
   // -- inline file content (edit)
   fileContent: async (nodeId: string): Promise<string> => {

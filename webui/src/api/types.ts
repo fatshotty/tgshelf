@@ -60,6 +60,51 @@ export interface AcceptedOp {
   node_id: string
 }
 
+export type OperationKind = 'move' | 'delete'
+export type OperationJobState = 'queued' | 'running' | 'completed' | 'failed' | 'interrupted'
+export type OperationJobItemState = 'pending' | 'running' | 'succeeded' | 'failed' | 'skipped'
+
+export interface OperationJobSummary {
+  id: string
+  operation: OperationKind
+  state: OperationJobState
+  parent_id: string | null
+  total: number
+  succeeded: number
+  failed: number
+  skipped: number
+  error: string | null
+  created_at: string | null
+  started_at: string | null
+  finished_at: string | null
+}
+
+export interface OperationJobItem {
+  position: number
+  node_id: string
+  source_name: string | null
+  source_path: string | null
+  state: OperationJobItemState
+  error: string | null
+  started_at: string | null
+  finished_at: string | null
+}
+
+export interface OperationJobDetail extends OperationJobSummary {
+  items: OperationJobItem[]
+}
+
+export interface OperationJobPage {
+  items: OperationJobSummary[]
+  next_offset: number | null
+}
+
+export interface OperationJobAccepted {
+  id: string
+  state: 'queued'
+  status_url: string
+}
+
 // GET /metrics (JSON) and the SSE stream payloads
 export interface MetricsSnapshot {
   pools: { clients: PoolStatus; bots: PoolStatus }

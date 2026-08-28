@@ -39,6 +39,12 @@ COMMANDS: dict[str, tuple[str, str]] = {
 }
 
 
+def _positive_integer(value: str) -> int:
+    if not value.isdecimal() or int(value) <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return int(value)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tgshelf",
@@ -97,6 +103,11 @@ def build_parser() -> argparse.ArgumentParser:
                 "--dry-run",
                 action="store_true",
                 help="show the mirror plan without applying it",
+            )
+            cmd.add_argument(
+                "--max-hours",
+                type=_positive_integer,
+                help="stop after this many hours (default: no limit)",
             )
             cmd.add_argument("source", help="source folder path")
             cmd.add_argument("dest", help="destination folder path")

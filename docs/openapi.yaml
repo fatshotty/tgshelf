@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: tgshelf HTTP API
-  version: "1.0.6"
+  version: "1.0.7"
   description: |
     HTTP API for tgshelf — Telegram-as-cloud-storage. Two surfaces:
 
@@ -569,6 +569,53 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/SearchResultList" }
 
+  /api/v1/jobs:
+    get:
+      tags: [tree]
+      summary: List durable bulk operation jobs.
+      parameters:
+        - name: state
+          in: query
+          schema: { type: string, enum: [queued, running, completed, failed, interrupted] }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200": { $ref: "#/components/responses/OperationJobPage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+    post:
+      tags: [tree]
+      summary: Create a durable best-effort bulk move or soft-delete job.
+      description: |
+        The request returns immediately. Items are run serially; a failed item
+        does not stop the remaining items. Selecting a folder together with a
+        selected descendant skips the descendant, because the folder operation
+        already covers it. Jobs are visible to every authenticated Web UI user.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateOperationJobRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/OperationJobAccepted" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/jobs/{job_id}:
+    parameters:
+      - name: job_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [tree]
+      summary: Get a durable bulk operation job and its item-level results.
+      responses:
+        "200": { $ref: "#/components/responses/OperationJobDetail" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /api/v1/folders:
     post:
       tags: [tree]
@@ -733,6 +780,64 @@ components:
           description: Absolute virtual path of the containing folder.
           example: /Movies/Inception (2010)
       required: [node, path, parent_path]
+    CreateOperationJobRequest:
+      type: object
+      required: [operation, node_ids]
+      additionalProperties: false
+      properties:
+        operation: { type: string, enum: [move, delete] }
+        node_ids:
+          type: array
+          minItems: 1
+          items: { type: string }
+        parent_id:
+          type: [string, "null"]
+          description: Required for move and omitted for delete.
+    OperationJob:
+      type: object
+      required: [id, operation, state, total, succeeded, failed, skipped, created_at]
+      properties:
+        id: { type: string }
+        operation: { type: string, enum: [move, delete] }
+        state: { type: string, enum: [queued, running, completed, failed, interrupted] }
+        parent_id: { type: [string, "null"] }
+        total: { type: integer }
+        succeeded: { type: integer }
+        failed: { type: integer }
+        skipped: { type: integer }
+        error: { type: [string, "null"] }
+        created_at: { type: [string, "null"], format: date-time }
+        started_at: { type: [string, "null"], format: date-time }
+        finished_at: { type: [string, "null"], format: date-time }
+    OperationJobItem:
+      type: object
+      required: [position, node_id, state]
+      properties:
+        position: { type: integer }
+        node_id: { type: string }
+        source_name: { type: [string, "null"] }
+        source_path: { type: [string, "null"] }
+        state: { type: string, enum: [pending, running, succeeded, failed, skipped] }
+        error: { type: [string, "null"] }
+        started_at: { type: [string, "null"], format: date-time }
+        finished_at: { type: [string, "null"], format: date-time }
+    OperationJobDetail:
+      allOf:
+        - $ref: "#/components/schemas/OperationJob"
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items: { $ref: "#/components/schemas/OperationJobItem" }
+    OperationJobPage:
+      type: object
+      required: [items, next_offset]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/OperationJob" }
+        next_offset: { type: [integer, "null"] }
     Error:
       type: object
       properties:
@@ -791,6 +896,27 @@ components:
               status: { type: string, example: accepted }
               operation: { type: string, enum: [move, copy] }
               node_id: { type: string }
+    OperationJobAccepted:
+      description: Durable bulk operation accepted for asynchronous execution.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [id, state, status_url]
+            properties:
+              id: { type: string }
+              state: { type: string, enum: [queued] }
+              status_url: { type: string }
+    OperationJobPage:
+      description: A page of durable bulk operation jobs.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/OperationJobPage" }
+    OperationJobDetail:
+      description: A durable bulk operation with detailed per-item outcomes.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/OperationJobDetail" }
     FullContent:
       description: Full content (no Range, or a multi-range that was ignored).
       headers:

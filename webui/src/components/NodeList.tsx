@@ -36,7 +36,7 @@ export function NodeList({
       data={sorted}
       itemContent={(_, node) => {
         const deleted = node.state === 'DELETED'
-        const selectable = node.state === 'ACTIVE' && !node.is_folder && !node.inline
+        const selectable = node.state === 'ACTIVE'
         return (
           <div className={`row ${node.is_folder ? 'folder' : 'file'}${deleted ? ' deleted' : ''}`}>
             {selectable ? (

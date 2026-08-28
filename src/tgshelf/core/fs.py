@@ -489,6 +489,7 @@ class FileSystem:
         dry_run: bool = False,
         max_hours: int | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        stop_requested: Callable[[], bool] | None = None,
     ) -> MirrorRun:
         if max_hours is not None and (type(max_hours) is not int or max_hours < 1):
             raise ValueError("max_hours must be a positive integer")
@@ -532,7 +533,12 @@ class FileSystem:
                 failures=(),
             )
 
-        result = await self._apply_mirror_plan(plan, deadline=deadline, monotonic=monotonic)
+        result = await self._apply_mirror_plan(
+            plan,
+            deadline=deadline,
+            monotonic=monotonic,
+            stop_requested=stop_requested or (lambda: False),
+        )
         log.info(
             "[mirror] applied source=%s dest=%s actions=%d created=%d copied=%d "
             "replaced=%d deleted=%d deferred=%d failures=%d",
@@ -564,6 +570,7 @@ class FileSystem:
         *,
         deadline: float | None,
         monotonic: Callable[[], float],
+        stop_requested: Callable[[], bool],
     ) -> _MirrorApplyResult:
         result = _MirrorApplyResult()
         file_kinds = {"copy_file", "replace_file", "replace_folder_with_file"}
@@ -583,10 +590,12 @@ class FileSystem:
                 )
                 index += 1
                 continue
-            if deadline is not None and monotonic() >= deadline:
+            if stop_requested() or (deadline is not None and monotonic() >= deadline):
                 result.deferred = sum(
                     candidate.kind != "skip" for candidate in plan.actions[index:]
                 )
+                if stop_requested():
+                    log.info("[mirror] graceful stop requested; no further actions will start")
                 break
 
             if action.kind in file_kinds:

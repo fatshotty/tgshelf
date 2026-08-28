@@ -8,7 +8,9 @@ against a fake-backed fs; `run()` only wires config → fs.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import signal
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -20,6 +22,51 @@ from tgshelf.db.engine import create_engine, create_session_factory
 from tgshelf.db.repo import NodeRepo
 
 log = logging.getLogger("tgshelf.fsops")
+
+
+class _MirrorStopController:
+    """First process signal requests a graceful mirror stop; second is forceful."""
+
+    def __init__(self) -> None:
+        self.requested = False
+
+    def request_stop(self) -> bool:
+        if self.requested:
+            return False
+        self.requested = True
+        return True
+
+
+@asynccontextmanager
+async def _mirror_stop_signals():
+    """Install cooperative SIGINT/SIGTERM handling for one mirror invocation."""
+    loop = asyncio.get_running_loop()
+    controller = _MirrorStopController()
+    task = asyncio.current_task()
+    installed: list[signal.Signals] = []
+
+    def handle_stop(sig: signal.Signals) -> None:
+        if controller.request_stop():
+            log.warning(
+                "[mirror] graceful stop requested by %s; draining started work",
+                sig.name,
+            )
+            return
+        log.warning("[mirror] second stop signal %s; cancelling immediately", sig.name)
+        if task is not None:
+            task.cancel()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, handle_stop, sig)
+            installed.append(sig)
+        except (NotImplementedError, RuntimeError):
+            log.debug("[mirror] signal handler unavailable for %s", sig.name)
+    try:
+        yield controller
+    finally:
+        for sig in installed:
+            loop.remove_signal_handler(sig)
 
 
 def _err(msg: str) -> int:
@@ -238,6 +285,7 @@ async def _do_mirror(
     *,
     dry_run: bool,
     max_hours: int | None,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> int:
     source = await fs.resolve(source_path)
     if source is None:
@@ -251,7 +299,13 @@ async def _do_mirror(
         return _err(f"destination is not a folder: {dest_path}")
 
     log.info("[mirror] cli source=%s dest=%s dry_run=%s", source_path, dest_path, dry_run)
-    run = await fs.mirror(source.id, dest.id, dry_run=dry_run, max_hours=max_hours)
+    run = await fs.mirror(
+        source.id,
+        dest.id,
+        dry_run=dry_run,
+        max_hours=max_hours,
+        stop_requested=stop_requested,
+    )
     print(f"mirror {source_path} -> {dest_path}")
     print(
         "created={created} copied={copied} replaced={replaced} deleted={deleted} "
@@ -272,6 +326,8 @@ async def _do_mirror(
                 print(f"{action.kind}\t{action.path}")
     for failure in run.failures:
         print(f"error: mirror {failure.action.path}: {failure.error}", file=sys.stderr)
+    if stop_requested is not None and stop_requested():
+        print("stopped_by_signal=true")
     return 1 if run.failures else 0
 
 
@@ -428,12 +484,14 @@ async def run(config: Config, args) -> int:
             return await _do_cp(fs, args.src, args.dst, force_copy=args.force_copy)
     if cmd == "mirror":
         context = _db_fs if args.dry_run else _telegram_fs
-        async with context(config) as fs:
-            return await _do_mirror(
-                fs,
-                args.source,
-                args.dest,
-                dry_run=args.dry_run,
-                max_hours=args.max_hours,
-            )
+        async with _mirror_stop_signals() as stop:
+            async with context(config) as fs:
+                return await _do_mirror(
+                    fs,
+                    args.source,
+                    args.dest,
+                    dry_run=args.dry_run,
+                    max_hours=args.max_hours,
+                    stop_requested=lambda: stop.requested,
+                )
     return _err(f"unknown command {cmd}")

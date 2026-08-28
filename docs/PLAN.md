@@ -211,6 +211,12 @@ shared account pool, retaining the established write rate-limit, cooldown, and
 account-leasing rules. Changed files are staged with copy-then-swap; all mirror
 deletions are soft deletes.
 
+For a running CLI mirror, the first `SIGINT` or `SIGTERM` is cooperative: it
+stops scheduling, drains the active batch, and returns a normal partial result.
+A second signal force-cancels the command for emergency use. The first-signal
+path is logged with `[mirror]` and emits `stopped_by_signal=true`; a forced
+cancellation can leave an in-progress TEMP copy for the next run to retry.
+
 ## Watcher And Import
 
 The watcher is an optional dedicated bot configured under `telegram.main_bot`.

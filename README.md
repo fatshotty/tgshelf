@@ -680,6 +680,13 @@ policy. Changed files use copy-then-swap, and every mirror deletion is a soft
 delete. Mirror planning/application summaries, deferred work, and individual
 action failures use the grep-friendly `[mirror]` log marker.
 
+During a running mirror, one `Ctrl+C` (or `SIGTERM`) requests a graceful stop:
+no new action starts, while the current `operations.concurrent` batch drains
+before the command prints its normal partial summary and exits with status 0.
+The summary adds `stopped_by_signal=true`. Press `Ctrl+C` again only for an
+emergency forced cancellation; it may leave an in-progress copy as a TEMP node,
+which the next mirror run does not treat as a valid backup copy.
+
 Example rclone WebDAV remote:
 
 ```sh

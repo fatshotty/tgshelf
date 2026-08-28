@@ -197,6 +197,20 @@ The CLI is registered from `src/tgshelf/cli.py`. Implemented commands include:
 
 Migration from MongoDB remains a standalone script, not a CLI subcommand.
 
+`mirror` supports an optional `--max-hours` positive whole-number limit; an
+omitted limit is unlimited. Each invocation replans from current source and
+destination state, so scheduled reruns skip aligned files and account for source
+additions, modifications, renames/moves, and soft deletions between runs. The
+deadline stops new work from starting, drains the already-started batch, and may
+therefore exceed the requested duration by that batch's finish time. Deadline
+completion is a normal status-0 CLI result with `completed=false` and
+`deferred=<n>`; transfer or action failures are reported and return non-zero.
+
+Mirror file work runs at `operations.concurrent` through `FsExecutor` and the
+shared account pool, retaining the established write rate-limit, cooldown, and
+account-leasing rules. Changed files are staged with copy-then-swap; all mirror
+deletions are soft deletes.
+
 ## Watcher And Import
 
 The watcher is an optional dedicated bot configured under `telegram.main_bot`.
@@ -261,7 +275,12 @@ Use stable, grep-friendly markers. Existing markers include:
 `[sync]`, `[download]`, `[stream]`, `[fetch]`, `[fetch-slow]`, `[buf]`,
 `[looplag]`, `[watch]`, `[import]`, `[notify]`, `[migrate]`, `[flood]`,
 `[quarantine]`, `[eligibility]`, `[recover]`, `[wait]`, `[exhausted]`,
-`[ratelimit]`, `[premium]`, `[rcbridge]`, `[job]`.
+`[ratelimit]`, `[premium]`, `[rcbridge]`, `[job]`, `[mirror]`.
+
+`[mirror]` records planning and application summaries, including action counts,
+deferred work at a time limit, and individual action failures. CLI summaries
+expose `completed` and `deferred` so an operational scheduler can distinguish a
+normal deadline exit from a failed transfer/action run.
 
 New engines or operational flows should add similarly clear markers.
 

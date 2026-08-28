@@ -16,7 +16,6 @@ from typing import Callable
 
 from tgshelf.config import Config
 from tgshelf.core.fs import FileSystem, INFO_NOTES_MAX_LENGTH
-from tgshelf.core.mirror import MirrorPlan
 from tgshelf.db.engine import create_engine, create_session_factory
 from tgshelf.db.repo import NodeRepo
 
@@ -232,7 +231,14 @@ async def _do_cp(fs: FileSystem, src: str, dst: str, *, force_copy: bool = False
     return await _move_or_copy(fs, src, dst, copy=True, force_copy=force_copy)
 
 
-async def _do_mirror(fs: FileSystem, source_path: str, dest_path: str, *, dry_run: bool) -> int:
+async def _do_mirror(
+    fs: FileSystem,
+    source_path: str,
+    dest_path: str,
+    *,
+    dry_run: bool,
+    max_hours: int | None,
+) -> int:
     source = await fs.resolve(source_path)
     if source is None:
         return _err(f"source not found: {source_path}")
@@ -245,21 +251,28 @@ async def _do_mirror(fs: FileSystem, source_path: str, dest_path: str, *, dry_ru
         return _err(f"destination is not a folder: {dest_path}")
 
     log.info("[mirror] cli source=%s dest=%s dry_run=%s", source_path, dest_path, dry_run)
-    plan = await fs.mirror(source.id, dest.id, dry_run=dry_run)
-    counts = _mirror_counts(plan)
+    run = await fs.mirror(source.id, dest.id, dry_run=dry_run, max_hours=max_hours)
     print(f"mirror {source_path} -> {dest_path}")
     print(
         "created={created} copied={copied} replaced={replaced} deleted={deleted} "
-        "skipped={skipped} dry_run={dry_run}".format(
-            **counts,
+        "skipped={skipped} deferred={deferred} completed={completed} dry_run={dry_run}".format(
+            created=run.created,
+            copied=run.copied,
+            replaced=run.replaced,
+            deleted=run.deleted,
+            skipped=run.skipped,
+            deferred=run.deferred,
+            completed=str(run.completed).lower(),
             dry_run=str(dry_run).lower(),
         )
     )
     if dry_run:
-        for action in plan.actions:
+        for action in run.plan.actions:
             if action.kind != "skip":
                 print(f"{action.kind}\t{action.path}")
-    return 0
+    for failure in run.failures:
+        print(f"error: mirror {failure.action.path}: {failure.error}", file=sys.stderr)
+    return 1 if run.failures else 0
 
 
 async def _do_notes(
@@ -284,21 +297,6 @@ async def _do_notes(
         value = updated.info["notes"]
     print(f"notes updated {path} ({len(value)}/{INFO_NOTES_MAX_LENGTH})")
     return 0
-
-
-def _mirror_counts(plan: MirrorPlan) -> dict[str, int]:
-    replaced_kinds = {
-        "replace_file",
-        "replace_file_with_folder",
-        "replace_folder_with_file",
-    }
-    return {
-        "created": plan.count("create_folder") + plan.count("replace_file_with_folder"),
-        "copied": plan.count("copy_file"),
-        "replaced": sum(plan.count(kind) for kind in replaced_kinds),
-        "deleted": plan.count("delete_extra"),
-        "skipped": plan.count("skip"),
-    }
 
 
 async def _move_or_copy(
@@ -431,5 +429,11 @@ async def run(config: Config, args) -> int:
     if cmd == "mirror":
         context = _db_fs if args.dry_run else _telegram_fs
         async with context(config) as fs:
-            return await _do_mirror(fs, args.source, args.dest, dry_run=args.dry_run)
+            return await _do_mirror(
+                fs,
+                args.source,
+                args.dest,
+                dry_run=args.dry_run,
+                max_hours=args.max_hours,
+            )
     return _err(f"unknown command {cmd}")

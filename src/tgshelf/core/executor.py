@@ -55,6 +55,11 @@ class FsExecutor:
         self._plugin_manager = plugin_manager
         self._sleep = sleep
 
+    @property
+    def concurrent(self) -> int:
+        """Configured maximum number of operations run in one batch."""
+        return self._concurrent
+
     async def run(
         self, items: Iterable[Any], op: Callable[[FileSystem, Any], Awaitable[Any]]
     ) -> list[Any]:

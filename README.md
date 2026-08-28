@@ -650,6 +650,8 @@ tgshelf --config config.yaml purge /notes/readme.txt
 # replaced, and destination-only entries are soft-deleted.
 tgshelf --config config.yaml mirror /media/movies /backup/movies-bk-1
 tgshelf --config config.yaml mirror --dry-run /media/movies /backup/movies-bk-1
+# Limit one run to three hours; omitting --max-hours leaves the run unlimited.
+tgshelf --config config.yaml mirror --max-hours 3 /media/movies /backup/movies
 
 # Download a file or folder. Existing partial files are resumed unless
 # --overwrite is used explicitly.
@@ -661,6 +663,22 @@ tgshelf --config config.yaml strm --source /folder --destination ./strm [--clear
 # Verify or repair bot membership on channels used by the filesystem.
 tgshelf --config config.yaml bots check
 ```
+
+`mirror --max-hours` accepts a positive whole number of hours. At the deadline,
+the command stops starting new work, drains the batch already in flight, and can
+therefore run beyond the requested duration by the time needed to finish that
+batch. This is a normal status-0 exit: the summary reports `completed=false`
+and `deferred=<n>`. Actual transfer or action failures are reported and return
+a non-zero status.
+
+Every mirror invocation replans from the current source and destination state.
+Nightly reruns therefore skip aligned files while reflecting source additions,
+modifications, renames/moves, and soft deletions made between runs. File
+transfers run at `operations.concurrent` through the shared executor and
+account pool, preserving the existing rate-limit, cooldown, and account-leasing
+policy. Changed files use copy-then-swap, and every mirror deletion is a soft
+delete. Mirror planning/application summaries, deferred work, and individual
+action failures use the grep-friendly `[mirror]` log marker.
 
 Example rclone WebDAV remote:
 

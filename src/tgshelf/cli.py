@@ -23,7 +23,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "download": ("download a file/folder from the drive to local disk", "C-download"),
     "accounts": ("manage Telegram accounts/sessions (setup, login, add-bot, list, check)", "A3"),
     "create-bots": ("create bots via BotFather and join them to channels", "C4"),
-    "bots": ("check/repair bot membership on all channels in use", "C4"),
+    "bots": ("manage bot membership on Telegram channels", "C4"),
     "search": ("search files and folders by name", "C2"),
     "mkdir": ("create a folder (with parents) in the virtual filesystem", "C2"),
     "ls": ("list a folder of the virtual filesystem", "C2"),
@@ -168,6 +168,7 @@ def build_parser() -> argparse.ArgumentParser:
 def _add_bots_subparsers(cmd: argparse.ArgumentParser) -> None:
     sub = cmd.add_subparsers(dest="bots_cmd", required=True)
     sub.add_parser("check", help="verify/repair bot membership on all channels in use")
+    sub.add_parser("join", help="select bots and channels, then add missing memberships")
 
 
 def _add_accounts_subparsers(cmd: argparse.ArgumentParser) -> None:
@@ -253,6 +254,8 @@ def _dispatch(config: Config, args: argparse.Namespace) -> int:
 
         if args.bots_cmd == "check":
             return asyncio.run(bots.run_check(config, args))
+        if args.bots_cmd == "join":
+            return asyncio.run(bots.run_join(config, args))
         print(f"error: unknown bots subcommand {args.bots_cmd!r}", file=sys.stderr)
         return 2
 

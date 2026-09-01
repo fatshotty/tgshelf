@@ -192,7 +192,7 @@ The CLI is registered from `src/tgshelf/cli.py`. Implemented commands include:
   `mv`, `rm`, `purge`;
 - transfer commands: `sync`, `download`;
 - `.strm` generation;
-- bot creation/check commands;
+- bot creation, selective join, and full membership check/repair commands;
 - `import-channel`.
 
 Migration from MongoDB remains a standalone script, not a CLI subcommand.
@@ -281,7 +281,7 @@ Use stable, grep-friendly markers. Existing markers include:
 `[sync]`, `[download]`, `[stream]`, `[fetch]`, `[fetch-slow]`, `[buf]`,
 `[looplag]`, `[watch]`, `[import]`, `[notify]`, `[migrate]`, `[flood]`,
 `[quarantine]`, `[eligibility]`, `[recover]`, `[wait]`, `[exhausted]`,
-`[ratelimit]`, `[premium]`, `[rcbridge]`, `[job]`, `[mirror]`.
+`[ratelimit]`, `[premium]`, `[rcbridge]`, `[job]`, `[mirror]`, `[join]`.
 
 `[mirror]` records planning and application summaries, including action counts,
 deferred work at a time limit, and individual action failures. CLI summaries

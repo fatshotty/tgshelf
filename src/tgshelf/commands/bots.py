@@ -1,11 +1,13 @@
-"""`tgshelf create-bots` and `tgshelf bots check`.
+"""`tgshelf create-bots`, `tgshelf bots join`, and `tgshelf bots check`.
 
-Two admin commands sharing the same building blocks (port of the legacy
+Telegram bot administration commands sharing the same building blocks (port of the legacy
 `python/commands/create_bots.py`):
 
 - **create-bots**: drives a BotFather conversation through a user account to
   create N bots, then promotes each to read-only admin of selected channels
   (promoting = adding). Interactive (account + channel selection), like legacy.
+- **bots join**: interactively selects configured bots and channels, then
+  promotes only missing bot/channel memberships.
 - **bots check**: for every configured bot and every channel in use, verifies
   membership via the user account and repairs (re-promotes) what is missing.
 
@@ -101,8 +103,30 @@ def parse_channel_selection(text: str | None, available: Sequence[int]) -> list[
     return out
 
 
+def parse_bot_selection(
+    text: str | None, available: Sequence[AccountConfig]
+) -> list[AccountConfig]:
+    """Interpret ``all`` or comma-separated one-based bot indexes.
+
+    Invalid and duplicate indexes are ignored while preserving selection order.
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    if text.lower() == "all":
+        return list(available)
+    out: list[AccountConfig] = []
+    for part in text.split(","):
+        part = part.strip()
+        if part.isdigit():
+            idx = int(part) - 1
+            if 0 <= idx < len(available) and available[idx] not in out:
+                out.append(available[idx])
+    return out
+
+
 class BotCommandError(Exception):
-    """A create-bots / bots-check failure that aborts the command."""
+    """A bot administration failure that aborts the command."""
 
 
 # -- BotFather conversation (FSM testable; the I/O is injected) -------------
@@ -322,6 +346,18 @@ def _select_channels(channels: list[tuple[int, str]], prompt=input) -> list[int]
     return parse_channel_selection(selection, [cid for cid, _ in channels])
 
 
+def _select_bots(
+    available: Sequence[AccountConfig], prompt=input
+) -> list[AccountConfig]:
+    print("\nAvailable bots:")
+    for i, bot in enumerate(available, 1):
+        print(f"  [{i}] @{bot.name}")
+    selection = prompt(
+        "Bots to add (comma-separated indexes, 'all', or ENTER to cancel) > "
+    )
+    return parse_bot_selection(selection, available)
+
+
 def _print_config_entry(account: AccountConfig, bot_name: str, token: str) -> None:
     print("\n" + "=" * 64)
     print(f"  @{bot_name} created — add this entry to config.yaml (telegram.users):")
@@ -412,6 +448,78 @@ async def _channel_admins(client: TelegramClient, channel_id: int) -> tuple[set[
     usernames = {u.username.lower() for u in admins if getattr(u, "username", None)}
     ids = {u.id for u in admins}
     return usernames, ids
+
+
+async def run_join(config: Config, args) -> int:
+    """Interactively add selected configured bots to selected channels in use."""
+    configured_bots = [account for account in config.telegram.users if account.is_bot]
+    if not configured_bots:
+        print(
+            "error: no bots configured (telegram.users entries with a bot_token)",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        selected_bots = _select_bots(configured_bots)
+        if not selected_bots:
+            raise BotCommandError("no bots selected")
+        labeled_channels = await channels_in_use_labeled(config)
+        selected_channels = _select_channels(labeled_channels)
+        if not selected_channels:
+            raise BotCommandError("no channels selected")
+        account = _select_user_account(config)
+    except BotCommandError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    from tgshelf.http.serve import make_write_limiter
+
+    rate_limiter = make_write_limiter(config.operations)
+    joined = already_present = failed = 0
+    async with _connect_user(config, account) as client:
+        for channel_id in selected_channels:
+            try:
+                usernames, ids = await _channel_admins(client, channel_id)
+            except Exception as exc:  # noqa: BLE001 - report and continue the batch
+                log.error("[join] cannot read admins of %s: %s", channel_id, exc)
+                failed += len(selected_bots)
+                continue
+            for bot in selected_bots:
+                bot_id = bot_id_from_token(bot.bot_token)
+                present = bot.name.lower() in usernames or (
+                    bot_id is not None and bot_id in ids
+                )
+                if present:
+                    already_present += 1
+                    log.info("[join] @%s is already admin of %s", bot.name, channel_id)
+                    continue
+                try:
+                    await promote_bot(
+                        client,
+                        channel_id,
+                        f"@{bot.name}",
+                        rate_limiter=rate_limiter,
+                        account_name=account.name,
+                    )
+                    joined += 1
+                    log.info("[join] @%s added to channel %s", bot.name, channel_id)
+                except Exception as exc:  # noqa: BLE001 - one failure never aborts the batch
+                    log.error(
+                        "[join] FAILED to add @%s to %s: %s",
+                        bot.name,
+                        channel_id,
+                        exc,
+                    )
+                    failed += 1
+
+    log.info(
+        "[join] done: %d joined, %d already present, %d failed",
+        joined,
+        already_present,
+        failed,
+    )
+    return 1 if failed else 0
 
 
 async def run_check(config: Config, args) -> int:

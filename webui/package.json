@@ -1,7 +1,7 @@
 {
   "name": "tgshelf-webui",
   "private": true,
-  "version": "1.0.8",
+  "version": "1.0.9-beta1",
   "type": "module",
   "scripts": {
     "dev": "vite",

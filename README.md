@@ -39,7 +39,7 @@ aiohttp APIs, HTTP download endpoints, WebDAV/rclone, and a React Web UI.
   delete, restore, purge, search, recursive size, merge parts, split parts, and
   reorder parts.
 - CLI workflows for accounts/sessions, filesystem operations, sync, download,
-  `.strm` generation, and bot checks.
+  `.strm` generation, and bot membership management.
 - Web UI for browsing, search, metrics, tree management, inline text editing,
   Telegram-backed file-part management, and durable bulk move/soft-delete jobs
   with per-item status and errors.
@@ -662,7 +662,15 @@ tgshelf --config config.yaml strm --source /folder --destination ./strm [--clear
 
 # Verify or repair bot membership on channels used by the filesystem.
 tgshelf --config config.yaml bots check
+
+# Interactively select configured bots first, then the channels to join.
+# Both prompts accept comma-separated one-based indexes or "all".
+tgshelf --config config.yaml bots join
 ```
+
+`bots join` adds the selected bots as read-only administrators only to the
+selected channels. Bots that are already administrators are skipped, and the
+command does not remove bots from any other channel.
 
 `mirror --max-hours` accepts a positive whole number of hours. At the deadline,
 the command stops starting new work, drains the batch already in flight, and can

@@ -128,7 +128,7 @@ class Uploader:
                 )
                 member.is_premium = False
                 if self._notifier is not None:
-                    self._notifier(exc)
+                    await _maybe_await(self._notifier(exc))
                 member.max_upload_parts = self._free_max
                 if on_reset is not None:
                     await _maybe_await(on_reset())

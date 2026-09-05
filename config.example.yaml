@@ -6,6 +6,10 @@
 #   db: "postgresql+asyncpg://${DB_USER}:${DB_PASS}@localhost/${DB_NAME}"
 # The DB environment variable still overrides the db key entirely.
 
+# Recommended unique instance name. It is shown in notifications and reusable
+# at runtime; if omitted, tgshelf uses the local hostname.
+name: tgshelf-dev
+
 data: ./data            # local data dir (file sessions, runtime state)
 
 # PostgreSQL DSN. The DB environment variable overrides this value.
@@ -46,16 +50,16 @@ telegram:
     min_size: 2097152
     # Master channel, mapped 1:1 to the root folder "/".
     channel: -1001234567890
-  # Reserved for a future channel watcher. The bot that listens to channel
-  # messages and catalogs them automatically is not managed yet, so this block
-  # is currently not used by the runtime.
+  # Optional dedicated watcher bot. When configured, `serve` starts it with
+  # receive_updates=True and imports new files posted to the master channel.
+  # It must be a member/admin of the master channel.
   main_bot:
     api_id: 123456
     api_hash: "0123456789abcdef0123456789abcdef"
     bot_token: "987654321:AAyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
   notify:
-    # Reserved for future Telegram notifications. Notifications are not managed
-    # yet, so this block is currently not used by the runtime.
+    # Optional Telegram Bot API alert delivery. Empty bot_token keeps alerts in
+    # the local [notify] log only. The bot must be allowed to post to `channel`.
     bot_token:
     # Optional destination: numeric id (-100.../-...) or @username. Empty means
     # the master/root channel above.
@@ -65,6 +69,7 @@ telegram:
     # fields without producing empty labels.
     #
     # Built-in template fields:
+    #   {instance} — root-level `name` of this tgshelf instance
     #   {severity} — critical | error | warning
     #   {title}    — short human summary of the event
     #   {message}  — legacy/custom free-form summary; defaults to {title}
@@ -84,7 +89,7 @@ telegram:
     #   {cause}      — likely cause in operator-friendly language
     #   {action}     — suggested next command or manual recovery step
     template: |
-      [tgshelf:{severity}] {title}
+      [tgshelf:{instance}:{severity}] {title}
 
       Impact: {impact}
       Scope: {scope}

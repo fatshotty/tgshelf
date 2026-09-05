@@ -10,6 +10,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
+import socket
 import string
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,7 +29,7 @@ LOG_LEVELS = ("no", "error", "warn", "info", "debug")
 SESSION_STORAGES = ("db", "file")
 STRM_PLACEHOLDERS = ("file_id", "filename", "channel_id", "parts", "parts_dash", "size", "mime")
 ENV_REF_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
-NOTIFY_TEMPLATE = """[tgshelf:{severity}] {title}
+NOTIFY_TEMPLATE = """[tgshelf:{instance}:{severity}] {title}
 
 Impact: {impact}
 Scope: {scope}
@@ -208,6 +209,7 @@ class PluginsConfig:
 class Config:
     db: str
     telegram: TelegramConfig
+    name: str = ""
     data: str = "./data"
     logger: str = "info"
     session_storage: str = "db"
@@ -562,6 +564,11 @@ def load_config(path: str | Path, env: Mapping[str, str] | None = None) -> Confi
     if not db:
         raise ConfigError("'db' is required (or set the DB environment variable)")
 
+    raw_name = raw.get("name", socket.gethostname())
+    if not isinstance(raw_name, str) or not raw_name.strip():
+        raise ConfigError("'name' must be a non-empty string")
+    name = raw_name.strip()
+
     logger = _str(raw, "logger", "info", path="<root>")
     if logger not in LOG_LEVELS:
         raise ConfigError(f"'logger' must be one of {LOG_LEVELS}, got {logger!r}")
@@ -580,6 +587,7 @@ def load_config(path: str | Path, env: Mapping[str, str] | None = None) -> Confi
     return Config(
         db=str(db),
         telegram=_parse_telegram(raw),
+        name=name,
         data=_str(raw, "data", "./data", path="<root>"),
         logger=logger,
         session_storage=session_storage,

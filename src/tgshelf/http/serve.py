@@ -82,6 +82,7 @@ def build_runtime(
     clients,
     *,
     write_limiter=None,
+    notifier=None,
 ) -> dict[str, Any]:
     """Assemble pools + engines + executor from started clients. Returns the
     components the HTTP routes will use."""
@@ -94,12 +95,28 @@ def build_runtime(
             else make_write_limiter(config.operations)
         ),
     )
+
+    async def notify_premium_downgrade(exc) -> None:
+        if notifier is None:
+            return
+        await notifier.notify(
+            {
+                "title": "Upload account downgraded to the free tier",
+                "impact": "The upload is retrying with the free Telegram size limit.",
+                "cause": str(exc),
+                "action": "Check the Telegram Premium status for the upload account.",
+            },
+            severity=exc.severity,
+            key="upload-premium-downgrade",
+        )
+
     # with N>1 connections per client, the engine must fire >= N concurrent saves
     # to keep them busy; the client round-robins them across the connections.
     uploader = Uploader(
         client_pool, part_size=PART_SIZE,
         max_in_flight=max(3, config.concurrent_tcp_connections),
         premium_check=refresh_upload_caps,
+        notifier=notify_premium_downgrade,
     )
     streamer_pool = bot_pool if bot_pool.members else client_pool
     from tgshelf.core.download import ParallelStreamer
@@ -111,6 +128,7 @@ def build_runtime(
         user_pool=client_pool,
         allow_user_fallback=config.download.allow_user_fallback,
         memory_soft_limit=config.download.memory_soft_limit,
+        notifier=notifier,
     )
     plugin_manager = load_plugins(config.plugins)
     executor = FsExecutor(
@@ -122,6 +140,7 @@ def build_runtime(
         uploader=uploader,
         streamer=streamer,
         gateway=write_gateway,
+        notifier=notifier,
         caption_template=config.caption.template,
         plugin_manager=plugin_manager,
     )
@@ -252,28 +271,28 @@ async def run_server(config: Config) -> None:
     write_limiter = make_write_limiter(config.operations)
 
     clients = await start_clients(config, write_limiter)
+    from tgshelf.core.notify import Notifier
+
+    notifier = Notifier(
+        bot_token=config.telegram.notify.bot_token,
+        channel=config.telegram.notify.channel,
+        instance=config.name,
+        template=config.telegram.notify.template,
+        warning_window=config.telegram.notify.warning_window,
+    )
     runtime = build_runtime(
         config,
         session_factory,
         clients,
         write_limiter=write_limiter,
+        notifier=notifier,
     )
-
-    from tgshelf.core.notify import Notifier
-
+    await notifier.start()
     user_gateway = (
         runtime["client_pool"].members[0].client
         if runtime["client_pool"].members
         else None
     )
-    notifier = Notifier(
-        bot_token=config.telegram.notify.bot_token,
-        channel=config.telegram.notify.channel,
-        template=config.telegram.notify.template,
-        warning_window=config.telegram.notify.warning_window,
-    )
-    await notifier.start()
-    runtime["executor"]._notifier = notifier
 
     from tgshelf.core.jobs import OperationJobService
     from tgshelf.http.api import register_routes, runtime_fs

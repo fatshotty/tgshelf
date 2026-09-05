@@ -37,6 +37,8 @@ variable remains a full override for the `db` key.
 
 Important blocks:
 
+- `name`: optional deployment instance name; defaults to the local hostname and
+  is exposed to notification templates as `{instance}`.
 - `db`: SQLAlchemy async PostgreSQL DSN.
 - `session_storage`: `db` or `file`.
 - `telegram.users`: user accounts and bot accounts.

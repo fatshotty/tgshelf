@@ -52,15 +52,19 @@ class Notifier:
         *,
         bot_token: str | None = None,
         channel: int | str | None = None,
+        instance: str = "",
         template: str = NOTIFY_TEMPLATE,
         warning_window: float = 300.0,
         sender: Sender = _send_via_bot_api,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self._bot_token = bot_token
         self._channel = channel
+        self._instance = instance
         self._template = template
         self._warning_window = warning_window
         self._sender = sender
+        self._clock = clock
         self._queue: asyncio.Queue[tuple[int | str, str] | object] | None = None
         self._worker: asyncio.Task[None] | None = None
         self._warning_state: dict[str, tuple[float, int]] = {}
@@ -108,12 +112,13 @@ class Notifier:
     ) -> str | None:
         suppressed = 0
         if severity is Severity.WARNING and key:
-            now = time.monotonic()
-            last_sent, count = self._warning_state.get(key, (0.0, 0))
-            if last_sent and now - last_sent < self._warning_window:
+            now = self._clock()
+            state = self._warning_state.get(key)
+            if state is not None and now - state[0] < self._warning_window:
+                last_sent, count = state
                 self._warning_state[key] = (last_sent, count + 1)
                 return None
-            suppressed = count
+            suppressed = state[1] if state is not None else 0
             self._warning_state[key] = (now, 0)
 
         text = self._render(message, severity=severity, key=key)
@@ -144,6 +149,7 @@ class Notifier:
             fields["message"] = fields["title"]
 
         fields["severity"] = severity.value
+        fields["instance"] = self._instance
         if key:
             fields["key"] = key
         fields.setdefault(

@@ -21,7 +21,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "sync": ("upload a local directory tree to the drive", "C3"),
     "strm": ("generate .strm files from the virtual filesystem", "C3"),
     "download": ("download a file/folder from the drive to local disk", "C-download"),
-    "accounts": ("manage Telegram accounts/sessions (setup, login, add-bot, list, check)", "A3"),
+    "accounts": ("manage Telegram accounts and sessions", "A3"),
     "create-bots": ("create bots via BotFather and join them to channels", "C4"),
     "bots": ("manage bot membership on Telegram channels", "C4"),
     "search": ("search files and folders by name", "C2"),
@@ -187,6 +187,16 @@ def _add_accounts_subparsers(cmd: argparse.ArgumentParser) -> None:
     add_bot = sub.add_parser("add-bot", help="register a bot from its config token")
     add_bot.add_argument("names", nargs="*", help="bot account names from config")
     add_bot.add_argument("--all", action="store_true", help="register every configured bot")
+    add_bot.add_argument(
+        "--force",
+        action="store_true",
+        help="delete each existing session before registering the bot",
+    )
+    delete_session = sub.add_parser(
+        "delete-session",
+        help="delete a stored Telegram session without contacting Telegram",
+    )
+    delete_session.add_argument("name", help="stored session name")
     imp = sub.add_parser("import", help="import a legacy Telethon .session file")
     imp.add_argument("name", help="account name from config")
     imp.add_argument("--session", required=True, help="path to the .session file")

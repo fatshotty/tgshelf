@@ -627,6 +627,15 @@ tgshelf --config config.yaml accounts add-bot bot01
 tgshelf --config config.yaml accounts add-bot bot01 bot02 bot03
 tgshelf --config config.yaml accounts add-bot --all
 
+# Delete a stored session without contacting Telegram. This is idempotent and
+# works with both DB-backed and file-backed session storage.
+tgshelf --config config.yaml accounts delete-session bot01
+
+# Delete the selected bot's stored session, then register it using the current
+# token from config.yaml. Stop running tgshelf instances before rotating a
+# session that they may already have loaded.
+tgshelf --config config.yaml accounts add-bot bot01 --force
+
 # Start the HTTP API, Web UI, metrics, and enabled WebDAV surfaces.
 tgshelf --config config.yaml serve
 

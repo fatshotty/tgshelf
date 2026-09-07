@@ -24,6 +24,7 @@ from tgshelf.telegram.errors import (
     FileRefExpired,
     FloodCooldown,
     PartMissing,
+    Severity,
 )
 from tgshelf.telegram.pool import BotPool, ClientPool, PoolMember
 
@@ -140,6 +141,7 @@ class ParallelStreamer:
         user_pool: ClientPool | None = None,
         allow_user_fallback: bool = False,
         memory_soft_limit: int = 0,
+        notifier: Any = None,
         sleep=asyncio.sleep,
     ):
         self._bot_pool = bot_pool
@@ -150,6 +152,7 @@ class ParallelStreamer:
         self._user_pool = user_pool
         self._allow_user_fallback = allow_user_fallback
         self._memory_soft_limit = memory_soft_limit
+        self._notifier = notifier
         self._sleep = sleep
         # observability (surfaced at /metrics)
         self._active_streams = 0
@@ -399,8 +402,10 @@ class ParallelStreamer:
         if self._allow_user_fallback and self._user_pool is not None:
             user = self._user_pool.lease_one()
             if user is not None:
+                await self._notify_pool_exhausted(channel_id, fallback=True)
                 return user
 
+        await self._notify_pool_exhausted(channel_id, fallback=False)
         # otherwise wait for a bot to free up (shared lease+wait logic)
         repl = await self._bot_pool.lease_or_wait(
             channel_id=channel_id, exclude=exclude, sleep=self._sleep
@@ -408,3 +413,42 @@ class ParallelStreamer:
         if repl is None:
             raise ChannelUnavailable(f"no client can reach channel {channel_id}")
         return repl
+
+    async def _notify_pool_exhausted(self, channel_id: int, *, fallback: bool) -> None:
+        if self._notifier is None:
+            return
+        impact = (
+            "All bot readers are unavailable; stream fell back to a user account."
+            if fallback
+            else "All bot readers are unavailable; stream cannot continue until a bot recovers."
+        )
+        await self._notifier.notify(
+            {
+                "title": "Download bot pool exhausted",
+                "impact": impact,
+                "scope": f"channel {channel_id}",
+                "channel_id": channel_id,
+                "cause": self._unavailable_bot_cause(channel_id),
+                "action": "Wait for bot recovery or run `tgshelf bots check`.",
+            },
+            severity=Severity.WARNING,
+            key=f"download-pool-exhausted:{channel_id}",
+        )
+
+    def _unavailable_bot_cause(self, channel_id: int) -> str:
+        members = getattr(self._bot_pool, "members", ())
+        quarantined = sum(1 for member in members if member.quarantined)
+        if quarantined:
+            return f"{quarantined} bot{'s' if quarantined != 1 else ''} quarantined"
+
+        now = self._bot_pool.now()
+        cooling = sum(1 for member in members if member.cooldown_until > now)
+        if cooling:
+            return f"{cooling} bot{'s' if cooling != 1 else ''} in cooldown"
+
+        ineligible = sum(
+            1 for member in members if channel_id in member.ineligible_channels
+        )
+        if ineligible:
+            return f"{ineligible} bot{'s' if ineligible != 1 else ''} cannot access this channel"
+        return "no bot can currently serve this channel"

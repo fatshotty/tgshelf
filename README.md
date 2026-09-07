@@ -438,6 +438,11 @@ db: postgresql+asyncpg://DB_USER:DB_PASS@DB_HOST:DB_PORT/DB_NAME
 
 logger: info            # no | error | warn | info | debug
 
+# Recommended unique instance name. It prefixes Telegram alerts and is available
+# to future runtime features that need to identify this tgshelf deployment. If
+# omitted, tgshelf uses the local hostname.
+name: tgshelf-dev
+
 # Where Telegram sessions are stored:
 #   db   = tg_sessions table, recommended for single-instance deployments
 #   file = {data}/{name}.session, useful when each instance owns its sessions
@@ -464,25 +469,25 @@ telegram:
     # Master channel mapped to root "/". Dummy: replace with your -100...
     channel: -1001234567890
 
-  # Reserved for a future channel watcher. The bot that listens to channel
-  # messages and catalogs them automatically is not managed yet, so this block
-  # is currently not used by the runtime.
+  # Optional dedicated watcher bot. `serve` starts it with receive_updates=True
+  # and imports new files posted to the master channel. It must be a member/admin.
   main_bot:
     api_id: 123456      # dummy
     api_hash: "0123456789abcdef0123456789abcdef"  # dummy
     bot_token: "987654321:AAyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"  # dummy
 
   notify:
-    # Reserved for future Telegram notifications. Notifications are not managed
-    # yet, so this block is currently not used by the runtime.
+    # Optional Bot API alert delivery. Empty bot_token keeps alerts in the local
+    # [notify] log only. The configured bot must be allowed to post to `channel`.
     bot_token:          # optional; dummy if set
     # Optional destination: numeric ID (-100.../-...) or @username.
     # Empty = the master channel configured above.
     channel:
-    # Optional notification template. Lines with placeholders that have no value
-    # are omitted, so fields can be reordered or removed without empty labels.
+    # Optional notification template. `{instance}` is the root-level `name`.
+    # Lines with placeholders that have no value are omitted, so fields can be
+    # reordered or removed without empty labels.
     template: |
-      [tgshelf:{severity}] {title}
+      [tgshelf:{instance}:{severity}] {title}
 
       Impact: {impact}
       Scope: {scope}

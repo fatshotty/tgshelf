@@ -9,7 +9,6 @@
 - modificare template caption nel file config.yaml
 - bonificare tutte le caption su telegram
 - gestire il bot che ascolta i messaggi dal canale e li cataloga
-- gestire le notifiche Telegram
 
 ## Mirror Follow Ups
 

@@ -23,8 +23,9 @@ from urllib.parse import quote
 from aiohttp import web
 
 from tgshelf.http.api import open_fs
+from tgshelf.http.app import RUNTIME
 from tgshelf.log import CLIENT_DISCONNECT, current_request_id, new_request_id
-from tgshelf.telegram.errors import ChannelUnavailable, FloodCooldown, PartMissing
+from tgshelf.telegram.errors import ChannelUnavailable, FloodCooldown, PartMissing, Severity
 
 log = logging.getLogger("tgshelf.http.download")
 
@@ -170,6 +171,27 @@ async def stream_node(request: web.Request, fs, node) -> web.StreamResponse:
         outcome = f"aborted ({exc.__class__.__name__})"
         log.warning("[download] %s stream aborted (%s): %s",
                     node.id, exc.__class__.__name__, exc)
+        if isinstance(exc, PartMissing):
+            notifier = request.app[RUNTIME].get("notifier")
+            if notifier is not None:
+                await notifier.notify(
+                    {
+                        "title": "Telegram file part missing",
+                        "impact": (
+                            "The file is not fully downloadable because a Telegram message "
+                            "is missing."
+                        ),
+                        "file_path": node.name,
+                        "node_id": node.id,
+                        "part_idx": exc.part_idx,
+                        "cause": str(exc),
+                        "action": (
+                            "Restore the missing Telegram message or repair the file metadata."
+                        ),
+                    },
+                    severity=Severity.CRITICAL,
+                    key=f"part-missing:{node.id}",
+                )
     finally:
         await stream.aclose()  # release the streamer's bots on disconnect too
         # one terminal line per request: how it ended + bytes actually served

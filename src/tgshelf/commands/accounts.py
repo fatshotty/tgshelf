@@ -1,8 +1,8 @@
 """`tgshelf accounts` — manage Telegram accounts and their sessions.
 
 Subcommands: list, setup, login (interactive user), add-bot (bot token from
-config), import (legacy .session file). Sessions are persisted via the backend
-selected by `session_storage` (db | file).
+config), delete-session, import (legacy .session file). Sessions are persisted
+via the backend selected by `session_storage` (db | file).
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ async def run(config: Config, args) -> int:
         "setup": _setup,
         "login": _login,
         "add-bot": _add_bot,
+        "delete-session": _delete_session,
         "check": _check,
         "import": _import,
     }.get(args.accounts_cmd)
@@ -231,10 +232,23 @@ async def _add_bot(config: Config, args) -> int:
     bot_accounts, rc = _bot_accounts(config, args)
     if rc:
         return rc
+    force = bool(getattr(args, "force", False))
     async with _open_store(config) as store:
         for account in bot_accounts:
+            if force:
+                await store.delete(account.name)
             await _register_bot(account, store)
             print(f"registered bot '{account.name}'")
+    return 0
+
+
+async def _delete_session(config: Config, args) -> int:
+    async with _open_store(config) as store:
+        if not await store.load(args.name):
+            print(f"session '{args.name}' does not exist")
+            return 0
+        await store.delete(args.name)
+    print(f"deleted session '{args.name}'")
     return 0
 
 

@@ -539,6 +539,9 @@ download:
   multi_bot_download: 3         # parallel bots per download; 1 = sequential
   allow_user_fallback: false    # use user accounts if the bot pool is exhausted
   chunk_timeout: 6              # seconds without a chunk before replacing a bot
+  # Timed quarantine retry schedule; one real request probes each expired stage.
+  # Values must be positive, non-decreasing durations in seconds.
+  quarantine_backoff_seconds: [300, 900, 1800, 3600]
   # Estimated buffer soft threshold. 0 = disabled.
   memory_soft_limit: 0
 

@@ -24,13 +24,26 @@ METRICS_SSE_INTERVAL = 1.0  # seconds between pushed snapshots
 
 def _member_status(m: Any, now: float) -> dict:
     cooldown = max(0.0, m.cooldown_until - now)
+    quarantine = max(0.0, m.quarantine_until - now)
+    if m.half_open:
+        state = "half_open"
+    elif m.quarantined:
+        state = "quarantined"
+    elif cooldown > 0.0:
+        state = "cooldown"
+    else:
+        state = "healthy"
     return {
         "name": m.name,
         "is_premium": m.is_premium,
         "capacity": m.capacity,
         "in_flight": m.in_flight,
         "load": m.load,
+        "state": state,
         "quarantined": m.quarantined,
+        "half_open": m.half_open,
+        "quarantine_attempt": m.quarantine_attempt,
+        "quarantine_remaining": round(quarantine, 3),
         "cooldown_remaining": round(cooldown, 3),
         "consecutive_errors": m.consecutive_errors,
         "ineligible_channels": sorted(m.ineligible_channels),
@@ -41,13 +54,23 @@ def _member_status(m: Any, now: float) -> dict:
 
 def _pool_status(pool: Any) -> dict:
     if pool is None:
-        return {"total": 0, "available": 0, "in_flight": 0, "members": []}
+        return {
+            "total": 0,
+            "available": 0,
+            "in_flight": 0,
+            "next_quarantine_probe_in": None,
+            "members": [],
+        }
     now = pool.now()
     members = [_member_status(m, now) for m in pool.members]
+    next_probe = pool.next_quarantine_wait()
     return {
         "total": len(members),
         "available": sum(1 for m in members if m["available"]),
         "in_flight": sum(m["in_flight"] for m in members),
+        "next_quarantine_probe_in": (
+            round(next_probe, 3) if next_probe is not None else None
+        ),
         "members": members,
     }
 

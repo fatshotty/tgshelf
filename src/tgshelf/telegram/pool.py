@@ -8,7 +8,8 @@ least-recently-used so requests rotate naturally across the whole pool
 Health, all driven by the engines reacting to TgClient errors:
 - `mark_flood` puts a client on cooldown until a wall-clock deadline (FloodWait);
 - `mark_error`/`mark_success` track a consecutive-error streak; N in a row
-  quarantines the client until `recover` (e.g. `tgshelf bots check`);
+  opens a timed quarantine. One real request probes the client after the
+  deadline; success recovers it and failure advances the backoff;
 - `mark_ineligible` records per-channel access loss (ChannelPrivateError) so a
   bot is skipped only for the channels it cannot reach.
 """
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from typing import Any, Callable, Iterable, Sequence
 
@@ -31,6 +33,9 @@ class PoolMember:
         self.in_flight = 0
         self.consecutive_errors = 0
         self.quarantined = False
+        self.half_open = False
+        self.quarantine_attempt = 0
+        self.quarantine_until = 0.0
         self.cooldown_until = 0.0
         self.last_lease_seq = 0
         self.ineligible_channels: set[int] = set()
@@ -48,10 +53,17 @@ class Pool:
         members: Iterable[PoolMember],
         *,
         max_errors: int = 3,
+        quarantine_backoff: Sequence[float] = (300.0, 900.0, 1800.0, 3600.0),
         clock: Callable[[], float] = time.monotonic,
     ):
         self._members = list(members)
         self._max_errors = max_errors
+        self._quarantine_backoff = tuple(quarantine_backoff)
+        if not self._quarantine_backoff or any(
+            not math.isfinite(seconds) or seconds <= 0
+            for seconds in self._quarantine_backoff
+        ):
+            raise ValueError("quarantine_backoff must contain finite positive durations")
         self._clock = clock
         self._seq = 0
 
@@ -87,15 +99,66 @@ class Pool:
         self._seq += 1
         m.last_lease_seq = self._seq
 
-    def lease(self, k: int, channel_id: int | None = None) -> list[PoolMember]:
-        chosen = self._ranked(channel_id)[:k]
-        for m in chosen:
-            self._touch(m)
+    def _lease_due_probe(
+        self,
+        channel_id: int | None,
+        exclude: Sequence[PoolMember] = (),
+    ) -> PoolMember | None:
+        if any(member.half_open for member in self._members):
+            return None
+        now = self._clock()
+        excluded = {id(member) for member in exclude}
+        due = [
+            member
+            for member in self._members
+            if member.quarantined
+            and not member.half_open
+            and member.quarantine_until <= now
+            and member.cooldown_until <= now
+            and member.in_flight == 0
+            and id(member) not in excluded
+            and (channel_id is None or channel_id not in member.ineligible_channels)
+        ]
+        if not due:
+            return None
+        member = min(due, key=lambda item: (item.quarantine_until, item.last_lease_seq))
+        member.half_open = True
+        self._touch(member)
+        log.info(
+            "[probe] '%s' quarantine expired; leasing one half-open request",
+            member.name,
+        )
+        return member
+
+    def lease(
+        self,
+        k: int,
+        channel_id: int | None = None,
+        *,
+        allow_probe: bool = False,
+    ) -> list[PoolMember]:
+        if k <= 0:
+            return []
+        chosen: list[PoolMember] = []
+        probe = self._lease_due_probe(channel_id) if allow_probe else None
+        if probe is not None:
+            chosen.append(probe)
+        healthy = self._ranked(channel_id)[: k - len(chosen)]
+        for member in healthy:
+            self._touch(member)
+        chosen.extend(healthy)
         return chosen
 
     def replace(
-        self, channel_id: int | None = None, exclude: Sequence[PoolMember] = ()
+        self,
+        channel_id: int | None = None,
+        exclude: Sequence[PoolMember] = (),
+        *,
+        allow_probe: bool = False,
     ) -> PoolMember | None:
+        probe = self._lease_due_probe(channel_id, exclude) if allow_probe else None
+        if probe is not None:
+            return probe
         excluded = {id(m) for m in exclude}
         for m in self._ranked(channel_id):
             if id(m) not in excluded:
@@ -108,26 +171,46 @@ class Pool:
         *,
         channel_id: int | None = None,
         exclude: Sequence[PoolMember] = (),
+        allow_probe: bool = False,
         sleep=asyncio.sleep,  # awaited below: must be an async sleep, not time.sleep
     ) -> PoolMember | None:
         """Lease the least-loaded eligible member; if all eligible ones are on
         cooldown, wait for the earliest to free and retry. Returns None when no
-        member can ever become available (all quarantined/ineligible).
+        member can become available without a later request probing quarantine.
 
         `exclude` is honored only for the immediate attempt — after waiting, an
         excluded member whose cooldown has expired is fair game again. Reused by
         the streamer (bots) and the operation executor (user accounts)."""
-        member = self.replace(channel_id=channel_id, exclude=exclude)
+        member = self.replace(
+            channel_id=channel_id, exclude=exclude, allow_probe=allow_probe
+        )
         if member is not None:
             return member
         while True:
             wait = self._earliest_cooldown_wait(channel_id)
-            if wait is None:
-                log.warning("[exhausted] no client can serve channel %s right now", channel_id)
-                return None  # nothing will free up on its own
+            quarantine_wait = (
+                self.next_quarantine_wait(channel_id) if allow_probe else None
+            )
+            if wait is None or (
+                quarantine_wait is not None and quarantine_wait < wait
+            ):
+                if quarantine_wait is None:
+                    log.warning(
+                        "[exhausted] no client can serve channel %s right now",
+                        channel_id,
+                    )
+                else:
+                    log.warning(
+                        "[exhausted] no client can serve channel %s; next probe in %.1fs",
+                        channel_id,
+                        quarantine_wait,
+                    )
+                return None
             log.info("[wait] all clients busy/cooled; waiting %.1fs for the next free", wait)
             await sleep(max(wait, 0))
-            member = self.replace(channel_id=channel_id)
+            member = self.replace(
+                channel_id=channel_id, allow_probe=allow_probe
+            )
             if member is not None:
                 log.debug("[wait] '%s' became available", member.name)
                 return member
@@ -140,6 +223,22 @@ class Pool:
             if not m.quarantined
             and (channel_id is None or channel_id not in m.ineligible_channels)
             and m.cooldown_until > now
+        ]
+        return min(waits) if waits else None
+
+    def next_quarantine_wait(self, channel_id: int | None = None) -> float | None:
+        """Return seconds until the next eligible quarantine probe.
+
+        Requests are not held open for quarantine backoffs. A request arriving
+        once this reaches zero becomes the single half-open probe.
+        """
+        now = self._clock()
+        waits = [
+            max(0.0, max(member.quarantine_until, member.cooldown_until) - now)
+            for member in self._members
+            if member.quarantined
+            and not member.half_open
+            and (channel_id is None or channel_id not in member.ineligible_channels)
         ]
         return min(waits) if waits else None
 
@@ -158,21 +257,63 @@ class Pool:
         m.cooldown_until = self._clock() + seconds
         log.warning("[flood] '%s' PAUSED for %.0fs (cooldown)", m.name, seconds)
 
+    def abort_probe(self, m: PoolMember) -> None:
+        if not m.half_open:
+            return
+        m.half_open = False
+        m.quarantine_until = self._clock()
+        log.info(
+            "[probe] '%s' half-open request aborted; remains quarantined", m.name
+        )
+
     def mark_error(self, m: PoolMember) -> None:
+        if m.quarantined:
+            if not m.half_open:
+                log.debug("[quarantine] '%s' ignored an in-flight error", m.name)
+                return
+            m.half_open = False
+            m.quarantine_attempt += 1
+            delay = self._quarantine_delay(m.quarantine_attempt)
+            m.quarantine_until = self._clock() + delay
+            log.warning(
+                "[quarantine] '%s' half-open probe failed; attempt=%d retry_in=%.0fs",
+                m.name,
+                m.quarantine_attempt,
+                delay,
+            )
+            return
+
         m.consecutive_errors += 1
         if m.consecutive_errors >= self._max_errors:
             m.quarantined = True
+            m.half_open = False
+            m.quarantine_attempt = 1
+            delay = self._quarantine_delay(m.quarantine_attempt)
+            m.quarantine_until = self._clock() + delay
             log.warning(
-                "[quarantine] '%s' QUARANTINED after %d consecutive errors",
-                m.name, m.consecutive_errors,
+                "[quarantine] '%s' QUARANTINED after %d consecutive errors; "
+                "attempt=%d retry_in=%.0fs",
+                m.name,
+                m.consecutive_errors,
+                m.quarantine_attempt,
+                delay,
             )
         else:
             log.debug("'%s' error %d/%d", m.name, m.consecutive_errors, self._max_errors)
 
     def mark_success(self, m: PoolMember) -> None:
+        if m.half_open:
+            self.recover(m)
+            return
+        if m.quarantined:
+            return
         if m.consecutive_errors:
             log.debug("'%s' recovered after %d error(s)", m.name, m.consecutive_errors)
         m.consecutive_errors = 0
+
+    def _quarantine_delay(self, attempt: int) -> float:
+        index = min(max(attempt - 1, 0), len(self._quarantine_backoff) - 1)
+        return self._quarantine_backoff[index]
 
     def mark_ineligible(self, m: PoolMember, channel_id: int) -> None:
         m.ineligible_channels.add(channel_id)
@@ -181,6 +322,9 @@ class Pool:
     def recover(self, m: PoolMember) -> None:
         was = m.quarantined
         m.quarantined = False
+        m.half_open = False
+        m.quarantine_attempt = 0
+        m.quarantine_until = 0.0
         m.consecutive_errors = 0
         if was:
             log.info("[recover] '%s' quarantine lifted", m.name)
@@ -198,4 +342,4 @@ class BotPool(Pool):
     """Bots: download and streaming, leased per channel."""
 
     def lease_bots(self, channel_id: int, k: int) -> list[PoolMember]:
-        return self.lease(k, channel_id=channel_id)
+        return self.lease(k, channel_id=channel_id, allow_probe=True)

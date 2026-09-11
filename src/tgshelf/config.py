@@ -8,6 +8,7 @@ or invalid values raise `ConfigError` at startup, never at request time.
 from __future__ import annotations
 
 import ipaddress
+import math
 import os
 import re
 import socket
@@ -137,6 +138,8 @@ class DownloadConfig:
     multi_bot_download: int = 1
     allow_user_fallback: bool = False
     chunk_timeout: float = 6.0
+    quarantine_backoff_seconds: tuple[float, ...] = (300.0, 900.0, 1800.0, 3600.0)
+    # Backoff entries are positive, non-decreasing durations in seconds.
     # Soft RAM threshold (bytes) above which NEW streams start sequential (K=1)
     # instead of multi-bot. 0 = disabled. Streams are never refused or queued.
     memory_soft_limit: int = 0
@@ -283,6 +286,34 @@ def _str_tuple(section: Mapping[str, Any], key: str, *, path: str) -> tuple[str,
     return tuple(result)
 
 
+def _positive_float_tuple(
+    section: Mapping[str, Any],
+    key: str,
+    default: tuple[float, ...],
+    *,
+    path: str,
+) -> tuple[float, ...]:
+    value = section.get(key, default)
+    if not isinstance(value, (list, tuple)) or not value:
+        raise ConfigError(f"'{path}.{key}' must be a non-empty list of numbers")
+    result: list[float] = []
+    for idx, item in enumerate(value):
+        if isinstance(item, bool):
+            raise ConfigError(f"'{path}.{key}[{idx}]' must be a number")
+        try:
+            number = float(item)
+        except (TypeError, ValueError):
+            raise ConfigError(f"'{path}.{key}[{idx}]' must be a number") from None
+        if not math.isfinite(number) or number <= 0:
+            raise ConfigError(f"'{path}.{key}[{idx}]' must be > 0")
+        if result and number < result[-1]:
+            raise ConfigError(
+                f"'{path}.{key}' must contain non-decreasing durations"
+            )
+        result.append(number)
+    return tuple(result)
+
+
 def _notify_channel(value: Any, *, master_channel: int) -> int | str | None:
     if value in (None, ""):
         return master_channel
@@ -398,6 +429,12 @@ def _parse_download(raw: Mapping[str, Any]) -> DownloadConfig:
             section, "allow_user_fallback", DownloadConfig.allow_user_fallback, path="download"
         ),
         chunk_timeout=_float(section, "chunk_timeout", DownloadConfig.chunk_timeout, path="download"),
+        quarantine_backoff_seconds=_positive_float_tuple(
+            section,
+            "quarantine_backoff_seconds",
+            DownloadConfig.quarantine_backoff_seconds,
+            path="download",
+        ),
         memory_soft_limit=_int(
             section, "memory_soft_limit", DownloadConfig.memory_soft_limit, path="download"
         ),

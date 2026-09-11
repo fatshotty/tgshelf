@@ -848,6 +848,7 @@ components:
         total: { type: integer }
         available: { type: integer }
         in_flight: { type: integer }
+        next_quarantine_probe_in: { type: [number, "null"] }
         members:
           type: array
           items:
@@ -858,7 +859,11 @@ components:
               capacity: { type: integer }
               in_flight: { type: integer }
               load: { type: number }
+              state: { type: string, enum: [healthy, cooldown, quarantined, half_open] }
               quarantined: { type: boolean }
+              half_open: { type: boolean }
+              quarantine_attempt: { type: integer }
+              quarantine_remaining: { type: number }
               cooldown_remaining: { type: number }
               consecutive_errors: { type: integer }
               ineligible_channels:

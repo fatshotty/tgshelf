@@ -39,7 +39,10 @@ class ServeError(Exception):
 
 
 def build_pools(
-    clients: Sequence[tuple[Any, Any]], *, capacity: int = 4
+    clients: Sequence[tuple[Any, Any]],
+    *,
+    capacity: int = 4,
+    quarantine_backoff: Sequence[float] = (300.0, 900.0, 1800.0, 3600.0),
 ) -> tuple[ClientPool, BotPool]:
     """Split (account_config, started_client) pairs into the user pool (upload /
     management) and the bot pool (download / streaming)."""
@@ -54,7 +57,10 @@ def build_pools(
         (bots if account.is_bot else users).append(member)
     if not users:
         raise ServeError("at least one user account is required (upload/management)")
-    return ClientPool(users), BotPool(bots)
+    return (
+        ClientPool(users, quarantine_backoff=quarantine_backoff),
+        BotPool(bots, quarantine_backoff=quarantine_backoff),
+    )
 
 
 def make_write_limiter(operations: OperationsConfig):
@@ -86,7 +92,10 @@ def build_runtime(
 ) -> dict[str, Any]:
     """Assemble pools + engines + executor from started clients. Returns the
     components the HTTP routes will use."""
-    client_pool, bot_pool = build_pools(clients)
+    client_pool, bot_pool = build_pools(
+        clients,
+        quarantine_backoff=config.download.quarantine_backoff_seconds,
+    )
     write_gateway = AccountWriteGateway(
         client_pool,
         limiter=(

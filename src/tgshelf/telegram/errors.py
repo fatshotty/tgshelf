@@ -60,11 +60,13 @@ class ChannelUnavailable(TgError):
 
     severity = Severity.ERROR
 
-    def __init__(self, detail: str = ""):
-        super().__init__(
-            f"channel unavailable{f' ({detail})' if detail else ''}: "
-            "client is not a member; run `tgshelf bots check` to repair"
-        )
+    def __init__(self, detail: str = "", *, membership_hint: bool = True):
+        message = f"channel unavailable{f' ({detail})' if detail else ''}"
+        if membership_hint:
+            message += (
+                ": client is not a member; run `tgshelf bots check` to repair"
+            )
+        super().__init__(message)
 
 
 class PartMissing(TgError):

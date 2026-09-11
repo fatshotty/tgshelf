@@ -79,6 +79,9 @@ function PoolSection({ title, pool }: { title: string; pool: PoolStatus }) {
         <span className="pooltitle">{title}</span>
         <span className="poolstat">
           {pool.available}/{pool.total} available · {pool.in_flight} in-flight
+          {pool.next_quarantine_probe_in !== null
+            ? ` · next probe ${Math.ceil(pool.next_quarantine_probe_in)}s`
+            : ''}
         </span>
       </header>
       {pool.members.length === 0 ? (

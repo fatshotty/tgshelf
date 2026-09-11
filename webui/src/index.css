@@ -148,10 +148,10 @@ body {
   background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 0.6rem;
 }
 .pooltile.off { opacity: 0.45; }
-.tilehead { display: flex; align-items: center; gap: 0.4rem; margin-bottom: 0.4rem; }
-.tilename { font-weight: 600; font-size: 0.85rem; }
+.tilehead { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.4rem; }
+.tilename { min-width: 0; overflow-wrap: anywhere; font-weight: 600; font-size: 0.85rem; }
 .badge {
-  font-size: 0.65rem; padding: 0.05rem 0.4rem; border-radius: 10px;
+  white-space: nowrap; font-size: 0.65rem; padding: 0.05rem 0.4rem; border-radius: 10px;
   background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent);
 }
 .badge.warn { background: color-mix(in srgb, #d33 18%, transparent); color: #d33; }

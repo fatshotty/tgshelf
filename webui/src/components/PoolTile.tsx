@@ -6,13 +6,22 @@ import type { PoolMember } from '../api/types'
 export function PoolTile({ member }: { member: PoolMember }) {
   const loadPct = Math.max(0, Math.min(1, member.load)) * 100
   const cap = member.capacity ?? 0
+  const quarantineSeconds = Math.ceil(
+    Math.max(member.quarantine_remaining, member.cooldown_remaining),
+  )
   return (
     <div className={`pooltile${member.available ? '' : ' off'}`}>
       <div className="tilehead">
         <span className="tilename">{member.name}</span>
         {member.is_premium ? <span className="badge">premium</span> : null}
-        {member.quarantined ? (
-          <span className="badge warn">quarantined {Math.ceil(member.cooldown_remaining)}s</span>
+        {member.half_open ? (
+          <span className="badge warn">probing</span>
+        ) : member.quarantined ? (
+          <span className="badge warn">
+            quarantined {quarantineSeconds}s · attempt {member.quarantine_attempt}
+          </span>
+        ) : member.cooldown_remaining > 0 ? (
+          <span className="badge warn">cooldown {Math.ceil(member.cooldown_remaining)}s</span>
         ) : null}
       </div>
       <div className="loadbar">

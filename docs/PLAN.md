@@ -110,7 +110,9 @@ Pool members track:
 
 - in-flight work;
 - cooldown deadlines;
-- consecutive failures and quarantine;
+- consecutive failures and timed quarantine with a configurable retry schedule;
+- one half-open probe at a time, driven by real download traffic after the
+  quarantine deadline;
 - per-channel eligibility.
 
 Leasing is weighted least-loaded with LRU tie breaks. `lease_or_wait` waits for

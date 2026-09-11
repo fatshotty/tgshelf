@@ -115,6 +115,7 @@ export interface PoolStatus {
   total: number
   available: number
   in_flight: number
+  next_quarantine_probe_in: number | null
   members: PoolMember[]
 }
 
@@ -124,7 +125,11 @@ export interface PoolMember {
   capacity?: number
   in_flight: number
   load: number
+  state: 'healthy' | 'cooldown' | 'quarantined' | 'half_open'
   quarantined: boolean
+  half_open: boolean
+  quarantine_attempt: number
+  quarantine_remaining: number
   cooldown_remaining: number
   consecutive_errors?: number
   ineligible_channels: number[]

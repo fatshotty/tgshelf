@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Sequence
@@ -217,7 +218,9 @@ class ParallelStreamer:
 
             # generic lease (works whether the pool is a BotPool or, when no bots
             # are configured, the user ClientPool)
-            bots = self._bot_pool.lease(k, channel_id=channel_id)
+            bots = self._bot_pool.lease(
+                k, channel_id=channel_id, allow_probe=True
+            )
             if not bots:
                 bots = [await self._replace(channel_id, exclude=[])]
             log.info(
@@ -285,32 +288,40 @@ class ParallelStreamer:
             self._active_streams -= 1
 
     async def _worker(self, state, chunks, parts, channel_id, part_refs, bot, unreachable):
-        while True:
-            async with state.cond:
-                while True:
-                    if state.error is not None or state.next_dispatch >= state.n:
-                        return
-                    # dispatch as long as the read-ahead buffer has room, gated by
-                    # capacity (= 2*K) and NOT by next_emit: a free bot grabs the
-                    # next chunk immediately instead of waiting for the in-order one
-                    # to be emitted, so the K bots never idle between batches.
-                    if state.next_dispatch < state.next_emit + state.capacity:
-                        idx = state.next_dispatch
-                        state.next_dispatch += 1
-                        break
-                    await state.cond.wait()
-            chunk = chunks[idx]
-            try:
-                data, bot = await self._fetch(chunk, parts, channel_id, part_refs, bot, unreachable)
-            except BaseException as exc:  # noqa: BLE001 - propagated to the emitter
+        try:
+            while True:
                 async with state.cond:
-                    if state.error is None:
-                        state.error = exc
+                    while True:
+                        if state.error is not None or state.next_dispatch >= state.n:
+                            return
+                        # dispatch as long as the read-ahead buffer has room, gated by
+                        # capacity (= 2*K) and NOT by next_emit: a free bot grabs the
+                        # next chunk immediately instead of waiting for the in-order one
+                        # to be emitted, so the K bots never idle between batches.
+                        if state.next_dispatch < state.next_emit + state.capacity:
+                            idx = state.next_dispatch
+                            state.next_dispatch += 1
+                            break
+                        await state.cond.wait()
+                chunk = chunks[idx]
+                try:
+                    data, bot = await self._fetch(
+                        chunk, parts, channel_id, part_refs, bot, unreachable
+                    )
+                except BaseException as exc:  # noqa: BLE001 - propagated to the emitter
+                    async with state.cond:
+                        if state.error is None:
+                            state.error = exc
+                        state.cond.notify_all()
+                    return
+                async with state.cond:
+                    state.results[chunk.seq] = data
                     state.cond.notify_all()
-                return
-            async with state.cond:
-                state.results[chunk.seq] = data
-                state.cond.notify_all()
+        finally:
+            # A half-open member may be leased to a worker that exits before it
+            # receives a chunk (short range or sibling failure). Release the probe
+            # reservation so a later request can perform the real health check.
+            self._bot_pool.abort_probe(bot)
 
     async def _fetch(self, chunk, parts, channel_id, part_refs, bot, unreachable):
         p = parts[chunk.part_idx]
@@ -361,6 +372,7 @@ class ParallelStreamer:
                 return raw[chunk.trim_start : chunk.trim_end], bot
             except FloodCooldown as exc:
                 self._bot_pool.mark_flood(bot, exc.seconds)
+                self._bot_pool.abort_probe(bot)
                 log.info("[failover] chunk %d: '%s' flooded; replacing bot", chunk.seq, bot.name)
                 last_exc, need_replacement = exc, True
             except FileRefExpired as exc:
@@ -371,6 +383,7 @@ class ParallelStreamer:
             except ChannelUnavailable as exc:
                 # per-stream exclusion (NOT persisted): a re-added bot is rechecked
                 # on the next stream. Other workers see it via the shared list.
+                self._bot_pool.abort_probe(bot)
                 if bot not in unreachable:
                     unreachable.append(bot)
                 log.warning("[eligibility] chunk %d: '%s' cannot reach channel %s; "
@@ -381,11 +394,15 @@ class ParallelStreamer:
                 log.warning("[failover] chunk %d: '%s' timed out (>%.0fs at resolve/fetch); replacing",
                             chunk.seq, bot.name, self._chunk_timeout)
                 last_exc, need_replacement = exc, True
+            except BaseException:
+                self._bot_pool.abort_probe(bot)
+                raise
             finally:
                 self._bot_pool.release(bot)
 
             retries += 1
             if retries > self._max_retries:
+                self._bot_pool.abort_probe(bot)
                 raise last_exc
             if need_replacement:
                 # exclude the per-stream unreachable set + the bot that just failed
@@ -394,13 +411,18 @@ class ParallelStreamer:
                 bot = await self._replace(channel_id, exclude=unreachable + [bot])
 
     async def _replace(self, channel_id: int, exclude: Sequence[PoolMember]) -> PoolMember:
-        repl = self._bot_pool.replace(channel_id=channel_id, exclude=exclude)
+        repl = self._bot_pool.replace(
+            channel_id=channel_id, exclude=exclude, allow_probe=True
+        )
         if repl is not None:
             return repl
 
         # bot pool exhausted: optional user fallback before waiting
         if self._allow_user_fallback and self._user_pool is not None:
-            user = self._user_pool.lease_one()
+            users = self._user_pool.lease(
+                1, channel_id=channel_id, allow_probe=True
+            )
+            user = users[0] if users else None
             if user is not None:
                 await self._notify_pool_exhausted(channel_id, fallback=True)
                 return user
@@ -408,10 +430,14 @@ class ParallelStreamer:
         await self._notify_pool_exhausted(channel_id, fallback=False)
         # otherwise wait for a bot to free up (shared lease+wait logic)
         repl = await self._bot_pool.lease_or_wait(
-            channel_id=channel_id, exclude=exclude, sleep=self._sleep
+            channel_id=channel_id, exclude=exclude, allow_probe=True, sleep=self._sleep
         )
         if repl is None:
-            raise ChannelUnavailable(f"no client can reach channel {channel_id}")
+            cause = self._unavailable_bot_cause(channel_id)
+            raise ChannelUnavailable(
+                f"no client can reach channel {channel_id}: {cause}",
+                membership_hint=False,
+            )
         return repl
 
     async def _notify_pool_exhausted(self, channel_id: int, *, fallback: bool) -> None:
@@ -429,17 +455,49 @@ class ParallelStreamer:
                 "scope": f"channel {channel_id}",
                 "channel_id": channel_id,
                 "cause": self._unavailable_bot_cause(channel_id),
-                "action": "Wait for bot recovery or run `tgshelf bots check`.",
+                "action": self._pool_exhausted_action(channel_id),
             },
             severity=Severity.WARNING,
             key=f"download-pool-exhausted:{channel_id}",
         )
 
+    def _pool_exhausted_action(self, channel_id: int) -> str:
+        members = getattr(self._bot_pool, "members", ())
+        if any(
+            member.quarantined and channel_id not in member.ineligible_channels
+            for member in members
+        ):
+            return "Wait for the next automatic probe; inspect `/status` for its countdown."
+        now = self._bot_pool.now()
+        if any(
+            not member.quarantined
+            and member.cooldown_until > now
+            and channel_id not in member.ineligible_channels
+            for member in members
+        ):
+            return "Wait for the Telegram cooldown to expire; inspect `/status`."
+        if any(channel_id in member.ineligible_channels for member in members):
+            return "Run `tgshelf bots check` to verify channel membership."
+        return "Inspect `/status` and the tgshelf logs for pool availability."
+
     def _unavailable_bot_cause(self, channel_id: int) -> str:
         members = getattr(self._bot_pool, "members", ())
-        quarantined = sum(1 for member in members if member.quarantined)
+        quarantined = [
+            member
+            for member in members
+            if member.quarantined and channel_id not in member.ineligible_channels
+        ]
         if quarantined:
-            return f"{quarantined} bot{'s' if quarantined != 1 else ''} quarantined"
+            label = (
+                f"{len(quarantined)} "
+                f"bot{'s' if len(quarantined) != 1 else ''} quarantined"
+            )
+            if any(member.half_open for member in quarantined):
+                return f"{label}; half-open probe in progress"
+            wait = self._bot_pool.next_quarantine_wait(channel_id)
+            if wait is not None:
+                return f"{label}; next probe in {math.ceil(wait)}s"
+            return label
 
         now = self._bot_pool.now()
         cooling = sum(1 for member in members if member.cooldown_until > now)

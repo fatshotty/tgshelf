@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Sequence
@@ -317,6 +318,11 @@ class ParallelStreamer:
         retries = 0
         last_exc: BaseException | None = None
         while True:
+            if not self._bot_pool.is_available(bot, channel_id):
+                bot = await self._replace(
+                    channel_id, exclude=unreachable + [bot]
+                )
+            generation = self._bot_pool.health_generation(bot)
             # file_reference (and the document access_hash) are bound to the
             # ACCOUNT that resolved them, so the cache is per-client: keying by
             # (bot, part) stops one bot from reusing another bot's reference,
@@ -352,7 +358,7 @@ class ParallelStreamer:
                     timeout=self._chunk_timeout,
                 )
                 dt = time.monotonic() - t0
-                self._bot_pool.mark_success(bot)
+                self._bot_pool.mark_success(bot, generation)
                 log.debug(
                     "[fetch] chunk %d part %d (msg %s, dc %s) <- '%s' (%d B) in %.2fs",
                     chunk.seq, chunk.part_idx, p.message_id,
@@ -377,7 +383,7 @@ class ParallelStreamer:
                             "excluded for this stream", chunk.seq, bot.name, channel_id)
                 last_exc, need_replacement = exc, True
             except asyncio.TimeoutError as exc:
-                self._bot_pool.mark_error(bot)
+                self._bot_pool.mark_error(bot, generation)
                 log.warning("[failover] chunk %d: '%s' timed out (>%.0fs at resolve/fetch); replacing",
                             chunk.seq, bot.name, self._chunk_timeout)
                 last_exc, need_replacement = exc, True
@@ -411,7 +417,11 @@ class ParallelStreamer:
             channel_id=channel_id, exclude=exclude, sleep=self._sleep
         )
         if repl is None:
-            raise ChannelUnavailable(f"no client can reach channel {channel_id}")
+            cause = self._unavailable_bot_cause(channel_id)
+            raise ChannelUnavailable(
+                f"no client can reach channel {channel_id}: {cause}",
+                membership_hint=False,
+            )
         return repl
 
     async def _notify_pool_exhausted(self, channel_id: int, *, fallback: bool) -> None:
@@ -429,17 +439,51 @@ class ParallelStreamer:
                 "scope": f"channel {channel_id}",
                 "channel_id": channel_id,
                 "cause": self._unavailable_bot_cause(channel_id),
-                "action": "Wait for bot recovery or run `tgshelf bots check`.",
+                "action": self._pool_exhausted_action(channel_id),
             },
             severity=Severity.WARNING,
             key=f"download-pool-exhausted:{channel_id}",
         )
 
-    def _unavailable_bot_cause(self, channel_id: int) -> str:
+    def _pool_exhausted_action(self, channel_id: int) -> str:
         members = getattr(self._bot_pool, "members", ())
-        quarantined = sum(1 for member in members if member.quarantined)
+        if any(
+            member.quarantined and channel_id not in member.ineligible_channels
+            for member in members
+        ):
+            return "Wait for automatic quarantine expiry; inspect `/status`."
+        now = self._bot_pool.now()
+        if any(
+            not member.quarantined
+            and member.cooldown_until > now
+            and channel_id not in member.ineligible_channels
+            for member in members
+        ):
+            return "Wait for the Telegram cooldown to expire; inspect `/status`."
+        if any(channel_id in member.ineligible_channels for member in members):
+            return "Run `tgshelf bots check` to verify channel membership."
+        return "Inspect `/status` and the tgshelf logs for pool availability."
+
+    def _unavailable_bot_cause(self, channel_id: int) -> str:
+        self._bot_pool.refresh_quarantines()
+        members = getattr(self._bot_pool, "members", ())
+        quarantined = [
+            member
+            for member in members
+            if member.quarantined
+            and channel_id not in member.ineligible_channels
+        ]
         if quarantined:
-            return f"{quarantined} bot{'s' if quarantined != 1 else ''} quarantined"
+            now = self._bot_pool.now()
+            remaining = min(
+                max(0.0, member.quarantine_until - now)
+                for member in quarantined
+            )
+            count = len(quarantined)
+            return (
+                f"{count} bot{'s' if count != 1 else ''} quarantined; "
+                f"available again in {math.ceil(remaining)}s"
+            )
 
         now = self._bot_pool.now()
         cooling = sum(1 for member in members if member.cooldown_until > now)

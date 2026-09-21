@@ -125,6 +125,7 @@ export interface PoolMember {
   in_flight: number
   load: number
   quarantined: boolean
+  quarantine_remaining: number
   cooldown_remaining: number
   consecutive_errors?: number
   ineligible_channels: number[]

@@ -539,6 +539,9 @@ download:
   multi_bot_download: 3         # parallel bots per download; 1 = sequential
   allow_user_fallback: false    # use user accounts if the bot pool is exhausted
   chunk_timeout: 6              # seconds without a chunk before replacing a bot
+  # Seconds a reader remains quarantined after three consecutive timeouts.
+  # Optional; defaults to 60 when omitted.
+  quarantine_seconds: 60
   # Estimated buffer soft threshold. 0 = disabled.
   memory_soft_limit: 0
 
@@ -592,6 +595,12 @@ rclone:
 Required values are the PostgreSQL DSN and `telegram.upload.channel`. At least
 one user account is required for uploads and management operations. Bot accounts
 are optional, but they are what make parallel downloads useful.
+
+After three consecutive resolve or chunk timeouts, a reader is quarantined for
+`download.quarantine_seconds`. Recovery is automatic and lazy: the next pool
+selection or status read after the deadline returns it to service, without a
+restart or `tgshelf bots check`. A longer Telegram FloodWait cooldown continues
+to apply independently after quarantine expires.
 
 The `telegram.main_bot` and `telegram.notify` blocks are reserved for future
 work. tgshelf does not yet manage a bot that listens to channel messages and

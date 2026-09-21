@@ -137,6 +137,7 @@ class DownloadConfig:
     multi_bot_download: int = 1
     allow_user_fallback: bool = False
     chunk_timeout: float = 6.0
+    quarantine_seconds: int = 60
     # Soft RAM threshold (bytes) above which NEW streams start sequential (K=1)
     # instead of multi-bot. 0 = disabled. Streams are never refused or queued.
     memory_soft_limit: int = 0
@@ -241,6 +242,25 @@ def _int(section: Mapping[str, Any], key: str, default: int, *, path: str) -> in
         return int(value)
     except (TypeError, ValueError):
         raise ConfigError(f"'{path}.{key}' must be an integer, got {value!r}") from None
+
+
+def _positive_int(
+    section: Mapping[str, Any], key: str, default: int, *, path: str
+) -> int:
+    value = section.get(key, default)
+    if isinstance(value, bool) or isinstance(value, float):
+        raise ConfigError(f"'{path}.{key}' must be a positive integer")
+    if isinstance(value, str):
+        value = value.strip()
+        if not value.isdigit():
+            raise ConfigError(f"'{path}.{key}' must be a positive integer")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise ConfigError(f"'{path}.{key}' must be a positive integer") from None
+    if parsed <= 0:
+        raise ConfigError(f"'{path}.{key}' must be > 0")
+    return parsed
 
 
 def _float(section: Mapping[str, Any], key: str, default: float, *, path: str) -> float:
@@ -398,6 +418,12 @@ def _parse_download(raw: Mapping[str, Any]) -> DownloadConfig:
             section, "allow_user_fallback", DownloadConfig.allow_user_fallback, path="download"
         ),
         chunk_timeout=_float(section, "chunk_timeout", DownloadConfig.chunk_timeout, path="download"),
+        quarantine_seconds=_positive_int(
+            section,
+            "quarantine_seconds",
+            DownloadConfig.quarantine_seconds,
+            path="download",
+        ),
         memory_soft_limit=_int(
             section, "memory_soft_limit", DownloadConfig.memory_soft_limit, path="download"
         ),

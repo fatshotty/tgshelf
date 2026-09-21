@@ -1,6 +1,5 @@
-// Fase 5 — live Stats dashboard. SSE-fed (useMetricsStream): summary cards, a
-// derived-throughput sparkline (bytes/sec from the bytes_total counter), and a
-// per-member tile grid for the client and bot pools.
+// Live stats dashboard. SSE-fed summary cards, a derived-throughput sparkline,
+// and per-member grids for client and bot pools.
 import { useEffect, useRef, useState } from 'react'
 
 import type { PoolStatus } from '../api/types'

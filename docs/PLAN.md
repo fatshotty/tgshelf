@@ -110,8 +110,13 @@ Pool members track:
 
 - in-flight work;
 - cooldown deadlines;
-- consecutive failures and quarantine;
+- consecutive timeout failures and fixed-duration quarantine with lazy,
+  generation-safe automatic recovery;
 - per-channel eligibility.
+
+Fetch results carry the member health generation captured before the Telegram
+request. Results from an older generation are ignored, so concurrent work that
+finishes late cannot shorten, extend, or reopen quarantine.
 
 Leasing is weighted least-loaded with LRU tie breaks. `lease_or_wait` waits for
 the earliest usable member instead of failing when every member is cooling down.

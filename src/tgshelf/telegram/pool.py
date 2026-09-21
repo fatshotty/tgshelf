@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from typing import Any, Callable, Iterable, Sequence
 
@@ -31,6 +32,8 @@ class PoolMember:
         self.in_flight = 0
         self.consecutive_errors = 0
         self.quarantined = False
+        self.quarantine_until = 0.0
+        self.health_generation = 0
         self.cooldown_until = 0.0
         self.last_lease_seq = 0
         self.ineligible_channels: set[int] = set()
@@ -48,10 +51,14 @@ class Pool:
         members: Iterable[PoolMember],
         *,
         max_errors: int = 3,
+        quarantine_seconds: float = 60.0,
         clock: Callable[[], float] = time.monotonic,
     ):
         self._members = list(members)
         self._max_errors = max_errors
+        if not math.isfinite(quarantine_seconds) or quarantine_seconds <= 0:
+            raise ValueError("quarantine_seconds must be finite and positive")
+        self._quarantine_seconds = float(quarantine_seconds)
         self._clock = clock
         self._seq = 0
 
@@ -74,8 +81,16 @@ class Pool:
         return True
 
     def available(self, channel_id: int | None = None) -> list[PoolMember]:
+        self.refresh_quarantines()
         now = self._clock()
         return [m for m in self._members if self._is_available(m, channel_id, now)]
+
+    def is_available(
+        self, member: PoolMember, channel_id: int | None = None
+    ) -> bool:
+        now = self._clock()
+        self._refresh_member_quarantine(member, now)
+        return self._is_available(member, channel_id, now)
 
     # -- leasing -----------------------------------------------------------
 
@@ -158,18 +173,52 @@ class Pool:
         m.cooldown_until = self._clock() + seconds
         log.warning("[flood] '%s' PAUSED for %.0fs (cooldown)", m.name, seconds)
 
-    def mark_error(self, m: PoolMember) -> None:
+    def health_generation(self, m: PoolMember) -> int:
+        return m.health_generation
+
+    def _refresh_member_quarantine(self, m: PoolMember, now: float) -> None:
+        if not m.quarantined or m.quarantine_until > now:
+            return
+        m.quarantined = False
+        m.quarantine_until = 0.0
+        m.consecutive_errors = 0
+        m.health_generation += 1
+        log.info("[recover] '%s' quarantine expired; returned to service", m.name)
+
+    def refresh_quarantines(self) -> None:
+        now = self._clock()
+        for member in self._members:
+            self._refresh_member_quarantine(member, now)
+
+    def mark_error(self, m: PoolMember, generation: int) -> None:
+        if generation != m.health_generation:
+            log.debug(
+                "[quarantine] '%s' ignored stale timeout generation=%d current=%d",
+                m.name,
+                generation,
+                m.health_generation,
+            )
+            return
+        if m.quarantined:
+            return
         m.consecutive_errors += 1
         if m.consecutive_errors >= self._max_errors:
             m.quarantined = True
+            m.quarantine_until = self._clock() + self._quarantine_seconds
+            m.health_generation += 1
             log.warning(
-                "[quarantine] '%s' QUARANTINED after %d consecutive errors",
-                m.name, m.consecutive_errors,
+                "[quarantine] '%s' QUARANTINED after %d consecutive errors; "
+                "retry_in=%.0fs",
+                m.name,
+                m.consecutive_errors,
+                self._quarantine_seconds,
             )
         else:
             log.debug("'%s' error %d/%d", m.name, m.consecutive_errors, self._max_errors)
 
-    def mark_success(self, m: PoolMember) -> None:
+    def mark_success(self, m: PoolMember, generation: int) -> None:
+        if generation != m.health_generation or m.quarantined:
+            return
         if m.consecutive_errors:
             log.debug("'%s' recovered after %d error(s)", m.name, m.consecutive_errors)
         m.consecutive_errors = 0
@@ -181,8 +230,10 @@ class Pool:
     def recover(self, m: PoolMember) -> None:
         was = m.quarantined
         m.quarantined = False
+        m.quarantine_until = 0.0
         m.consecutive_errors = 0
         if was:
+            m.health_generation += 1
             log.info("[recover] '%s' quarantine lifted", m.name)
 
 

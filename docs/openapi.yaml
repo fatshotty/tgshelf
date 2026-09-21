@@ -859,6 +859,7 @@ components:
               in_flight: { type: integer }
               load: { type: number }
               quarantined: { type: boolean }
+              quarantine_remaining: { type: number, minimum: 0 }
               cooldown_remaining: { type: number }
               consecutive_errors: { type: integer }
               ineligible_channels:

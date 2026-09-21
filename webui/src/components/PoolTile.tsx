@@ -12,7 +12,13 @@ export function PoolTile({ member }: { member: PoolMember }) {
         <span className="tilename">{member.name}</span>
         {member.is_premium ? <span className="badge">premium</span> : null}
         {member.quarantined ? (
-          <span className="badge warn">quarantined {Math.ceil(member.cooldown_remaining)}s</span>
+          <span className="badge warn">
+            quarantined {Math.ceil(member.quarantine_remaining)}s
+          </span>
+        ) : member.cooldown_remaining > 0 ? (
+          <span className="badge warn">
+            cooldown {Math.ceil(member.cooldown_remaining)}s
+          </span>
         ) : null}
       </div>
       <div className="loadbar">

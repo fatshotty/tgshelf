@@ -24,6 +24,9 @@ METRICS_SSE_INTERVAL = 1.0  # seconds between pushed snapshots
 
 def _member_status(m: Any, now: float) -> dict:
     cooldown = max(0.0, m.cooldown_until - now)
+    quarantine = (
+        max(0.0, m.quarantine_until - now) if m.quarantined else 0.0
+    )
     return {
         "name": m.name,
         "is_premium": m.is_premium,
@@ -31,6 +34,7 @@ def _member_status(m: Any, now: float) -> dict:
         "in_flight": m.in_flight,
         "load": m.load,
         "quarantined": m.quarantined,
+        "quarantine_remaining": round(quarantine, 3),
         "cooldown_remaining": round(cooldown, 3),
         "consecutive_errors": m.consecutive_errors,
         "ineligible_channels": sorted(m.ineligible_channels),
@@ -42,6 +46,7 @@ def _member_status(m: Any, now: float) -> dict:
 def _pool_status(pool: Any) -> dict:
     if pool is None:
         return {"total": 0, "available": 0, "in_flight": 0, "members": []}
+    pool.refresh_quarantines()
     now = pool.now()
     members = [_member_status(m, now) for m in pool.members]
     return {

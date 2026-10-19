@@ -7,6 +7,7 @@ import type {
   FilePart,
   FilePartRef,
   FsNode,
+  InstanceInfo,
   MetricsSnapshot,
   NodeSize,
   SearchResult,
@@ -129,6 +130,7 @@ export const api = {
   },
 
   // -- ops
+  getInfo: () => request<InstanceInfo>('GET', '/api/v1/info'),
   getMetrics: () => request<MetricsSnapshot>('GET', '/metrics'),
 
   // -- upload (predisposed, not wired into the MVP UI; no progress yet)

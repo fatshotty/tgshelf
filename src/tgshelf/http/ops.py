@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import socket
 from typing import Any
 
 from aiohttp import web
@@ -20,6 +21,11 @@ from tgshelf.http.app import RUNTIME
 log = logging.getLogger("tgshelf.http.ops")
 
 METRICS_SSE_INTERVAL = 1.0  # seconds between pushed snapshots
+
+
+async def instance_info(request: web.Request) -> web.Response:
+    name = request.app[RUNTIME].get("instance_name") or socket.gethostname()
+    return web.json_response({"name": name})
 
 
 def _member_status(m: Any, now: float) -> dict:
@@ -164,6 +170,7 @@ async def metrics_stream(request: web.Request) -> web.StreamResponse:
 
 
 def register_ops_routes(app: web.Application) -> None:
+    app.router.add_get("/api/v1/info", instance_info)
     app.router.add_get("/status", status)
     app.router.add_get("/metrics", metrics)            # JSON
     app.router.add_get("/metrics.txt", metrics_text)   # Prometheus text

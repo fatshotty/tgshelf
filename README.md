@@ -187,6 +187,9 @@ Web UI routes redirect to their `/webui/...` equivalents. The Operations page at
 `/webui/operations` lists durable bulk move and soft-delete jobs for every
 authenticated user and retains item-level errors for inspection.
 
+The header and browser title identify the deployment using the root-level
+`name` from `config.yaml`, or the server hostname when `name` is omitted.
+
 ## Docker
 
 The Docker image contains only `tgshelf` and the built Web UI. PostgreSQL is not
@@ -438,9 +441,8 @@ db: postgresql+asyncpg://DB_USER:DB_PASS@DB_HOST:DB_PORT/DB_NAME
 
 logger: info            # no | error | warn | info | debug
 
-# Recommended unique instance name. It prefixes Telegram alerts and is available
-# to future runtime features that need to identify this tgshelf deployment. If
-# omitted, tgshelf uses the local hostname.
+# Recommended unique instance name. It is shown in the Web UI header and browser
+# title, and prefixes Telegram alerts. If omitted, tgshelf uses the local hostname.
 name: tgshelf-dev
 
 # Where Telegram sessions are stored:

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: tgshelf HTTP API
-  version: "1.0.11"
+  version: "1.0.12"
   description: |
     HTTP API for tgshelf — Telegram-as-cloud-storage. Two surfaces:
 
@@ -29,6 +29,26 @@ tags:
     description: Health and observability.
 
 paths:
+  /api/v1/info:
+    get:
+      tags: [ops]
+      summary: Deployment instance identity.
+      description: |
+        Returns the configured root-level `name`, or the server hostname when
+        omitted. Used by the Web UI header and browser title. No DB access.
+      responses:
+        "200":
+          description: Instance identity.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [name]
+                properties:
+                  name: { type: string, example: archive-server }
+        "401":
+          description: Authentication required.
+
   /ping:
     get:
       tags: [ops]

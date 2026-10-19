@@ -1,3 +1,7 @@
+export interface InstanceInfo {
+  name: string
+}
+
 // Mirrors src/tgshelf/http/schemas.py::node_to_dict (note: no parent_id — the UI
 // navigates by path, not by parent links).
 export interface FsNode {

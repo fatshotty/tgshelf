@@ -6,8 +6,8 @@
 #   db: "postgresql+asyncpg://${DB_USER}:${DB_PASS}@localhost/${DB_NAME}"
 # The DB environment variable still overrides the db key entirely.
 
-# Recommended unique instance name. It is shown in notifications and reusable
-# at runtime; if omitted, tgshelf uses the local hostname.
+# Recommended unique instance name. It is shown in the Web UI header and browser
+# title, and in notifications. If omitted, the local hostname is used.
 name: tgshelf-dev
 
 data: ./data            # local data dir (file sessions, runtime state)

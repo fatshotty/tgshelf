@@ -38,8 +38,8 @@ body {
   position: sticky;
   top: 0;
 }
-.brand { font-weight: 700; letter-spacing: 0.3px; }
-.nav { display: flex; gap: 0.75rem; }
+.brand { font-weight: 700; letter-spacing: 0.3px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav { display: flex; flex-shrink: 0; gap: 0.75rem; }
 .nav a { color: var(--muted); text-decoration: none; padding: 0.2rem 0.5rem; border-radius: 6px; }
 .nav a.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
 

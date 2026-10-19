@@ -322,6 +322,7 @@ async def run_server(config: Config) -> None:
 
     app = make_app(
         config.http,
+        instance_name=config.name,
         session_factory=session_factory,
         master_channel=config.telegram.upload.channel,
         min_size=config.telegram.upload.min_size,

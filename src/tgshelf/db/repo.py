@@ -139,6 +139,47 @@ class NodeRepo:
         )
         return result.scalar_one_or_none()
 
+    async def read_file(
+        self, node_id: str, master_channel: int,
+    ) -> tuple[Node, bytes | None, int, tuple[Part, ...]] | None:
+        """Materialize one file representation in a single, non-locking SELECT.
+
+        Metadata, inline bytes, ordered parts and the containing-folder channel
+        share one statement snapshot, including on SELECT-only connections.
+        Never use the file's own channel to select its permission policy.
+        """
+        folder = aliased(Node)
+        base = (
+            select(folder.id, folder.parent_id, folder.channel_id, literal(0).label("depth"))
+            .join(Node, Node.parent_id == folder.id)
+            .where(Node.id == node_id)
+            .cte("read_folders", recursive=True)
+        )
+        parent = aliased(Node)
+        ancestors = base.union_all(
+            select(parent.id, parent.parent_id, parent.channel_id, base.c.depth + 1)
+            .join(base, parent.id == base.c.parent_id)
+        )
+        channel = (
+            select(ancestors.c.channel_id)
+            .where(ancestors.c.channel_id.is_not(None))
+            .order_by(ancestors.c.depth)
+            .limit(1)
+            .scalar_subquery()
+        )
+        stmt = (
+            select(Node, Node.content, func.coalesce(channel, master_channel), Part)
+            .outerjoin(Part, (Part.file_id == Node.id) & Node.content.is_(None))
+            .where(Node.id == node_id, Node.is_folder.is_(False), Node.state == "ACTIVE")
+            .order_by(Part.idx)
+            .execution_options(populate_existing=True)
+        )
+        rows = (await self.session.execute(stmt)).all()
+        if not rows:
+            return None
+        node, content, folder_channel, _ = rows[0]
+        return node, content, folder_channel, tuple(row[3] for row in rows if row[3] is not None)
+
     async def contents_of(self, node_ids: Sequence[str]) -> dict[str, bytes | None]:
         if not node_ids:
             return {}

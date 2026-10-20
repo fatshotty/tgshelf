@@ -191,6 +191,9 @@ Important rules:
 - Bot exhaustion emits warnings and either waits or falls back to user accounts
   depending on configuration.
 - PartMissing is a critical integrity failure.
+- Read preparation uses a single non-locking SELECT for metadata, inline content,
+  ordered part references and the containing-folder channel. Download-only DB
+  credentials need no row-lock/write privileges; mutation locks remain unchanged.
 
 ## HTTP And WebDAV
 

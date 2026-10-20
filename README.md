@@ -748,6 +748,8 @@ copy; missing/corrupt parts and transient errors are failures, not access skips.
 Policy is read immediately before each file starts. Saved changes affect queued
 files and new streams immediately, but not an already admitted file, its cleanup,
 or an existing stream and its reader replacements. A DB error fails closed.
+Stream/download preparation uses non-locking SELECT queries, so this read path
+works with SELECT-only database credentials, including access to `channel_access`.
 One process-wide `operations.concurrent` budget covers management jobs and uploads;
 download concurrency remains separate. Multiple processes have independent budgets.
 

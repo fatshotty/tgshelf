@@ -1916,17 +1916,14 @@ class FileSystem:
         from tgshelf.core.access import AccessRequirement, NoAuthorizedAccount
         from tgshelf.core.read import ReadSnapshot
         from tgshelf.core.transfer import part_record
-        # A short row lock makes metadata, inline bytes and ordered references
-        # one representation. No lock survives policy admission or streaming.
-        from sqlalchemy import select
-        await self.repo.session.execute(select(Node).where(Node.id == node_id).with_for_update())
-        node = await self.repo.get(node_id)
-        if node is None or node.is_folder or node.state != "ACTIVE":
+        # One statement keeps metadata and payload references consistent without
+        # requiring write privileges or row locks on a download-only instance.
+        representation = await self.repo.read_file(node_id, self._master_channel)
+        if representation is None:
             raise NotAReadableFile(f"node {node_id} is not a readable file")
+        node, content, channel, file_parts = representation
         size, name, mime, mtime = node.size, node.name, node.mime, node.mtime
-        channel = await self.effective_channel(node.parent_id)
-        content = await self.repo.content_of(node_id)
-        parts = tuple(part_record(p) for p in await self.repo.parts_of(node_id)) if content is None else ()
+        parts = tuple(part_record(p) for p in file_parts)
         await self.repo.session.commit()
         snapshot = await self._admission.service.snapshot([AccessRequirement(channel, "read")], allow_bots=True)
         if content is None and self._streamer is not None:

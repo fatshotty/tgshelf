@@ -7,6 +7,7 @@ import BrowseView from './views/BrowseView'
 import MetricsView from './views/MetricsView'
 import SearchView from './views/SearchView'
 import OperationsView from './views/OperationsView'
+import ChannelAccessView from './views/ChannelAccessView'
 
 export default function App() {
   const info = useQuery({ queryKey: ['instance-info'], queryFn: api.getInfo, staleTime: Infinity })
@@ -24,6 +25,7 @@ export default function App() {
           <NavLink to="/">Files</NavLink>
           <NavLink to="/stats">Stats</NavLink>
           <NavLink to="/operations">Operations</NavLink>
+          <NavLink to="/channel-access">Channel access</NavLink>
         </nav>
       </header>
       <main className="content">
@@ -32,6 +34,7 @@ export default function App() {
           <Route path="/search" element={<SearchView />} />
           <Route path="/stats" element={<MetricsView />} />
           <Route path="/operations" element={<OperationsView />} />
+          <Route path="/channel-access" element={<ChannelAccessView />} />
           <Route path="/*" element={<BrowseView />} />
         </Routes>
       </main>

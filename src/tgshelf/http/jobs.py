@@ -39,6 +39,9 @@ def item_to_dict(item) -> dict:
         "source_path": item.source_path,
         "state": item.state,
         "error": item.error,
+        "account_name": getattr(item, "account_name", None),
+        "error_code": getattr(item, "error_code", None),
+        "error_channel_id": getattr(item, "error_channel_id", None),
         "started_at": _timestamp(item.started_at),
         "finished_at": _timestamp(item.finished_at),
     }
@@ -52,14 +55,14 @@ async def create_job(request: web.Request) -> web.Response:
     operation = body.get("operation")
     node_ids = body.get("node_ids")
     parent_id = body.get("parent_id")
-    if operation not in ("move", "delete"):
-        return _bad_request("operation must be move or delete")
+    if operation not in ("move", "copy", "delete"):
+        return _bad_request("operation must be move, copy or delete")
     if not isinstance(node_ids, list) or not node_ids or not all(isinstance(node_id, str) for node_id in node_ids):
         return _bad_request("node_ids must be a non-empty list of strings")
-    if operation == "move" and not isinstance(parent_id, str):
-        return _bad_request("parent_id is required for move")
+    if operation in ("move", "copy") and not isinstance(parent_id, str):
+        return _bad_request("parent_id is required for move or copy")
     if operation == "delete" and parent_id is not None:
-        return _bad_request("parent_id is only valid for move")
+        return _bad_request("parent_id is only valid for move or copy")
     job = await request.app[RUNTIME]["job_service"].create(operation, node_ids, parent_id)
     return web.json_response(
         {"id": job.id, "state": job.state, "status_url": f"/api/v1/jobs/{job.id}"},

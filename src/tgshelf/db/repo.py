@@ -183,7 +183,7 @@ class NodeRepo:
 
     async def parts_of(self, file_id: str) -> Sequence[Part]:
         result = await self.session.execute(
-            select(Part).where(Part.file_id == file_id).order_by(Part.idx)
+            select(Part).where(Part.file_id == file_id).order_by(Part.idx).execution_options(populate_existing=True)
         )
         return result.scalars().all()
 
@@ -233,6 +233,13 @@ class NodeRepo:
         parts = select(Part.channel_id).where(Part.channel_id.isnot(None)).distinct()
         result = await self.session.execute(nodes.union(parts))
         return {int(c) for (c,) in result.all() if c is not None}
+
+    async def explicit_channel_folders(self) -> Sequence[Node]:
+        """Only active explicit folder mappings, never file or part channels."""
+        result = await self.session.scalars(select(Node).where(
+            Node.is_folder.is_(True), Node.state == "ACTIVE", Node.channel_id.isnot(None),
+        ).order_by(Node.name, Node.id))
+        return list(result.all())
 
     async def folders_with_channel(self, channel_id: int) -> Sequence[Node]:
         """ACTIVE folders that carry this channel_id as an override — used to label
@@ -542,7 +549,7 @@ class NodeRepo:
         if files_only:
             stmt = stmt.where(Node.is_folder.is_(False))
         stmt = stmt.order_by(func.lower(Node.name))
-        return (await self.session.execute(stmt)).scalars().all()
+        return (await self.session.execute(stmt.execution_options(populate_existing=True))).scalars().all()
 
     async def ancestors(self, node_id: str) -> Sequence[Node]:
         """Ancestor chain of a node, root first, excluding the node itself."""
@@ -559,7 +566,7 @@ class NodeRepo:
             )
         )
         stmt = select(Node).join(cte, Node.id == cte.c.id).order_by(cte.c.depth.desc())
-        return (await self.session.execute(stmt)).scalars().all()
+        return (await self.session.execute(stmt.execution_options(populate_existing=True))).scalars().all()
 
     async def subtree(self, root_id: str, *, state: str | None = None) -> Sequence[Node]:
         """All descendants of a node (any depth), shallow first."""
@@ -570,7 +577,7 @@ class NodeRepo:
         )
         if state is not None:
             stmt = stmt.where(Node.state == state)
-        return (await self.session.execute(stmt)).scalars().all()
+        return (await self.session.execute(stmt.execution_options(populate_existing=True))).scalars().all()
 
     async def subtree_size(self, root_id: str, *, state: str = "ACTIVE") -> int:
         """Total byte size of all files in a node's subtree (root excluded),

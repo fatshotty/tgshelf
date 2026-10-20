@@ -42,6 +42,7 @@ def runtime_fs(rt: dict, session) -> FileSystem:
         notifier=rt.get("notifier"),
         caption_template=rt.get("caption_template", "fileName: {filename}"),
         plugin_manager=rt.get("plugin_manager"),
+        admission=rt.get("admission"),
     )
 
 

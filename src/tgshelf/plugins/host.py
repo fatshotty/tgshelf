@@ -97,6 +97,8 @@ class PluginHost:
     async def update_info(self, node_id: str, patch: Mapping[str, Any]) -> PluginNode:
         if "notes" in patch:
             raise ValueError("use set_info_notes() to update info.notes")
+        if getattr(self._fs, "_admission", None) is not None:
+            return await self._plugin_node(await self._fs.update_info(node_id, patch))
         node = await self._fs.get(node_id)
         if node is None:
             raise ValueError(f"node {node_id} not found")

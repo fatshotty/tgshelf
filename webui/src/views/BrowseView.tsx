@@ -31,6 +31,7 @@ type Dialog =
   | { kind: 'move'; node: FsNode }
   | { kind: 'copy'; node: FsNode }
   | { kind: 'bulkMove'; nodes: FsNode[] }
+  | { kind: 'bulkCopy'; nodes: FsNode[] }
   | { kind: 'bulkDelete'; nodes: FsNode[] }
   | { kind: 'size'; node: FsNode }
   | null
@@ -67,7 +68,7 @@ export default function BrowseView() {
   const selectedNodes = filteredNodes.filter((node) => selectedIds.has(node.id) && node.state === 'ACTIVE')
   const visibleActiveIds = filteredNodes.filter((node) => node.state === 'ACTIVE').map((node) => node.id)
 
-  const createJob = async (operation: 'move' | 'delete', nodes: FsNode[], parentId?: string) => {
+  const createJob = async (operation: 'move' | 'copy' | 'delete', nodes: FsNode[], parentId?: string) => {
     const job = await api.createJob({ operation, node_ids: nodes.map((node) => node.id), parent_id: parentId })
     setSelectedIds(new Set())
     await Promise.all([
@@ -131,6 +132,7 @@ export default function BrowseView() {
           <button className="btn" disabled={visibleActiveIds.length === 0} onClick={() => setSelectedIds(new Set(visibleActiveIds))}>Select all</button>
           <button className="btn" disabled={selectedNodes.length === 0} onClick={() => setSelectedIds(new Set())}>Clear selection</button>
           <button className="btn" disabled={selectedNodes.length === 0} onClick={() => setDialog({ kind: 'bulkMove', nodes: selectedNodes })}>Move selected</button>
+          <button className="btn" disabled={selectedNodes.length === 0} onClick={() => setDialog({ kind: 'bulkCopy', nodes: selectedNodes })}>Copy selected</button>
           <button className="btn danger" disabled={selectedNodes.length === 0} onClick={() => setDialog({ kind: 'bulkDelete', nodes: selectedNodes })}>Delete selected</button>
           <label className="toggle">
             <input type="checkbox" checked={showDeleted} onChange={(e) => setShowDeleted(e.target.checked)} />
@@ -272,11 +274,11 @@ export default function BrowseView() {
           }}
         />
       )}
-      {dialog?.kind === 'bulkMove' && (
+      {(dialog?.kind === 'bulkMove' || dialog?.kind === 'bulkCopy') && (
         <FolderPicker
-          title={`Move ${dialog.nodes.length} selected item(s) to…`}
+          title={`${dialog.kind === 'bulkCopy' ? 'Copy' : 'Move'} ${dialog.nodes.length} selected item(s) to…`}
           onClose={() => setDialog(null)}
-          onPick={(destId) => { const nodes = dialog.nodes; setDialog(null); createJob('move', nodes, destId).catch((e) => toast(String(e), 'error')) }}
+          onPick={(destId) => { const nodes = dialog.nodes; const op = dialog.kind === 'bulkCopy' ? 'copy' : 'move'; setDialog(null); createJob(op, nodes, destId).catch((e) => toast(String(e), 'error')) }}
         />
       )}
       {dialog?.kind === 'bulkDelete' && (

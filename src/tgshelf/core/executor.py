@@ -7,9 +7,9 @@ operation's Telegram calls (forward/delete) go through ONE account (a complete
 file is never split across accounts). Accounts are leased least-loaded with
 wait-on-cooldown (the same pool logic the streamer uses for bots).
 
-Scope: management ops that fan out per-file (move/copy/delete). Uploads keep the
-Uploader's own per-file account leasing (the upload concurrency knob lives in the
-sync command), so an upload is never double-leased.
+Scope: per-file management fan-out. In policy-aware runtimes admission shares
+one process-wide file budget with uploads; the executor only bounds batch
+workers and owns their independent database sessions.
 """
 
 from __future__ import annotations
@@ -41,6 +41,7 @@ class FsExecutor:
         caption_template: str = "fileName: {filename}",
         plugin_manager: Any = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        admission=None,
     ):
         self._session_factory = session_factory
         self._user_pool = user_pool
@@ -54,6 +55,8 @@ class FsExecutor:
         self._caption_template = caption_template
         self._plugin_manager = plugin_manager
         self._sleep = sleep
+        self._admission = admission
+        self._semaphore = asyncio.Semaphore(concurrent)
 
     @property
     def concurrent(self) -> int:
@@ -65,7 +68,7 @@ class FsExecutor:
     ) -> list[Any]:
         """Run `op(fs, item)` for each item, max `concurrent` in flight. Per-item
         exceptions are captured (one bad item never aborts the batch)."""
-        sem = asyncio.Semaphore(self._concurrent)
+        sem = self._semaphore
 
         async def worker(item: Any) -> Any:
             async with sem:
@@ -76,6 +79,14 @@ class FsExecutor:
         )
 
     async def _run_one(self, item: Any, op) -> Any:
+        if self._admission is not None:
+            async with self._session_factory() as session:
+                fs = FileSystem(NodeRepo(session), master_channel=self._master_channel,
+                    gateway=self._gateway, uploader=self._uploader, streamer=self._streamer,
+                    min_size=self._min_size, notifier=self._notifier,
+                    caption_template=self._caption_template, plugin_manager=self._plugin_manager,
+                    admission=self._admission)
+                return await op(fs, item)
         member = await self._user_pool.lease_or_wait(sleep=self._sleep)
         if member is None:
             raise NoAccountAvailable("no user account available for the operation")

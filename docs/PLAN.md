@@ -122,10 +122,29 @@ finishes late cannot shorten, extend, or reopen quarantine.
 Leasing is weighted least-loaded with LRU tie breaks. `lease_or_wait` waits for
 the earliest usable member instead of failing when every member is cooling down.
 
-`FsExecutor` wraps filesystem operations that should be governed by
-`operations.concurrent`. It opens an operation-local DB session for each unit of
-work. Telegram management writes go through the write-aware user gateway, which
-uses the per-account token bucket to choose an eligible account per write.
+`AccessAdmission` shares one process-wide `operations.concurrent` file budget
+between management operations and uploads. `FsExecutor` opens an independent DB
+session per fan-out worker. Short DB-only policy snapshots select configured
+accounts by containing-folder channel, never file/part channel. Copy requires
+source read plus destination write; move requires write on both. Other mutations
+require write, readers require read, and bots are never management writers.
+
+PostgreSQL channel overrides (`none`, `read`, `write`) are edited only through the
+authenticated Web UI API. Missing rows allow full control for users/read for bots;
+root/master policy is non-editable even through channel aliases. Folder aliases
+share overrides. Saves affect queued files/new streams, not admitted files, cleanup
+or running streams. DB failures fail closed. Hard account masks survive cooldown,
+quarantine, alternative-account preflight and stream fallback.
+
+Preflight validates every message and known document ID with one eligible user;
+access denial retries the complete file with another eligible user. All denied
+means a whole-file skip. TEMP staging persists newly copied parts before final
+publication. Moves retain IDs and commit before deleting originals. Whole-folder
+moves are conservative all-descendants-success commit groups; recursive copy may
+report partial completion, and purge retains failed members' references. Failed
+cleanup preserves TEMP references or reports post-commit warnings; Telegram and
+PostgreSQL cannot provide a shared atomic commit. Account-bound write gateways
+retain the existing per-account pacing without choosing a different account.
 
 ## FileSystem Facade
 

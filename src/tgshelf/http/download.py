@@ -100,6 +100,11 @@ async def stream_node(request: web.Request, fs, node) -> web.StreamResponse:
     (resolves by file_id) and the WebDAV GET handler (resolves by path) so both
     honour the exact same byte semantics.
     """
+    read_snapshot = await fs.prepare_read(node.id) if getattr(fs, "_admission", None) is not None else None
+    if read_snapshot is not None:
+        from types import SimpleNamespace
+        node = SimpleNamespace(id=read_snapshot.node_id, size=read_snapshot.size,
+                               name=read_snapshot.name, mime=read_snapshot.mime, mtime=read_snapshot.mtime)
     size = node.size
     # mtime folded into the ETag: a parts-reorder keeps the size but changes
     # the byte layout, so size alone wouldn't invalidate caches/players.
@@ -146,7 +151,7 @@ async def stream_node(request: web.Request, fs, node) -> web.StreamResponse:
         size=size,
         length=length,
     )
-    stream = fs.open_read(node.id, start, end)
+    stream = fs.open_read(node.id, start, end, **({"read_snapshot": read_snapshot} if read_snapshot is not None else {}))
     sent = 0
     outcome = "completed"
     try:

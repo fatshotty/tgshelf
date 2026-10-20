@@ -19,7 +19,7 @@ import asyncio
 import logging
 import math
 import time
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Collection, Iterable, Sequence
 
 log = logging.getLogger("tgshelf.pool")
 
@@ -102,18 +102,21 @@ class Pool:
         self._seq += 1
         m.last_lease_seq = self._seq
 
-    def lease(self, k: int, channel_id: int | None = None) -> list[PoolMember]:
-        chosen = self._ranked(channel_id)[:k]
+    def lease(self, k: int, channel_id: int | None = None, *,
+              allowed_names: Collection[str] | None = None) -> list[PoolMember]:
+        chosen = [m for m in self._ranked(channel_id)
+                  if allowed_names is None or m.name in allowed_names][:k]
         for m in chosen:
             self._touch(m)
         return chosen
 
     def replace(
-        self, channel_id: int | None = None, exclude: Sequence[PoolMember] = ()
+        self, channel_id: int | None = None, exclude: Sequence[PoolMember] = (), *,
+        allowed_names: Collection[str] | None = None,
     ) -> PoolMember | None:
         excluded = {id(m) for m in exclude}
         for m in self._ranked(channel_id):
-            if id(m) not in excluded:
+            if id(m) not in excluded and (allowed_names is None or m.name in allowed_names):
                 self._touch(m)
                 return m
         return None
@@ -123,6 +126,7 @@ class Pool:
         *,
         channel_id: int | None = None,
         exclude: Sequence[PoolMember] = (),
+        allowed_names: Collection[str] | None = None,
         sleep=asyncio.sleep,  # awaited below: must be an async sleep, not time.sleep
     ) -> PoolMember | None:
         """Lease the least-loaded eligible member; if all eligible ones are on
@@ -132,22 +136,23 @@ class Pool:
         `exclude` is honored only for the immediate attempt — after waiting, an
         excluded member whose cooldown has expired is fair game again. Reused by
         the streamer (bots) and the operation executor (user accounts)."""
-        member = self.replace(channel_id=channel_id, exclude=exclude)
+        member = self.replace(channel_id=channel_id, exclude=exclude, allowed_names=allowed_names)
         if member is not None:
             return member
         while True:
-            wait = self._earliest_cooldown_wait(channel_id)
+            wait = self._earliest_cooldown_wait(channel_id, allowed_names=allowed_names)
             if wait is None:
                 log.warning("[exhausted] no client can serve channel %s right now", channel_id)
                 return None  # nothing will free up on its own
             log.info("[wait] all clients busy/cooled; waiting %.1fs for the next free", wait)
             await sleep(max(wait, 0))
-            member = self.replace(channel_id=channel_id)
+            member = self.replace(channel_id=channel_id, allowed_names=allowed_names)
             if member is not None:
                 log.debug("[wait] '%s' became available", member.name)
                 return member
 
-    def _earliest_cooldown_wait(self, channel_id: int | None) -> float | None:
+    def _earliest_cooldown_wait(self, channel_id: int | None, *,
+                                allowed_names: Collection[str] | None = None) -> float | None:
         now = self._clock()
         waits = [
             m.cooldown_until - now
@@ -155,6 +160,7 @@ class Pool:
             if not m.quarantined
             and (channel_id is None or channel_id not in m.ineligible_channels)
             and m.cooldown_until > now
+            and (allowed_names is None or m.name in allowed_names)
         ]
         return min(waits) if waits else None
 
@@ -240,8 +246,8 @@ class Pool:
 class ClientPool(Pool):
     """User accounts: upload and bulk management."""
 
-    def lease_one(self) -> PoolMember | None:
-        leased = self.lease(1)
+    def lease_one(self, *, allowed_names: Collection[str] | None = None) -> PoolMember | None:
+        leased = self.lease(1, allowed_names=allowed_names)
         return leased[0] if leased else None
 
 

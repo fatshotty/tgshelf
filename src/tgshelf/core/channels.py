@@ -7,7 +7,7 @@ ONE implementation of each, replacing the legacy's divergent copies
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Sequence
+from typing import Any, Awaitable, Callable, Sequence
 
 from tgshelf.core.upload import PartRecord
 from tgshelf.telegram.errors import DocIdMismatch, PartMissing, Severity, TgError
@@ -45,6 +45,7 @@ async def forward_parts(
     *,
     always_copy: bool = False,
     caption_factory: Callable[[PartRecord], str | None] | None = None,
+    on_copied: Callable[[PartRecord], Awaitable[None]] | None = None,
 ) -> list[PartRecord]:
     """Copy each part to `dest_channel`, returning the new part records.
 
@@ -94,6 +95,8 @@ async def forward_parts(
                 original_filename=part.original_filename,
             )
         )
+        if on_copied is not None:
+            await on_copied(new_parts[-1])
     return new_parts
 
 

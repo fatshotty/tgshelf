@@ -72,32 +72,25 @@ async def run(config: Config, args) -> int:
     master = config.telegram.upload.channel
     limit = getattr(args, "limit", None) or None  # 0/None -> whole history
 
-    from tgshelf.http.serve import make_write_limiter, start_clients
+    from tgshelf.http.serve import build_runtime, make_write_limiter, start_clients
 
     write_limiter = make_write_limiter(config.operations)
     pairs = await start_clients(config, write_limiter)
-    user = next(((acc, client) for acc, client in pairs if not acc.is_bot), None)
-    if user is None:
-        for _account, client in pairs:
-            await _disconnect(client)
-        print("error: a user account is required to read channel history", file=sys.stderr)
-        return 1
-
-    _account, gateway = user
-    raw = gateway._client  # underlying telethon, for high-level iter_messages
     engine = create_engine(config.db)
     try:
-        async with create_session_factory(engine)() as session:
-            fs = FileSystem(
-                NodeRepo(session),
-                master_channel=master,
-                gateway=gateway,
-                min_size=config.telegram.upload.min_size,
-                caption_template=config.caption.template,
-            )
-            log.info("[import] scanning master channel %s (limit=%s)", master, limit or "all")
-            stats = await reconcile(raw.iter_messages(master, limit=limit), fs, master)
-            log.info("[import] done: %s", stats)
+        from tgshelf.core.access import AccessRequirement
+        sessions = create_session_factory(engine)
+        runtime = build_runtime(config, sessions, pairs, write_limiter=write_limiter)
+        async with runtime["admission"].start([AccessRequirement(master, "read")]) as ctx:
+            raw = ctx.member.client._client
+            async with sessions() as session:
+                fs = FileSystem(NodeRepo(session), master_channel=master,
+                    gateway=ctx.gateway, min_size=config.telegram.upload.min_size,
+                    caption_template=config.caption.template, admission=runtime["admission"])
+                fs._operation_context = ctx
+                log.info("[import] scanning master channel %s (limit=%s)", master, limit or "all")
+                stats = await reconcile(raw.iter_messages(master, limit=limit), fs, master)
+                log.info("[import] done: %s", stats)
     finally:
         await engine.dispose()
         for _account, client in pairs:

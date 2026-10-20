@@ -174,7 +174,7 @@ class ParallelStreamer:
         }
 
     async def stream(
-        self, parts: Sequence[Any], plan: StreamPlan, channel_id: int
+        self, parts: Sequence[Any], plan: StreamPlan, channel_id: int, *, access_snapshot=None,
     ) -> AsyncIterator[bytes]:
         chunks = plan.chunks
 
@@ -218,9 +218,11 @@ class ParallelStreamer:
 
             # generic lease (works whether the pool is a BotPool or, when no bots
             # are configured, the user ClientPool)
-            bots = self._bot_pool.lease(k, channel_id=channel_id)
+            mask = self._reader_mask(access_snapshot)
+            mask_options = {} if access_snapshot is None else {"allowed_names": mask}
+            bots = self._bot_pool.lease(k, channel_id=channel_id, **mask_options)
             if not bots:
-                bots = [await self._replace(channel_id, exclude=[])]
+                bots = [await self._replace(channel_id, exclude=[], access_snapshot=access_snapshot)]
             log.info(
                 "[stream] start req=%s channel=%s range=%d-%d/%d chunks=%d k=%d "
                 "read_ahead=%d clients=%s",
@@ -237,7 +239,7 @@ class ParallelStreamer:
 
             workers = [
                 asyncio.create_task(
-                    self._worker(state, chunks, parts, channel_id, part_refs, bot, unreachable))
+                    self._worker(state, chunks, parts, channel_id, part_refs, bot, unreachable, access_snapshot))
                 for bot in bots
             ]
             try:
@@ -285,7 +287,7 @@ class ParallelStreamer:
             self._buffered_bytes -= reserve
             self._active_streams -= 1
 
-    async def _worker(self, state, chunks, parts, channel_id, part_refs, bot, unreachable):
+    async def _worker(self, state, chunks, parts, channel_id, part_refs, bot, unreachable, access_snapshot=None):
         while True:
             async with state.cond:
                 while True:
@@ -302,7 +304,7 @@ class ParallelStreamer:
                     await state.cond.wait()
             chunk = chunks[idx]
             try:
-                data, bot = await self._fetch(chunk, parts, channel_id, part_refs, bot, unreachable)
+                data, bot = await self._fetch(chunk, parts, channel_id, part_refs, bot, unreachable, access_snapshot)
             except BaseException as exc:  # noqa: BLE001 - propagated to the emitter
                 async with state.cond:
                     if state.error is None:
@@ -313,14 +315,14 @@ class ParallelStreamer:
                 state.results[chunk.seq] = data
                 state.cond.notify_all()
 
-    async def _fetch(self, chunk, parts, channel_id, part_refs, bot, unreachable):
+    async def _fetch(self, chunk, parts, channel_id, part_refs, bot, unreachable, access_snapshot=None):
         p = parts[chunk.part_idx]
         retries = 0
         last_exc: BaseException | None = None
         while True:
             if not self._bot_pool.is_available(bot, channel_id):
                 bot = await self._replace(
-                    channel_id, exclude=unreachable + [bot]
+                    channel_id, exclude=unreachable + [bot], access_snapshot=access_snapshot
                 )
             generation = self._bot_pool.health_generation(bot)
             # file_reference (and the document access_hash) are bound to the
@@ -397,16 +399,24 @@ class ParallelStreamer:
                 # exclude the per-stream unreachable set + the bot that just failed
                 # (flood/timeout recover via the pool, so they're excluded only for
                 # this immediate pick).
-                bot = await self._replace(channel_id, exclude=unreachable + [bot])
+                bot = await self._replace(channel_id, exclude=unreachable + [bot], access_snapshot=access_snapshot)
 
-    async def _replace(self, channel_id: int, exclude: Sequence[PoolMember]) -> PoolMember:
-        repl = self._bot_pool.replace(channel_id=channel_id, exclude=exclude)
+    def _reader_mask(self, snapshot):
+        if snapshot is None:
+            return None
+        return snapshot.user_accounts if self._bot_pool is self._user_pool else snapshot.bot_accounts
+
+    async def _replace(self, channel_id: int, exclude: Sequence[PoolMember], *, access_snapshot=None) -> PoolMember:
+        mask = self._reader_mask(access_snapshot)
+        mask_options = {} if access_snapshot is None else {"allowed_names": mask}
+        repl = self._bot_pool.replace(channel_id=channel_id, exclude=exclude, **mask_options)
         if repl is not None:
             return repl
 
         # bot pool exhausted: optional user fallback before waiting
         if self._allow_user_fallback and self._user_pool is not None:
-            user = self._user_pool.lease_one()
+            user_options = {} if access_snapshot is None else {"allowed_names": access_snapshot.user_accounts}
+            user = self._user_pool.lease_one(**user_options)
             if user is not None:
                 await self._notify_pool_exhausted(channel_id, fallback=True)
                 return user
@@ -414,7 +424,7 @@ class ParallelStreamer:
         await self._notify_pool_exhausted(channel_id, fallback=False)
         # otherwise wait for a bot to free up (shared lease+wait logic)
         repl = await self._bot_pool.lease_or_wait(
-            channel_id=channel_id, exclude=exclude, sleep=self._sleep
+            channel_id=channel_id, exclude=exclude, sleep=self._sleep, **mask_options
         )
         if repl is None:
             cause = self._unavailable_bot_cause(channel_id)

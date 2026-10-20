@@ -117,8 +117,9 @@ Multiple user accounts and multiple bots can be configured at the same time.
 tgshelf rotates them according to the operation type to distribute load and
 reduce the risk of flood waits.
 
-All user accounts must have read/write access to every mapped channel. Bots, if
-present, must be able to read all mapped channels.
+Accounts may have access to different mapped channels. Configure their logical
+read/full-control permissions in the Web UI's Channel access page; selected
+accounts must also possess the corresponding real Telegram access rights.
 
 Without bots, downloads and streaming can use user accounts by enabling:
 
@@ -719,6 +720,51 @@ before the command prints its normal partial summary and exits with status 0.
 The summary adds `stopped_by_signal=true`. Press `Ctrl+C` again only for an
 emergency forced cancellation; it may leave an in-progress copy as a TEMP node,
 which the next mirror run does not treat as a valid backup copy.
+
+### Telegram account access
+
+Configure account permissions in **Channel access** in the Web UI. Permissions
+are stored in PostgreSQL, not YAML. The grid lists active folders with an explicit
+`channel_id`; folders sharing a channel share the same policy. Inherited folders
+use their nearest mapped ancestor (or the configured master channel).
+
+Missing overrides allow full control for user accounts and reading for bots.
+Choose None, Read, or Full control for users; bots can only read or be denied.
+Full control includes reading. Root/master access is fixed and cannot be changed,
+including through aliases mapped to the master channel. These settings select
+Telegram service accounts: they are not per-Web-UI-login ACLs and do not grant
+actual Telegram membership or administrator rights.
+
+Copy uses accounts that can read the source folder and write the destination;
+move requires write access to both. Upload, rename, delete, restore, purge and
+metadata edits require write access. Download/stream readers (including fallback
+users) require read access. File and part channel IDs do not participate in policy
+selection. Before copying/moving a Telegram-backed file, one authorized account
+must successfully read **every** part and validate its document ID. On access
+denial another eligible account retries the complete preflight. If none can read
+all parts, that file is skipped (`part_access_denied`) without creating a partial
+copy; missing/corrupt parts and transient errors are failures, not access skips.
+
+Policy is read immediately before each file starts. Saved changes affect queued
+files and new streams immediately, but not an already admitted file, its cleanup,
+or an existing stream and its reader replacements. A DB error fails closed.
+One process-wide `operations.concurrent` budget covers management jobs and uploads;
+download concurrency remains separate. Multiple processes have independent budgets.
+
+Transfers stage complete files before publishing them. Moves preserve node IDs
+and delete original Telegram messages only after the final DB commit. Whole-folder
+moves publish only when every descendant succeeds; otherwise the source tree stays
+intact. Recursive copies can have partial results, reported as failures. WebDAV
+overwrite keeps the old target active until the replacement is complete. Failed
+staging cleanup retains TEMP metadata/message references; failed folder-copy
+staging may retain an unpublished TEMP tree for operator recovery. Original-message
+cleanup failures appear as warnings on successful jobs. There is an unavoidable
+crash window between Telegram accepting a message and recording its ID in the DB;
+there is no cross-system atomic transaction or automatic orphan reconciliation.
+
+Apply Alembic migrations before starting the updated server. Migration `0004`
+adds access overrides; `0005` adds copy jobs and per-item diagnostics. Downgrading
+`0005` refuses while copy-job history exists rather than deleting history.
 
 Example rclone WebDAV remote:
 

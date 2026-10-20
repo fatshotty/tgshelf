@@ -36,7 +36,7 @@ log = logging.getLogger("tgshelf.watcher")
 
 
 async def start_watcher(
-    config: Config, *, session_factory: Any, user_gateway: Any, notifier: Any = None
+    config: Config, *, session_factory: Any, user_gateway: Any, notifier: Any = None, admission=None,
 ) -> TelegramClient | None:
     """Start the watcher bot and attach the live handler. Returns the connected
     client (so serve can disconnect it on shutdown), or None when the watcher is
@@ -85,6 +85,7 @@ async def start_watcher(
                     gateway=user_gateway,
                     min_size=config.telegram.upload.min_size,
                     caption_template=config.caption.template,
+                    admission=admission,
                 )
                 node = await fs.import_message(master, message.id, parent_id=ROOT_ID)
             if node is not None:

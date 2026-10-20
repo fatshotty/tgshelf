@@ -28,7 +28,7 @@ export default function SearchView() {
   const q = sp.get('q') ?? ''
   const [query, setQuery] = useState(q)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
-  const [dialog, setDialog] = useState<{ kind: 'move' | 'delete'; nodes: SearchResult[] } | null>(null)
+  const [dialog, setDialog] = useState<{ kind: 'move' | 'copy' | 'delete'; nodes: SearchResult[] } | null>(null)
 
   useEffect(() => {
     setQuery(q)
@@ -48,7 +48,7 @@ export default function SearchView() {
   })
   const selected = (data ?? []).filter((result) => selectedIds.has(result.node.id) && result.node.state === 'ACTIVE')
   const visibleActiveIds = (data ?? []).filter((result) => result.node.state === 'ACTIVE').map((result) => result.node.id)
-  const createJob = async (operation: 'move' | 'delete', nodes: SearchResult[], parentId?: string) => {
+  const createJob = async (operation: 'move' | 'copy' | 'delete', nodes: SearchResult[], parentId?: string) => {
     const job = await api.createJob({ operation, node_ids: nodes.map((result) => result.node.id), parent_id: parentId })
     setSelectedIds(new Set())
     await Promise.all([
@@ -68,6 +68,7 @@ export default function SearchView() {
         <button className="btn" disabled={visibleActiveIds.length === 0} onClick={() => setSelectedIds(new Set(visibleActiveIds))}>Select all</button>
         <button className="btn" disabled={selected.length === 0} onClick={() => setSelectedIds(new Set())}>Clear selection</button>
         <button className="btn" disabled={selected.length === 0} onClick={() => setDialog({ kind: 'move', nodes: selected })}>Move selected</button>
+        <button className="btn" disabled={selected.length === 0} onClick={() => setDialog({ kind: 'copy', nodes: selected })}>Copy selected</button>
         <button className="btn danger" disabled={selected.length === 0} onClick={() => setDialog({ kind: 'delete', nodes: selected })}>Delete selected</button>
         <form className="search" onSubmit={onSearch}>
           <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search…" />
@@ -130,14 +131,15 @@ export default function SearchView() {
           </div>
         )}
       </div>
-      {dialog?.kind === 'move' ? (
+      {dialog?.kind === 'move' || dialog?.kind === 'copy' ? (
         <FolderPicker
-          title={`Move ${dialog.nodes.length} item(s) to…`}
+          title={`${dialog.kind === 'copy' ? 'Copy' : 'Move'} ${dialog.nodes.length} item(s) to…`}
           onClose={() => setDialog(null)}
           onPick={(parentId) => {
             const nodes = dialog.nodes
+            const op = dialog.kind
             setDialog(null)
-            createJob('move', nodes, parentId).catch((e) => toast(String(e), 'error'))
+            createJob(op, nodes, parentId).catch((e) => toast(String(e), 'error'))
           }}
         />
       ) : null}

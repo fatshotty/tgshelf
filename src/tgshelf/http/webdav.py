@@ -285,6 +285,10 @@ async def _move(request: web.Request, fs: FileSystem) -> web.Response:
     src, dest_parent, dest_name, existing = await _resolve_move_copy(request, fs)
     await fs.ensure_move_allowed(src.id, dest_parent.id)
     created = existing is None
+    if fs._admission is not None:
+        await fs.transfer_named(src.id, dest_parent.id, dest_name, copy=False,
+                                replace_id=existing.id if existing else None)
+        return web.Response(status=201 if created else 204)
     if existing is not None:
         await fs.delete(existing.id, purge=False)
     try:
@@ -301,6 +305,10 @@ async def _move(request: web.Request, fs: FileSystem) -> web.Response:
 async def _copy(request: web.Request, fs: FileSystem) -> web.Response:
     src, dest_parent, dest_name, existing = await _resolve_move_copy(request, fs)
     created = existing is None
+    if fs._admission is not None:
+        await fs.transfer_named(src.id, dest_parent.id, dest_name, copy=True,
+                                replace_id=existing.id if existing else None)
+        return web.Response(status=201 if created else 204)
     if existing is not None:
         await fs.delete(existing.id, purge=False)
     new = await fs.copy(src.id, dest_parent.id, force_copy=True)

@@ -27,8 +27,11 @@ export default function OperationsView() {
     {detailQ.data ? <section className="panel job-detail"><h3>{detailQ.data.operation} · {detailQ.data.id}</h3>
       <p>{detailQ.data.succeeded} succeeded, {detailQ.data.failed} failed, {detailQ.data.skipped} skipped</p>
       {detailQ.data.error ? <div className="error">{detailQ.data.error}</div> : null}
-      {detailQ.data.items.filter((item) => item.state === 'failed' || item.state === 'skipped').map((item) =>
-        <div className="job-item" key={item.position}><strong>{item.source_path ?? item.node_id}</strong><span>{item.state}</span>{item.error ? <div className="error">{item.error}</div> : null}</div>)}
+      {detailQ.data.items.map((item) =>
+        <div className="job-item" key={item.position}><strong>{item.source_path ?? item.node_id}</strong><span>{item.state}</span>
+          {item.account_name && <span>Account: {item.account_name}</span>}
+          {item.error_code && <span>{item.error_code}{item.error_channel_id != null ? ` · channel ${item.error_channel_id}` : ''}</span>}
+          {item.error ? <div className="error">{item.error}</div> : null}</div>)}
     </section> : null}
   </div>
 }

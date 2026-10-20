@@ -104,6 +104,11 @@ def build_runtime(
             else make_write_limiter(config.operations)
         ),
     )
+    from tgshelf.core.access import ChannelAccessService
+    from tgshelf.core.operations import AccessAdmission, OperationScheduler
+    access_service = ChannelAccessService(session_factory, config.telegram.users, config.telegram.upload.channel)
+    scheduler = OperationScheduler(config.operations.concurrent)
+    admission = AccessAdmission(access_service, client_pool, scheduler, limiter=write_gateway._limiter)
 
     async def notify_premium_downgrade(exc) -> None:
         if notifier is None:
@@ -152,6 +157,7 @@ def build_runtime(
         notifier=notifier,
         caption_template=config.caption.template,
         plugin_manager=plugin_manager,
+        admission=admission,
     )
     return {
         "config": config,
@@ -163,6 +169,9 @@ def build_runtime(
         "write_gateway": write_gateway,
         "executor": executor,
         "plugin_manager": plugin_manager,
+        "access_service": access_service,
+        "admission": admission,
+        "operation_scheduler": scheduler,
     }
 
 
@@ -336,12 +345,15 @@ async def run_server(config: Config) -> None:
         notifier=notifier,
         caption_template=config.caption.template,
         plugin_manager=runtime["plugin_manager"],
+        admission=runtime["admission"],
+        access_service=runtime["access_service"],
         strm=config.strm,
         rclone=config.rclone,
         rc_registry=rc_registry,
     )
     job_service = OperationJobService(
-        session_factory, lambda session: runtime_fs(app[RUNTIME], session)
+        session_factory, lambda session: runtime_fs(app[RUNTIME], session),
+        concurrent=config.operations.concurrent,
     )
     await job_service.recover()
     await job_service.cleanup()
@@ -349,6 +361,8 @@ async def run_server(config: Config) -> None:
     app[RUNTIME]["job_service"] = job_service
     register_routes(app)  # JSON metadata + tree (B2)
     register_job_routes(app)
+    from tgshelf.http.channel_access import register_channel_access_routes
+    register_channel_access_routes(app)
     register_download_routes(app)  # streaming download (B3)
     register_upload_routes(app)  # streaming upload (B3)
     register_ops_routes(app)  # /status (B3)
@@ -365,7 +379,8 @@ async def run_server(config: Config) -> None:
     from tgshelf.bot.watcher import start_watcher
 
     watcher_client = await start_watcher(
-        config, session_factory=session_factory, user_gateway=user_gateway, notifier=notifier
+        config, session_factory=session_factory, user_gateway=user_gateway, notifier=notifier,
+        admission=runtime["admission"],
     )
 
     # rclone control-plane: LISTEN the changes feed → push vfs/forget to the

@@ -137,7 +137,10 @@ with `ctx.source_node` still pointing to the original logical file.
 `after_file_import` runs when an uncataloged Telegram message is imported into
 the logical tree or when a deleted same-name node is resurrected. Already
 cataloged messages and active same-name siblings are no-op imports and do not run
-the hook.
+the hook. This requires a `FileSystem` constructed with an enabled plugin manager.
+The current live watcher and `import-channel` command construct their own
+`FileSystem` without a plugin manager, so these entry points do not dispatch
+`after_file_import` even when plugins are configured for the HTTP runtime.
 
 Folder-level hook names are intentionally out of scope for the first
 implementation. Some folder operations still emit file-level hooks for affected

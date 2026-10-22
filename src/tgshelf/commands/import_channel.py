@@ -2,12 +2,13 @@
 
 The watcher bot (C5.2) only catches LIVE messages; history and any downtime gap
 are reconciled here. Bots cannot read channel history, so this runs through a
-USER account: it scans the master channel and imports every file message missing
-from the DB into root.
+USER account: it scans the master channel and catalogs supported document
+messages into root, subject to the shared import name-collision rules.
 
-Idempotent: `fs.import_message` dedupes by (channel, message_id), so a re-run only
-adds what is new. The same `reconcile` is called at watcher startup to cover the
-window while the watcher was down.
+`fs.import_message` checks for existing (channel, message_id) references before
+importing. Reconciliation is manual: the watcher does not call it on startup.
+There is no persistent scan checkpoint; --limit counts the latest messages, not
+only supported files. See docs/watcher-import.md for collision and counter limits.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ class ImportStats:
 
 
 def _has_file(message: Any) -> bool:
-    """A channel message we care about carries media (we catalog only files)."""
+    """Media prefilter; the gateway later rejects unsupported media types."""
     return getattr(message, "media", None) is not None
 
 
@@ -47,11 +48,12 @@ async def reconcile(
     *,
     parent_id: str = ROOT_ID,
 ) -> ImportStats:
-    """Import every file message in `messages` missing from the DB into
-    `parent_id` (root for the master channel). `messages` is an async iterator of
-    Telegram message-likes (`.id`, `.media`) — telethon's `iter_messages` in the
-    command, a scripted list in tests. Pre-checking get_file_by_message keeps the
-    stats honest (import_message returns the existing node on dupes either way)."""
+    """Catalog supported documents from `messages`, subject to reference/name
+    checks, into `parent_id` (root for the master channel). `messages` is an async
+    iterator of Telegram message-likes (`.id`, `.media`) — Telethon's
+    `iter_messages` in the command, a scripted list in tests. The pre-check counts known
+    messages as skipped; an active same-name node returned by import_message is
+    still counted as imported, even though no new reference was recorded."""
     stats = ImportStats()
     async for message in messages:
         if not _has_file(message):

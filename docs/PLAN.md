@@ -250,14 +250,41 @@ cancellation can leave an in-progress TEMP copy for the next run to retry.
 ## Watcher And Import
 
 The watcher is an optional dedicated bot configured under `telegram.main_bot`.
-It listens only to the master channel while `serve` is running and imports live
-file messages into root through `fs.import_message`.
+It starts only in `serve`, with `receive_updates=True` and an ephemeral token-based
+session outside `telegram.users` and the pools. The operator adds it as an admin
+of `telegram.upload.channel` manually. There is no separate watcher-channel setting.
+
+It listens for new direct posts and forwards in the master channel and imports
+supported Telegram document media into root through `fs.import_message`, using
+an admitted user account for metadata resolution. The facade's import wrapper
+requires root-channel read access and shares the `operations.concurrent` budget.
+Native photos are skipped. Each
+new file references one existing Telegram message; import does not transfer bytes,
+apply the inline threshold, parse/edit captions, or reconstruct multipart files.
+
+Existing channel/message references are returned unchanged, even for soft-deleted
+nodes. A case-insensitive same-name active sibling suppresses the incoming import;
+a returned deleted sibling is reactivated with the same ID and a replacement part.
+The lookup does not prioritize state or restrict siblings to files. Reference
+deduplication is an application-level check with no unique channel/message
+constraint or import lock. Neither entry point passes a plugin manager, so the
+facade's `after_file_import` hook is not dispatched by watcher/CLI imports.
 
 Files posted while the watcher is down are not automatically recovered.
 `tgshelf import-channel` performs on-demand history reconciliation through a
-user account because bots cannot reliably read channel history.
+user account because bots cannot reliably read channel history. It scans only the
+master into root, newest first, with `--limit N` counting messages (default `0`:
+whole history). It has no checkpoint, folder/filter options, or per-message error
+recovery. Same-name no-op results are currently counted as imported.
 
-Watcher failures are never fatal to `serve`; they are logged and notified.
+Watcher startup failures and unexpected terminal disconnections are logged and
+notified without terminating `serve`. Individual message failures are logged only.
+The health monitor does not recreate the watcher. The CLI holds one admission
+slot and user lease for its whole scan, reusing that context for every file;
+live imports are admitted per event. Neither path uses executor fan-out, and
+history reads have no explicit proactive request pacing. See [the current
+implementation guide](watcher-import.md) for details and limitations. Incremental
+folder/history import with filters and checkpoints is not implemented yet.
 
 ## Notifier
 

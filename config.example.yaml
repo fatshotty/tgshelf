@@ -51,8 +51,10 @@ telegram:
     # Master channel, mapped 1:1 to the root folder "/".
     channel: -1001234567890
   # Optional dedicated watcher bot. When configured, `serve` starts it with
-  # receive_updates=True and imports new files posted to the master channel.
-  # It must be a member/admin of the master channel.
+  # receive_updates=True and imports supported documents posted/forwarded to
+  # upload.channel into root. Use a separate bot outside telegram.users and add
+  # it as master-channel admin manually. No stored session is needed for this bot.
+  # Omit/set null to disable. No automatic downtime recovery: run import-channel.
   main_bot:
     api_id: 123456
     api_hash: "0123456789abcdef0123456789abcdef"

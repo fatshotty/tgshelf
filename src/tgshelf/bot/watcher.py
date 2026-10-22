@@ -1,11 +1,12 @@
 """Channel watcher: a dedicated bot that catalogs files posted LIVE to the
 master channel into root.
 
-Runs ONLY inside `serve`, ONLY when `telegram.watcher` names a bot account. The
+Runs ONLY inside `serve`, ONLY when `telegram.main_bot` is configured. The
 bot is a dedicated instance (`receive_updates=True`) kept OUT of the download
 pool (pool clients are receive_updates=False to share sessions across instances;
 the watcher needs updates). It reacts ONLY to live messages in the master channel
-that carry a file → `fs.import_message(master, msg_id, root)`.
+that carry supported document media → `fs.import_message(master, msg_id, root)`.
+Direct posts and forwards use the same path; native photos are not imported.
 
 Scope limits (user decision):
 - only the master channel, only messages with a file attached;
@@ -43,9 +44,11 @@ async def start_watcher(
     not configured/usable or fails to start.
 
     The watcher is NEVER fatal to `serve` (user decision): a missing config is
-    a log warning; a real startup failure is logged AND pushed to the notify
-    channel, and serve keeps running without live cataloging (`import-channel`
-    backfills). `user_gateway` is a connected USER client used to fetch the doc.
+    a silent no-op; a missing user gateway is a warning. A real startup failure
+    is logged AND passed to the notifier, and serve keeps running without live
+    cataloging (`import-channel` backfills). `user_gateway` is an initial connected
+    USER client; when admission is supplied, the facade leases an authorized user
+    per event and uses that account's gateway to fetch the document.
 
     `main_bot` is a dedicated brand-new bot (its own token, outside the pool): it
     authenticates from the token alone, so there is no session to load from the

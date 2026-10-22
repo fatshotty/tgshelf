@@ -15,6 +15,7 @@ aiohttp APIs, HTTP download endpoints, WebDAV/rclone, and a React Web UI.
 - [Performance Notes](#performance-notes)
 - [Telegram Channels Bound To Folders](#telegram-channels-bound-to-folders)
 - [Telegram Accounts And Bots](#telegram-accounts-and-bots)
+- [Live Cataloging And Channel History Import](#live-cataloging-and-channel-history-import)
 - [Development Setup](#development-setup)
 - [Docker](#docker)
 - [Developing Plugins](#developing-plugins)
@@ -40,6 +41,8 @@ aiohttp APIs, HTTP download endpoints, WebDAV/rclone, and a React Web UI.
   reorder parts.
 - CLI workflows for accounts/sessions, filesystem operations, sync, download,
   `.strm` generation, and bot membership management.
+- Optional live cataloging of documents posted or forwarded to the master
+  Telegram channel, plus on-demand master-channel history import into root.
 - Web UI for browsing, search, metrics, tree management, inline text editing,
   Telegram-backed file-part management, and durable bulk move/soft-delete jobs
   with per-item status and errors.
@@ -96,10 +99,11 @@ Example:
 tgshelf does not create Telegram channels. Channels must already exist and must
 be configured manually in Telegram before they are used by tgshelf.
 
-tgshelf does not currently rebuild a channel's history. If a mapped Telegram
-channel already contains files, those files are not cataloged automatically.
-tgshelf manages only new files uploaded through tgshelf after the channel has
-been configured.
+Assigning a channel to a folder does not scan its existing messages. The optional
+`telegram.main_bot` watcher catalogs new supported file messages in the master
+channel into `/`, and `import-channel` can scan that channel's history on demand.
+These entry points currently support only the master channel and root; they do
+not import arbitrary folder channels. See [the import guide](docs/watcher-import.md).
 
 Changing the channel associated with a folder affects new uploads, but it does
 not automatically move files that were already stored. Existing Telegram file
@@ -110,8 +114,10 @@ parts remain in the channel where they were created.
 tgshelf requires at least one Telegram user account. User accounts handle
 read/write operations: uploads, copies, moves, deletes, and maintenance.
 
-Bots are optional. When configured, they are used only for downloads and
-streaming, so they may have read-only access to mapped channels.
+Bots in `telegram.users` are optional download/streaming pool members and may
+have read-only access to mapped channels. The separate `telegram.main_bot` is an
+optional live watcher, and `telegram.notify.bot_token` enables alert delivery
+through the Telegram Bot HTTP API.
 
 Multiple user accounts and multiple bots can be configured at the same time.
 tgshelf rotates them according to the operation type to distribute load and
@@ -120,6 +126,8 @@ reduce the risk of flood waits.
 Accounts may have access to different mapped channels. Configure their logical
 read/full-control permissions in the Web UI's Channel access page; selected
 accounts must also possess the corresponding real Telegram access rights.
+Add the dedicated watcher as an administrator of the master channel manually;
+the alert bot must be allowed to post to its configured destination.
 
 Without bots, downloads and streaming can use user accounts by enabling:
 
@@ -127,6 +135,32 @@ Without bots, downloads and streaming can use user accounts by enabling:
 download:
   allow_user_fallback: true
 ```
+
+## Live Cataloging And Channel History Import
+
+When `telegram.main_bot` is configured, `serve` starts a dedicated Telethon bot
+that listens for new messages in `telegram.upload.channel`. Files posted directly
+or forwarded there are cataloged into `/` through `FileSystem.import_message`.
+The watcher uses its own token and an ephemeral session, stays outside the
+download pools, and resolves document metadata through an admitted user account.
+Each live import uses the shared `operations.concurrent` budget and requires
+read access to the root's channel. The bot requires no `accounts setup` entry
+for itself.
+
+Only Telegram document media are currently imported. Native Telegram photos and
+other unsupported media are skipped. Each new file references one existing
+Telegram message; import does not transfer payload bytes, interpret captions,
+reconstruct folders or multipart files, or move small files into DB-inline storage.
+
+Messages received while the watcher is down are not automatically reconciled.
+Run `tgshelf --config config.yaml import-channel` to scan the master channel's
+history, or add `--limit N` to inspect only its latest N messages. There is no
+persistent checkpoint or folder/filter option in the current command.
+
+Watcher startup failures and unexpected disconnections are logged and passed to
+the notifier without stopping `serve`. A single-message failure is logged only.
+See [the import guide](docs/watcher-import.md) for setup, duplicate/name collision
+rules, recovery, and current limitations.
 
 ## Development Setup
 
@@ -473,7 +507,8 @@ telegram:
     channel: -1001234567890
 
   # Optional dedicated watcher bot. `serve` starts it with receive_updates=True
-  # and imports new files posted to the master channel. It must be a member/admin.
+  # and imports supported files posted/forwarded to the master into root.
+  # Use a separate bot outside telegram.users; add it as master-channel admin.
   main_bot:
     api_id: 123456      # dummy
     api_hash: "0123456789abcdef0123456789abcdef"  # dummy
@@ -605,9 +640,12 @@ selection or status read after the deadline returns it to service, without a
 restart or `tgshelf bots check`. A longer Telegram FloodWait cooldown continues
 to apply independently after quarantine expires.
 
-The `telegram.main_bot` and `telegram.notify` blocks are reserved for future
-work. tgshelf does not yet manage a bot that listens to channel messages and
-catalogs them automatically, and Telegram notifications are not wired yet.
+`telegram.main_bot` enables live master-channel cataloging while `serve` runs;
+omit the block or set it to `null` to disable it. A populated block requires
+`api_id`, `api_hash`, and `bot_token`. `telegram.notify.bot_token` independently
+enables best-effort Telegram alerts; an empty token keeps alerts in local logs.
+An empty notify destination defaults to the master channel. The two features
+are already wired, and enabling one does not enable the other.
 
 The `DB` environment variable overrides the `db` key, which is useful for
 deployment-specific database URLs.
@@ -648,8 +686,13 @@ tgshelf --config config.yaml accounts delete-session bot01
 # session that they may already have loaded.
 tgshelf --config config.yaml accounts add-bot bot01 --force
 
-# Start the HTTP API, Web UI, metrics, and enabled WebDAV surfaces.
+# Start HTTP, Web UI, metrics, and configured WebDAV/watcher components.
 tgshelf --config config.yaml serve
+
+# Catalog supported master-channel documents into root, including downtime gaps.
+tgshelf --config config.yaml import-channel
+# Inspect the latest 1000 messages, including text/unsupported media in the limit.
+tgshelf --config config.yaml import-channel --limit 1000
 
 # Create folders in the virtual filesystem.
 tgshelf --config config.yaml mkdir /folder/sub-folder
@@ -780,6 +823,8 @@ rclone mount tgshelf: /mnt/tgshelf
 
 ## TODO list
 
-- Manage the Telegram bot that listens to channel messages and catalogs them
-  automatically.
-- Wire Telegram notifications.
+- Automatic watcher reconciliation after downtime and stronger concurrent-import
+  deduplication.
+- Incremental history import into mapped folders with filters and checkpoints
+  (planned; not implemented).
+- Complete notification event coverage and explicit pool-recovery alerts.

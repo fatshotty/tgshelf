@@ -162,9 +162,9 @@ operations:
   # Logical filesystem jobs that may run at once. Management jobs use user
   # accounts; downloads use the download bot/user pool settings above.
   concurrent: 4
-  # Proactive per-account Telegram write budget. 0 actions disables it.
-  # Token-bucket model: each account starts with `actions` write tokens. Every
-  # flood-sensitive Telegram write (send/copy/delete/edit/admin action) consumes
+  # Per-account budget for Telegram writes and import history metadata reads.
+  # 0 actions disables it. Each account starts with `actions` tokens. Every
+  # opted-in request (send/copy/delete/edit/admin/import history) consumes
   # one token; the bucket refills gradually from empty to full over `within`
   # seconds. When an account has no token, tgshelf uses another eligible account;
   # if every account is empty, it waits for the first token to refill.

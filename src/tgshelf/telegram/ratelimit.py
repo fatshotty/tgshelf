@@ -3,8 +3,8 @@
 The limiter is a token bucket per account. Each flood-sensitive Telegram write
 consumes one token. Buckets refill gradually over `refill_seconds`, allowing a
 short burst while preventing sustained write pressure from concentrating on one
-account. Reads, downloads, and SaveBigFilePart upload chunks are not proactively
-limited; they still handle Telegram's real FloodWait responses.
+account. Explicit channel-import metadata requests also opt in. Other reads, downloads,
+and SaveBigFilePart upload chunks are not proactively limited; they still handle Telegram's real FloodWait responses.
 """
 
 from __future__ import annotations

@@ -9,7 +9,8 @@ and consumed by the gateway implementation only.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from datetime import datetime
+from typing import Any, Literal, Protocol, runtime_checkable
 
 
 @dataclass(frozen=True)
@@ -26,8 +27,36 @@ class DocRef:
     caption: str | None = None
 
 
+@dataclass(frozen=True)
+class HistoryEntry:
+    """Account-independent metadata from one channel message."""
+    message_id: int
+    date: datetime
+    filename: str | None
+    mime: str | None
+    doc_id: int | None
+    size: int
+    media_kind: Literal['document', 'unsupported', 'none']
+
+
+@dataclass(frozen=True)
+class HistoryPage:
+    entries: tuple[HistoryEntry, ...]
+    scanned_through: int
+    exhausted: bool
+
+
 @runtime_checkable
 class Gateway(Protocol):
+    async def latest_history_id(self, channel_id: int) -> int:
+        """Latest accessible message ID, or zero for an empty channel; import-only."""
+        ...
+
+    async def history_page(self, channel_id: int, *, after_id: int,
+                           through_id: int, limit: int) -> HistoryPage:
+        """Oldest messages after the lower bound; imports opt into account pacing."""
+        ...
+
     async def get_document(self, channel_id: int, message_id: int) -> DocRef | None:
         """Fresh DocRef for the media of a message; None if the message is
         gone/empty (deleted from the channel)."""

@@ -255,3 +255,19 @@ class OperationJobItem(Base):
         ),
         Index("ix_operation_job_items_job_position", "job_id", "position"),
     )
+
+
+class ChannelImportProgress(Base):
+    """Completed history boundaries, independent from catalog timestamps."""
+
+    __tablename__ = 'channel_import_progress'
+
+    folder_id: Mapped[str] = mapped_column(ForeignKey('nodes.id', ondelete='CASCADE'), primary_key=True)
+    channel_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    last_scanned_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default='0')
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint('last_scanned_message_id >= 0', name='ck_channel_import_progress_nonnegative'),
+    )

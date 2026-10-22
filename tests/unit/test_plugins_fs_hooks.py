@@ -80,6 +80,9 @@ class FakeRepo:
         self.parts: dict[str, list[Any]] = {}
         self.purged: list[str] = []
 
+    async def lock_import_message(self, channel_id, message_id):
+        pass
+
     async def get(self, node_id: str) -> FakeNode | None:
         return self.nodes.get(node_id)
 

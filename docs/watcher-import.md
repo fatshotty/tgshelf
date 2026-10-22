@@ -1,9 +1,9 @@
-# Live Watcher And Master-Channel Import
+# Live Watcher And Channel History Import
 
 This guide describes the current implementation in `bot/watcher.py`,
-`commands/import_channel.py`, and `FileSystem.import_message`. Live cataloging
-and manual history import are implemented. Incremental folder/channel import is
-still planned and is not part of the current CLI.
+`commands/import_channel.py`, `core/import_channel.py`, and the FileSystem
+facade. Live master-channel cataloging and incremental mapped-folder history
+import are implemented; their name-collision rules differ as described below.
 
 ## Setup And Lifecycle
 
@@ -72,11 +72,11 @@ Telegram do not automatically rename, update, or delete catalog entries.
 
 ## Catalog Representation
 
-A newly cataloged document becomes one `ACTIVE` file in `/` with one Telegram
+A newly cataloged document becomes one `ACTIVE` file in the destination with one Telegram
 part at index `0`. The node stores a generated stable ID, name, MIME, total size,
 and channel ID. The part stores channel ID, message ID, document ID, size, and
-original filename. Node timestamps use database defaults at import time rather
-than the original Telegram message date.
+original filename. The watcher uses database-default timestamps at import time.
+The history CLI uses the Telegram message date for ctime and insertion time for mtime.
 
 The watcher and CLI do not override metadata: the name comes from the Telegram
 document, falling back to `file_<message_id>`, and MIME comes from the document,
@@ -90,7 +90,7 @@ multipart relationships, and album grouping are not reconstructed.
 
 ## Duplicate References And Name Collisions
 
-The shared `FileSystem.import_message` rules run in this order:
+The live watcher uses `FileSystem.import_message` with these rules:
 
 1. If any node already owns `(channel_id, message_id)`, return that node without
    changes. This lookup includes soft-deleted nodes, so scanning the same message
@@ -109,14 +109,23 @@ with the same name can also suppress an import. Multiple same-name deleted/TEMP
 siblings can make the selected sibling ambiguous; there is no explicit priority
 between them in this lookup.
 
-Deduplication is an application-level pre-check, not a concurrent-import lock.
-The `(channel_id, message_id)` index is not unique. Concurrent watcher/CLI or
-multi-instance imports can race; active sibling name uniqueness can reject an
-insert, but there is no dedicated retry/reconciliation for that race.
+Watcher and CLI imports share a transaction-scoped advisory lock and a duplicate
+recheck for each physical `(channel_id, message_id)`. Existing owners, including
+deleted nodes and multipart owners in any destination, are returned unchanged.
+The database index remains non-unique; application import paths coordinate
+through the lock rather than adding a new ownership constraint.
+
+The history CLI uses `FileSystem.catalog_channel_file` to publish normalized
+metadata without fetching each document again. Unlike the watcher's same-name
+behavior above, a distinct incoming message is always a separate new file.
+An active name collision uses `<stem> - msg_<message_id><suffix>` followed by the
+existing numbered fallback if needed. Deleted same-name files are not resurrected.
+Unsafe logical path components are terminal per-file metadata errors.
 
 `FileSystem` supports `after_file_import` when a plugin manager is supplied.
-Neither the watcher nor the current CLI passes one, so configured plugins do not
-run for these imports. See [Plugin Hooks](plugins.md).
+The CLI passes its configured manager and dispatches the hook once per newly
+committed file; duplicates do not run it. Hook failures do not undo the file.
+The watcher does not currently pass a plugin manager. See [Plugin Hooks](plugins.md).
 
 ## Failure Handling And Recovery
 
@@ -144,53 +153,78 @@ The files remain in Telegram even if they have not yet been cataloged.
 ## Manual History Import
 
 ```sh
-# Scan all master-channel history into root.
+# Incrementally scan the master channel into root.
 tgshelf --config config.yaml import-channel
 
-# Scan only the latest 1000 channel messages.
-tgshelf --config config.yaml import-channel --limit 1000
+# Import a mapped folder's effective channel with include/exclude filters.
+tgshelf --config config.yaml import-channel /media \
+  --include-mime "video,audio" --exclude-mime "image" --exclude-ext "pdf,txt"
+
+# Reconsider earlier filtered/error messages; existing owners are skipped.
+tgshelf --config config.yaml import-channel /media --rescan
+
+# Examine at most 1000 messages, oldest first after the checkpoint.
+tgshelf --config config.yaml import-channel /media --limit 1000
 ```
 
-This command does not require `main_bot`. It starts configured clients, builds
-the runtime, and enters one admission context requiring master-channel read
-access. It reads history through the admitted user's underlying Telethon client
-and resolves documents through the same account-bound gateway. That user lease
-and one shared operation slot are held for the whole scan, and the facade reuses
-the existing context for individual imports. Bots do not supply history.
-It scans newest first
-using `iter_messages(master, limit=...)`; the default `0` means the whole history.
-A positive limit counts all inspected messages, including text and unsupported
-media, rather than only imported documents.
+No additional config keys or `main_bot` are required. Use the existing configured
+user sessions and channel read/write permissions. Only user accounts admitted for
+read access can supply history. An account that cannot access/resolve the channel
+can fail over only to another admitted user. Bots never read history.
 
-The command reuses one DB session and commits each new/reactivated file through
-`import_message`. It has no persisted progress, destination argument, MIME or
-extension filters, or `--rescan` option. A scan/import exception stops the command;
-previously committed files remain cataloged and later runs re-check references.
-Neither entry point uses `FsExecutor` fan-out. History and document reads have no
-explicit proactive request pacing through `operations.actions/within`; the shared
-operation budget controls admitted work rather than individual history requests.
+The optional path defaults to `/` and must resolve to an existing active folder.
+Its channel may be explicit or inherited. Each history page and file publication
+has fresh access admission. Scanner and workers share `operations.concurrent`;
+the page admission is released before workers start. History metadata attempts
+explicitly use the per-account `operations.actions/within` budget, including
+retries, and existing FloodWait thresholds/cooldowns. No database transaction is
+held while awaiting Telegram. Other read flows retain their existing pacing.
 
-The summary prints `imported` and `skipped` with these current semantics:
+Filters are repeatable CSV options: `--include-ext`, `--exclude-ext`,
+`--include-mime`, and `--exclude-mime`. Extension matching is case-insensitive,
+accepts an optional leading dot and supports compound suffixes such as `tar.gz`.
+MIME filters accept families (`video` or `video/*`) or exact types (`audio/mpeg`).
+Include extension and MIME groups combine with OR; any exclusion vetoes them.
+Without includes, supported files pass unless excluded. Unknown metadata cannot
+match the corresponding filter group.
 
-- Text-only messages do not increment either counter.
-- Known message references and media without a supported document increment
-  `skipped`.
-- A non-`None` import result increments `imported`, even if it is an active
-  same-name node and no new message reference was saved.
+At startup the latest message ID freezes the scan's upper bound. The first run
+starts from zero; subsequent runs start after the stored completed boundary.
+New messages arriving during the scan are left for the next invocation.
+`--limit 0` is unlimited; a positive value counts examined messages, including
+text, unsupported media, duplicates and filtered files. This replaces the former
+newest-N limit with oldest-first scanning so limited imports cannot skip history.
 
-The live handler likewise logs `cataloged` for a non-`None` result, including an
-existing node returned by reference/name. These messages are not proof that a
-new node was inserted. Use `[watch]`, `[import]`, and `[notify]` to inspect the
-flow.
+Migration `0006` adds the four-column `channel_import_progress` table:
+`folder_id`, `channel_id`, `last_scanned_message_id`, `updated_at`. The pair is the
+primary key; hard-purging its folder cascades deletion. The cursor is nonnegative
+and monotonic. Apply Alembic migrations before using the command.
 
-## Planned Follow-Ups
+Only fully processed ascending pages advance progress. Excluded/unsupported
+items and terminal per-file errors count as processed. A normal incremental run
+does not revisit them; use `--rescan` to retry earlier missing files after changing
+filters or fixing errors. Rescans begin at zero and never lower the normal
+checkpoint. An interrupted rescan must be repeated explicitly with `--rescan`.
 
-Automatic downtime reconciliation, stronger concurrent-import coordination,
-message edit/delete synchronization, broader media support, and plugin-manager
-wiring are not implemented here.
+Fatal history/DB failures, cancellation and lock loss do not cross an incomplete
+page. Already committed files survive and are skipped when that page is replayed.
+A dedicated PostgreSQL session advisory lock rejects concurrent runs for the same
+folder/channel pair. Use a direct or session-pooling DB endpoint, not transaction
+pooling. Different destinations and the watcher share message publication locks.
+Folder deletion or channel remapping stops the captured import before further
+publication/checkpoint advancement.
 
-Incremental history import into mapped folders with include/exclude filters,
-persistent checkpoints, and controlled history-request pacing is not implemented.
-The local `2026-10-21-channel-import` spec/plan describes that extension rather
-than the current command's contract. Channel access policy and shared operation
-admission are already implemented on `develop`, as described above.
+Logs use `[import]`, with filename/message/channel and a reason for imports,
+duplicates, filter exclusions, unsupported media and terminal file errors.
+Filter logs include actual metadata and configured patterns. The final summary
+reports `examined`, `imported`, `already_cataloged`, `filtered`, `unsupported`,
+`failed`, `completed`, `stopped_by_limit`, and `checkpoint`. Exit status is 0 for
+successful scans (including exclusions), 1 for file/run errors, 2 for invalid args.
+
+The live handler's `cataloged` log may still represent an existing node returned
+by reference or name; it is not proof that a new node was inserted.
+
+## Follow-Ups
+
+Automatic downtime reconciliation, message edit/delete synchronization, broader
+media support, and live watcher plugin-manager wiring remain future work.

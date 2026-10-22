@@ -50,7 +50,8 @@ Important blocks:
 - `download`: multi-bot settings, fallback policy, chunk timeout, memory soft
   limit.
 - `operations`: logical job concurrency plus the per-account Telegram write
-  token bucket (`actions` over `within` seconds).
+  token bucket (`actions` over `within` seconds), also used explicitly by
+  channel-import metadata reads.
 - `http`: aiohttp listener and auth settings.
 - `strm`: `.strm` generation settings.
 - `changes_feed`: PostgreSQL change table/NOTIFY toggle.
@@ -69,6 +70,9 @@ Core tables:
 - `tg_sessions`: account and bot session metadata plus stored StringSession when
   configured for DB-backed sessions.
 - `upload_states`: best-effort upload resume state.
+- `channel_import_progress` (migration `0006`): exactly `folder_id`, `channel_id`,
+  `last_scanned_message_id`, `updated_at`; compound folder/channel primary key,
+  nonnegative monotonic cursor, folder FK with purge cascade. No item/run ledger.
 - `changes`: append-only change feed populated by PostgreSQL triggers.
 - `operation_jobs` and `operation_job_items`: durable, best-effort Web UI bulk
   move/soft-delete requests and their per-node outcomes. Node IDs and target IDs
@@ -156,7 +160,8 @@ Important operations:
 - read/navigation: `get`, `resolve`, `path_of`, `list_children`, `walk`, `search`;
 - tree writes: `mkdir`, `mkdirs`, `rename`, `set_channel`;
 - content: `open_read`, `write`, `edit_inline_content`;
-- Telegram imports: `import_message`;
+- Telegram imports: `import_message` for the watcher and
+  `catalog_channel_file` for admitted normalized history metadata;
 - composition: `merge_parts`, ordered part merge, and `split_parts`;
 - mutations: `move`, `copy`, `delete`, `restore`, `purge`.
 
@@ -265,26 +270,43 @@ apply the inline threshold, parse/edit captions, or reconstruct multipart files.
 Existing channel/message references are returned unchanged, even for soft-deleted
 nodes. A case-insensitive same-name active sibling suppresses the incoming import;
 a returned deleted sibling is reactivated with the same ID and a replacement part.
-The lookup does not prioritize state or restrict siblings to files. Reference
-deduplication is an application-level check with no unique channel/message
-constraint or import lock. Neither entry point passes a plugin manager, so the
-facade's `after_file_import` hook is not dispatched by watcher/CLI imports.
+The watcher lookup does not prioritize state or restrict siblings to files.
+Watcher and CLI publication share a transaction advisory lock and duplicate
+recheck for each physical channel/message. The CLI supplies its configured plugin
+manager and runs `after_file_import` for newly committed files; the watcher does
+not currently supply a plugin manager.
 
 Files posted while the watcher is down are not automatically recovered.
-`tgshelf import-channel` performs on-demand history reconciliation through a
-user account because bots cannot reliably read channel history. It scans only the
-master into root, newest first, with `--limit N` counting messages (default `0`:
-whole history). It has no checkpoint, folder/filter options, or per-message error
-recovery. Same-name no-op results are currently counted as imported.
+`tgshelf import-channel [path]` catalogs the mapped folder's channel using only
+read-authorized user accounts. It specializes the access model with fresh
+admission for every history page and file publication; bots never scan history.
+It shares `operations.concurrent` across scanning/publication and opts history
+metadata attempts into the existing per-account actions/within and FloodWait
+machinery. No Telegram wait holds a database transaction.
+
+Ascending bounded pages use a startup snapshot of the latest message ID.
+Completed pages advance the monotonic folder/channel checkpoint, including
+filtered, unsupported and terminal-error items. Fatal history/DB failures and
+cancellation leave the incomplete page for replay. Normal runs are incremental;
+`--rescan` starts at zero and never reduces the stored checkpoint. `--limit`
+limits examined messages oldest first, with zero meaning unlimited.
+
+Repeatable CSV extension/MIME includes combine with OR; exclusions veto them.
+Every supported document is an independent one-part file (idx=0). Native photos
+are currently unsupported. New nodes use source-message ctime and insertion
+mtime. Global channel/message dedupe includes existing multipart and deleted
+owners; collisions between distinct messages use a message-ID name suffix.
+Short per-message transaction advisory locks are shared with watcher imports.
+A dedicated session advisory lock prevents concurrent runs for the same
+folder/channel pair and requires a direct or session-pooling DB endpoint.
+Per-file reason logs accompany a final summary; file/run errors return nonzero.
 
 Watcher startup failures and unexpected terminal disconnections are logged and
 notified without terminating `serve`. Individual message failures are logged only.
-The health monitor does not recreate the watcher. The CLI holds one admission
-slot and user lease for its whole scan, reusing that context for every file;
-live imports are admitted per event. Neither path uses executor fan-out, and
-history reads have no explicit proactive request pacing. See [the current
-implementation guide](watcher-import.md) for details and limitations. Incremental
-folder/history import with filters and checkpoints is not implemented yet.
+The health monitor does not recreate the watcher. Live imports are admitted
+per event; the CLI releases its history-page admission before dispatching file
+workers. See [the implementation guide](watcher-import.md) for setup, distinct
+watcher/history collision rules and limitations.
 
 ## Notifier
 

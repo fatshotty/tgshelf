@@ -200,6 +200,7 @@ async def start_clients(config: Config, write_limiter) -> list[tuple[Any, Any]]:
     )
 
     clients: list[tuple[Any, Any]] = []
+    opened = []
     try:
         for account in config.telegram.users:
             session_str = await store.load(account.name)
@@ -218,6 +219,7 @@ async def start_clients(config: Config, write_limiter) -> list[tuple[Any, Any]]:
                 # of stalling this connection ~1s mid-stream.
                 flood_sleep_threshold=0,
             )
+            opened.append(tele)
             await tele.connect()
             if not await tele.is_user_authorized():
                 log.warning("session for '%s' is not authorized; re-login", account.name)
@@ -257,6 +259,15 @@ async def start_clients(config: Config, write_limiter) -> list[tuple[Any, Any]]:
                 tg_client.is_premium = caps.is_premium
                 tg_client.max_upload_parts = caps.max_upload_parts
             clients.append((account, tg_client))
+    except BaseException:
+        # Startup may fail before returning the list to its owner. Close even
+        # the current client whose connection/authentication did not finish.
+        for tele in reversed(opened):
+            try:
+                await tele.disconnect()
+            except Exception:
+                log.exception('Failed to disconnect a Telegram client after startup failure')
+        raise
     finally:
         if store_session is not None:
             await store_session.close()

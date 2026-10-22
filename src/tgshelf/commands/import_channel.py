@@ -1,108 +1,99 @@
-"""`tgshelf import-channel` — reconcile the master channel into the drive.
-
-The watcher bot (C5.2) only catches LIVE messages; history and any downtime gap
-are reconciled here. Bots cannot read channel history, so this runs through a
-USER account: it scans the master channel and catalogs supported document
-messages into root, subject to the shared import name-collision rules.
-
-`fs.import_message` checks for existing (channel, message_id) references before
-importing. Reconciliation is manual: the watcher does not call it on startup.
-There is no persistent scan checkpoint; --limit counts the latest messages, not
-only supported files. See docs/watcher-import.md for collision and counter limits.
-"""
-
+"""Incremental import of a mapped folder's Telegram channel history."""
 from __future__ import annotations
 
+import asyncio
+from dataclasses import replace
 import logging
 import sys
-from dataclasses import dataclass
-from typing import Any, AsyncIterator
 
 from tgshelf.config import Config
-from tgshelf.constants import ROOT_ID
+from tgshelf.core.access import AccessRequirement, ChannelAccessService
 from tgshelf.core.fs import FileSystem
+from tgshelf.core.import_channel import ChannelImporter, ImportHistoryReader, ImportOptions, ImportRunError, ImportStats
+from tgshelf.core.import_filters import parse_filters
 from tgshelf.db.engine import create_engine, create_session_factory
 from tgshelf.db.repo import NodeRepo
+from tgshelf.log import describe_exc
 
-log = logging.getLogger("tgshelf.import")
-
-
-@dataclass
-class ImportStats:
-    imported: int = 0
-    skipped: int = 0
-
-    def __str__(self) -> str:
-        return f"{self.imported} imported, {self.skipped} skipped"
+log = logging.getLogger('tgshelf.import')
 
 
-def _has_file(message: Any) -> bool:
-    """Media prefilter; the gateway later rejects unsupported media types."""
-    return getattr(message, "media", None) is not None
-
-
-async def reconcile(
-    messages: AsyncIterator[Any],
-    fs: FileSystem,
-    channel_id: int,
-    *,
-    parent_id: str = ROOT_ID,
-) -> ImportStats:
-    """Catalog supported documents from `messages`, subject to reference/name
-    checks, into `parent_id` (root for the master channel). `messages` is an async
-    iterator of Telegram message-likes (`.id`, `.media`) — Telethon's
-    `iter_messages` in the command, a scripted list in tests. The pre-check counts known
-    messages as skipped; an active same-name node returned by import_message is
-    still counted as imported, even though no new reference was recorded."""
-    stats = ImportStats()
-    async for message in messages:
-        if not _has_file(message):
-            continue
-        if await fs.repo.get_file_by_message(channel_id, message.id) is not None:
-            stats.skipped += 1
-            continue
-        node = await fs.import_message(channel_id, message.id, parent_id=parent_id)
-        if node is None:
-            stats.skipped += 1  # media we cannot catalog (e.g. non-document)
-        else:
-            stats.imported += 1
-            log.info("[import] %s (msg %s)", node.name, message.id)
-    return stats
+def _has_file(message) -> bool:
+    """Compatibility predicate shared with the dedicated live watcher."""
+    return getattr(message, 'media', None) is not None
 
 
 async def run(config: Config, args) -> int:
-    master = config.telegram.upload.channel
-    limit = getattr(args, "limit", None) or None  # 0/None -> whole history
+    try:
+        filters = parse_filters(**{name: getattr(args, name, ()) or () for name in
+            ('include_ext', 'exclude_ext', 'include_mime', 'exclude_mime')})
+        limit = getattr(args, 'limit', 0)
+        if limit < 0:
+            raise ValueError('Import limit must be non-negative')
+    except ValueError as exc:
+        print(f'error: {exc}', file=sys.stderr)
+        return 2
 
     from tgshelf.http.serve import build_runtime, make_write_limiter, start_clients
-
-    write_limiter = make_write_limiter(config.operations)
-    pairs = await start_clients(config, write_limiter)
     engine = create_engine(config.db)
+    sessions = create_session_factory(engine)
+    pairs = []
+    stats = ImportStats()
+    failed = False
     try:
-        from tgshelf.core.access import AccessRequirement
-        sessions = create_session_factory(engine)
-        runtime = build_runtime(config, sessions, pairs, write_limiter=write_limiter)
-        async with runtime["admission"].start([AccessRequirement(master, "read")]) as ctx:
-            raw = ctx.member.client._client
-            async with sessions() as session:
-                fs = FileSystem(NodeRepo(session), master_channel=master,
-                    gateway=ctx.gateway, min_size=config.telegram.upload.min_size,
-                    caption_template=config.caption.template, admission=runtime["admission"])
-                fs._operation_context = ctx
-                log.info("[import] scanning master channel %s (limit=%s)", master, limit or "all")
-                stats = await reconcile(raw.iter_messages(master, limit=limit), fs, master)
-                log.info("[import] done: %s", stats)
+        async with sessions() as session:
+            fs = FileSystem(NodeRepo(session), master_channel=config.telegram.upload.channel)
+            node = await fs.resolve(getattr(args, 'path', '/'))
+            if node is None or not node.is_folder or node.state != 'ACTIVE':
+                raise ValueError('Import destination must be an existing active folder')
+            folder_id = node.id
+            channel = await fs.effective_channel(folder_id)
+        policy = ChannelAccessService(sessions, config.telegram.users, config.telegram.upload.channel)
+        # Fail closed before startup when no configured user has logical read access.
+        await policy.snapshot([AccessRequirement(channel, 'read')])
+        limiter = make_write_limiter(config.operations)
+        user_config = replace(config, telegram=replace(config.telegram,
+            users=tuple(account for account in config.telegram.users if not account.is_bot)))
+        pairs = await start_clients(user_config, limiter)
+        runtime = build_runtime(config, sessions, pairs, write_limiter=limiter)
+        admission, scheduler = runtime['admission'], runtime['operation_scheduler']
+        def fs_factory(session):
+            return FileSystem(NodeRepo(session), master_channel=config.telegram.upload.channel,
+                caption_template=config.caption.template, min_size=config.telegram.upload.min_size,
+                admission=admission, plugin_manager=runtime['plugin_manager'])
+        importer = ChannelImporter(sessions, engine, ImportHistoryReader(admission),
+                                   admission, scheduler, fs_factory)
+        stats = await importer.run(ImportOptions(folder_id, channel, getattr(args, 'rescan', False), filters, limit))
+        failed = stats.failed > 0
+    except ImportRunError as exc:
+        stats = exc.stats
+        failed = True
+        log.error('[import] reason=import_aborted error=%s', describe_exc(exc.cause))
+    except asyncio.CancelledError:
+        log.warning('[import] reason=cancelled; unfinished page will be replayed on the next run')
+        raise
+    except Exception as exc:
+        failed = True
+        log.error('[import] reason=import_aborted error=%s', describe_exc(exc))
     finally:
-        await engine.dispose()
         for _account, client in pairs:
-            await _disconnect(client)
+            try:
+                await _disconnect(client)
+            except Exception:
+                failed = True
+                log.exception('[import] reason=client_disconnect_failed')
+        await engine.dispose()
+    log.info('[import] done: %s', stats)
+    print(f'import-channel: {stats}')
+    return 1 if failed else 0
 
-    print(f"import-channel: {stats}")
-    return 0
 
-
-async def _disconnect(client: Any) -> None:
-    disconnect = getattr(getattr(client, "_client", None), "disconnect", None)
-    if disconnect is not None:
-        await disconnect()
+async def _disconnect(client) -> None:
+    close = getattr(client, 'aclose', None)
+    try:
+        if close is not None:
+            await close()
+    finally:
+        disconnect = getattr(getattr(client, '_client', None), 'disconnect', None)
+        if disconnect is not None:
+            await disconnect()

@@ -14,6 +14,7 @@ aiohttp APIs, HTTP download endpoints, WebDAV/rclone, and a React Web UI.
 - [Stack](#stack)
 - [Performance Notes](#performance-notes)
 - [Telegram Channels Bound To Folders](#telegram-channels-bound-to-folders)
+- [Import Existing Channel Files](#import-existing-channel-files)
 - [Telegram Accounts And Bots](#telegram-accounts-and-bots)
 - [Live Cataloging And Channel History Import](#live-cataloging-and-channel-history-import)
 - [Development Setup](#development-setup)
@@ -42,7 +43,7 @@ aiohttp APIs, HTTP download endpoints, WebDAV/rclone, and a React Web UI.
 - CLI workflows for accounts/sessions, filesystem operations, sync, download,
   `.strm` generation, and bot membership management.
 - Optional live cataloging of documents posted or forwarded to the master
-  Telegram channel, plus on-demand master-channel history import into root.
+  Telegram channel, plus incremental history import into mapped folders.
 - Web UI for browsing, search, metrics, tree management, inline text editing,
   Telegram-backed file-part management, and durable bulk move/soft-delete jobs
   with per-item status and errors.
@@ -99,15 +100,72 @@ Example:
 tgshelf does not create Telegram channels. Channels must already exist and must
 be configured manually in Telegram before they are used by tgshelf.
 
-Assigning a channel to a folder does not scan its existing messages. The optional
-`telegram.main_bot` watcher catalogs new supported file messages in the master
-channel into `/`, and `import-channel` can scan that channel's history on demand.
-These entry points currently support only the master channel and root; they do
-not import arbitrary folder channels. See [the import guide](docs/watcher-import.md).
+Files already present in a mapped Telegram channel can be cataloged manually
+with `tgshelf import-channel /path/to/folder`. This does not run automatically.
 
 Changing the channel associated with a folder affects new uploads, but it does
 not automatically move files that were already stored. Existing Telegram file
 parts remain in the channel where they were created.
+
+## Import Existing Channel Files
+
+```sh
+tgshelf import-channel /path/to/folder \
+  --include-mime "video,audio" --exclude-mime "image" --exclude-ext "pdf,txt"
+tgshelf import-channel /path/to/folder --rescan
+```
+
+The destination must be an existing active folder. Its effective channel is
+used, including an inherited mapping; the omitted path defaults to `/`.
+Each supported Telegram document becomes one independent file with one part.
+Names, captions and albums never imply multipart reconstruction. Document-backed
+images, audio and video are supported; native Telegram photos and other unsupported
+media are skipped with a warning. File creation time comes from the Telegram
+message; modification time records insertion into tgshelf.
+
+Filter options accept comma-separated values and can be repeated. Extensions are
+case-insensitive, with or without a leading dot; compound extensions such as
+`tar.gz` are supported. MIME filters accept families (`video` or `video/*`) and
+exact types (`audio/mpeg`). With includes, a matching extension **or** MIME is
+enough. Any exclusion vetoes inclusion. Without includes, every supported file
+is eligible unless excluded. Unknown metadata does not match its filter group.
+
+The first run reads the complete history up to the latest message observed at
+startup. Later runs examine only messages after the stored checkpoint, including
+when filters change. Filtered files and terminal per-file errors are passed over;
+`--rescan` starts again from the beginning and imports previously missing files.
+Already cataloged physical messages are skipped globally, including files moved
+to another folder, soft-deleted files and existing multipart owners. A different
+message with the same name receives a deterministic ` - msg_<id>` suffix.
+
+Progress is committed after complete ascending pages. If a page fails or the
+command is interrupted, the next run replays that page and deduplicates files
+already committed. A rescan never lowers the normal checkpoint; repeat
+`--rescan` explicitly to finish an interrupted rescan. `--limit N` examines at
+most N messages, oldest first after the starting checkpoint; 0 means unlimited.
+This replaces the former newest-N limit behavior so limited imports cannot skip
+older messages.
+
+Only configured user accounts admitted for read or write access to the channel
+can read history; bots are excluded. Every page and file publication gets fresh
+permission admission. Scanner and workers share `operations.concurrent`.
+Import history metadata requests use the per-account `operations.actions/within`
+budget and existing FloodWait thresholds/cooldowns. Other Telegram reads keep
+their current pacing behavior.
+
+Migration `0006` adds `channel_import_progress` with exactly four columns:
+`folder_id`, `channel_id`, `last_scanned_message_id`, `updated_at`. The folder and
+channel form its primary key. Apply migrations before running the command.
+Concurrent runs for the same pair are rejected using a PostgreSQL session
+advisory lock: connect directly or through a session-pooling endpoint, rather
+than a transaction-pooling endpoint. No transaction stays open while waiting
+for Telegram. Different destinations share short message locks to prevent
+duplicate publication, including races with the live watcher.
+
+Progress logs use `[import]` and include the file, channel, message and reason
+for each import, duplicate, filtered item or error. The final summary reports
+counts, checkpoint and completion/limit status. Exit codes are 0 for a successful
+run (including exclusions), 1 for file/run errors, and 2 for invalid arguments.
 
 ## Telegram Accounts And Bots
 
@@ -154,8 +212,10 @@ reconstruct folders or multipart files, or move small files into DB-inline stora
 
 Messages received while the watcher is down are not automatically reconciled.
 Run `tgshelf --config config.yaml import-channel` to scan the master channel's
-history, or add `--limit N` to inspect only its latest N messages. There is no
-persistent checkpoint or folder/filter option in the current command.
+history incrementally into root. Supply a mapped folder path to import another
+channel, `--rescan` to reconsider older messages, and `--limit N` to examine at
+most N messages oldest first. See [Import Existing Channel Files](#import-existing-channel-files)
+for filters, checkpoints and pacing.
 
 Watcher startup failures and unexpected disconnections are logged and passed to
 the notifier without stopping `serve`. A single-message failure is logged only.
@@ -587,9 +647,9 @@ operations:
   # Logical filesystem jobs that may run at once. Management jobs use user
   # accounts; downloads use the download bot/user pool settings above.
   concurrent: 4
-  # Proactive per-account Telegram write budget. 0 actions disables it.
-  # Token-bucket model: each account starts with `actions` write tokens. Every
-  # flood-sensitive Telegram write (send/copy/delete/edit/admin action) consumes
+  # Per-account budget for Telegram writes and import history metadata reads.
+  # 0 actions disables it. Each account starts with `actions` tokens. Every
+  # opted-in request (send/copy/delete/edit/admin/import history) consumes
   # one token; the bucket refills gradually from empty to full over `within`
   # seconds. When an account has no token, tgshelf uses another eligible account;
   # if every account is empty, it waits for the first token to refill.
@@ -689,9 +749,9 @@ tgshelf --config config.yaml accounts add-bot bot01 --force
 # Start HTTP, Web UI, metrics, and configured WebDAV/watcher components.
 tgshelf --config config.yaml serve
 
-# Catalog supported master-channel documents into root, including downtime gaps.
+# Incrementally catalog supported master-channel documents into root.
 tgshelf --config config.yaml import-channel
-# Inspect the latest 1000 messages, including text/unsupported media in the limit.
+# Inspect the next 1000 messages, oldest first; text/unsupported media count too.
 tgshelf --config config.yaml import-channel --limit 1000
 
 # Create folders in the virtual filesystem.
@@ -823,8 +883,5 @@ rclone mount tgshelf: /mnt/tgshelf
 
 ## TODO list
 
-- Automatic watcher reconciliation after downtime and stronger concurrent-import
-  deduplication.
-- Incremental history import into mapped folders with filters and checkpoints
-  (planned; not implemented).
+- Automatic watcher reconciliation after downtime.
 - Complete notification event coverage and explicit pool-recovery alerts.

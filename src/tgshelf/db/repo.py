@@ -9,6 +9,7 @@ unique index uq_nodes_parent_lower_name_active.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Sequence
 
 from sqlalchemy import Select, bindparam, delete, func, literal, select, text, update
@@ -84,6 +85,7 @@ class NodeRepo:
         content: bytes | None = None,
         info: dict[str, Any] | None = None,
         node_id: str | None = None,
+        ctime: datetime | None = None,
     ) -> Node:
         """Insert a node; generated ids retry on the (astronomically rare) PK
         collision, an ACTIVE same-name sibling raises DuplicateNameError."""
@@ -104,6 +106,8 @@ class NodeRepo:
                 content=content,
                 info=info or {},
             )
+            if ctime is not None:
+                values["ctime"] = ctime
             try:
                 # Core INSERT..RETURNING inside a savepoint: on failure nothing
                 # pending is left in the session, so retrying is clean
@@ -295,6 +299,35 @@ class NodeRepo:
             .order_by(Node.name)
         )
         return result.scalars().all()
+
+    async def lock_import_message(self, channel_id: int, message_id: int) -> None:
+        from tgshelf.db.import_progress import import_message_lock
+        await import_message_lock(self.session, channel_id, message_id)
+
+    async def lock_import_destination(self, folder_id: str) -> None:
+        locked = set()
+        while True:
+            ids = {folder_id, *(node.id for node in await self.ancestors(folder_id))}
+            if ids <= locked:
+                return
+            rows = await self.session.scalars(select(Node.id).where(Node.id.in_(ids - locked))
+                .order_by(Node.id).with_for_update(read=True))
+            acquired = set(rows)
+            if folder_id not in locked | acquired:
+                return  # The caller validates a missing/purged destination.
+            locked.update(acquired)
+            # A move can change inheritance between discovering and locking the
+            # chain. Re-read until every current ancestor is protected.
+
+    async def files_by_messages(self, channel_id: int, message_ids: Sequence[int]) -> dict[int, Node]:
+        owners = {}
+        ids = list(set(message_ids))
+        for start in range(0, len(ids), _BULK_QUERY_BATCH_SIZE):
+            rows = await self.session.execute(select(Part.message_id, Node).join(Node, Node.id == Part.file_id)
+                .where(Part.channel_id == channel_id, Part.message_id.in_(ids[start:start + _BULK_QUERY_BATCH_SIZE])))
+            for message_id, node in rows:
+                owners.setdefault(message_id, node)
+        return owners
 
     async def get_file_by_message(self, channel_id: int, message_id: int) -> Node | None:
         """The file that owns a given Telegram message (dedupe for imports)."""

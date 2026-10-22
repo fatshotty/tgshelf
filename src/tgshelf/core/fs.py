@@ -1591,6 +1591,61 @@ class FileSystem:
 
     # -- import / merge -----------------------------------------------------
 
+    async def catalog_channel_file(self, channel_id, entry, *, parent_id, operation_context, run_lease=None):
+        """Publish normalized metadata without another Telegram request."""
+        from tgshelf.core.access import NoAuthorizedAccount
+        from tgshelf.core.import_channel import ImportResult, ImportDestinationChanged
+        if operation_context is None or not any(
+            r.channel_id == channel_id and r.mode in ('read', 'write')
+            for r in operation_context.snapshot.requirements
+        ):
+            raise NoAuthorizedAccount('Import requires an admitted read context')
+        if entry.media_kind != 'document':
+            return ImportResult(None, 'unsupported')
+        source_name = entry.filename or f'file_{entry.message_id}'
+        if source_name in ('.', '..') or '/' in source_name or '\x00' in source_name:
+            raise ValueError('Invalid Telegram filename: expected a single logical path component')
+        await self.repo.lock_import_message(channel_id, entry.message_id)
+        await self.repo.lock_import_destination(parent_id)
+        parent = await self.repo.get(parent_id)
+        if parent is None or not parent.is_folder or parent.state != 'ACTIVE':
+            raise ImportDestinationChanged('Import destination is not an active folder')
+        if await self.effective_channel(parent_id) != channel_id:
+            raise ImportDestinationChanged('Import destination channel changed')
+        already = await self.repo.get_file_by_message(channel_id, entry.message_id)
+        if already is not None:
+            await self.repo.session.commit()
+            return ImportResult(already, 'already_cataloged')
+        dot = source_name.rfind('.')
+        stem, suffix = (source_name[:dot], source_name[dot:]) if dot > 0 else (source_name, '')
+        collision_name = f'{stem} - msg_{entry.message_id}{suffix}'
+        desired = source_name
+        if await self.repo.get_child_by_name(parent_id, desired, state='ACTIVE') is not None:
+            desired = collision_name
+        while True:
+            name = desired if desired == source_name else await self._available_child_name(parent_id, desired)
+            try:
+                node = await self.repo.create(name=name, parent_id=parent_id, is_folder=False,
+                    mime=entry.mime or DEFAULT_MIME, channel_id=channel_id, state='ACTIVE',
+                    size=entry.size, ctime=entry.date)
+                break
+            except DuplicateNameError:
+                # Another distinct message can claim the same sibling name.
+                desired = collision_name
+                continue
+        await self.repo.add_part(node.id, idx=0, channel_id=channel_id, message_id=entry.message_id,
+            doc_id=entry.doc_id, size=entry.size, original_filename=entry.filename)
+        if run_lease is not None:
+            await run_lease.check()
+        await self.repo.session.commit()
+        if self._plugins_enabled():
+            try:
+                await self._run_after_plugin('after_file_import', operation='file_import', node=node,
+                    new_parent_id=parent_id, new_path=await self.path_of(node.id))
+            except Exception:
+                log.exception('[import] file=%r message=%s reason=after_import_hook_failed', name, entry.message_id)
+        return ImportResult(node, 'imported')
+
     @managed("import")
     async def import_message(
         self,
@@ -1615,6 +1670,13 @@ class FileSystem:
         ref = await self._gateway.get_document(channel_id, message_id)
         if ref is None:
             return None  # not a file
+
+        # Share duplicate protection with normalized history imports and other watchers.
+        await self.repo.lock_import_message(channel_id, message_id)
+        already = await self.repo.get_file_by_message(channel_id, message_id)
+        if already is not None:
+            await self.repo.session.commit()
+            return already
 
         name = name or ref.filename or f"file_{message_id}"
         mime = mime or ref.mime or DEFAULT_MIME

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Sequence
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tgshelf.db.models import OperationJob, OperationJobItem
@@ -55,16 +55,20 @@ class OperationJobRepo:
         await self.session.commit()
 
     async def finish_item(
-        self, job_id: str, position: int, state: str, error: str | None = None
+        self, job_id: str, position: int, state: str, error: str | None = None, *,
+        account_name=None, error_code=None, error_channel_id=None,
     ) -> None:
         if state not in ("succeeded", "failed", "skipped"):
             raise ValueError(f"invalid terminal job item state: {state}")
-        item = await self._required_item(job_id, position)
-        job = await self._required_job(job_id)
-        item.state = state
-        item.error = error
-        item.finished_at = datetime.now().astimezone()
-        setattr(job, state, getattr(job, state) + 1)
+        result = await self.session.execute(update(OperationJobItem).where(
+            OperationJobItem.job_id == job_id, OperationJobItem.position == position,
+            OperationJobItem.state.in_(("pending", "running")),
+        ).values(state=state, error=error, account_name=account_name,
+                 error_code=error_code, error_channel_id=error_channel_id,
+                 finished_at=datetime.now().astimezone()).returning(OperationJobItem.job_id))
+        if result.scalar_one_or_none() is not None:
+            await self.session.execute(update(OperationJob).where(OperationJob.id == job_id).values(
+                **{state: getattr(OperationJob, state) + 1}))
         await self.session.commit()
 
     async def finish_job(self, job_id: str, state: str, error: str | None = None) -> None:

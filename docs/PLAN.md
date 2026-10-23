@@ -50,7 +50,8 @@ Important blocks:
 - `download`: multi-bot settings, fallback policy, chunk timeout, memory soft
   limit.
 - `operations`: logical job concurrency plus the per-account Telegram write
-  token bucket (`actions` over `within` seconds).
+  token bucket (`actions` over `within` seconds), also used explicitly by
+  channel-import metadata reads.
 - `http`: aiohttp listener and auth settings.
 - `strm`: `.strm` generation settings.
 - `changes_feed`: PostgreSQL change table/NOTIFY toggle.
@@ -69,6 +70,9 @@ Core tables:
 - `tg_sessions`: account and bot session metadata plus stored StringSession when
   configured for DB-backed sessions.
 - `upload_states`: best-effort upload resume state.
+- `channel_import_progress` (migration `0006`): exactly `folder_id`, `channel_id`,
+  `last_scanned_message_id`, `updated_at`; compound folder/channel primary key,
+  nonnegative monotonic cursor, folder FK with purge cascade. No item/run ledger.
 - `changes`: append-only change feed populated by PostgreSQL triggers.
 - `operation_jobs` and `operation_job_items`: durable, best-effort Web UI bulk
   move/soft-delete requests and their per-node outcomes. Node IDs and target IDs
@@ -122,10 +126,29 @@ finishes late cannot shorten, extend, or reopen quarantine.
 Leasing is weighted least-loaded with LRU tie breaks. `lease_or_wait` waits for
 the earliest usable member instead of failing when every member is cooling down.
 
-`FsExecutor` wraps filesystem operations that should be governed by
-`operations.concurrent`. It opens an operation-local DB session for each unit of
-work. Telegram management writes go through the write-aware user gateway, which
-uses the per-account token bucket to choose an eligible account per write.
+`AccessAdmission` shares one process-wide `operations.concurrent` file budget
+between management operations and uploads. `FsExecutor` opens an independent DB
+session per fan-out worker. Short DB-only policy snapshots select configured
+accounts by containing-folder channel, never file/part channel. Copy requires
+source read plus destination write; move requires write on both. Other mutations
+require write, readers require read, and bots are never management writers.
+
+PostgreSQL channel overrides (`none`, `read`, `write`) are edited only through the
+authenticated Web UI API. Missing rows allow full control for users/read for bots;
+root/master policy is non-editable even through channel aliases. Folder aliases
+share overrides. Saves affect queued files/new streams, not admitted files, cleanup
+or running streams. DB failures fail closed. Hard account masks survive cooldown,
+quarantine, alternative-account preflight and stream fallback.
+
+Preflight validates every message and known document ID with one eligible user;
+access denial retries the complete file with another eligible user. All denied
+means a whole-file skip. TEMP staging persists newly copied parts before final
+publication. Moves retain IDs and commit before deleting originals. Whole-folder
+moves are conservative all-descendants-success commit groups; recursive copy may
+report partial completion, and purge retains failed members' references. Failed
+cleanup preserves TEMP references or reports post-commit warnings; Telegram and
+PostgreSQL cannot provide a shared atomic commit. Account-bound write gateways
+retain the existing per-account pacing without choosing a different account.
 
 ## FileSystem Facade
 
@@ -137,7 +160,8 @@ Important operations:
 - read/navigation: `get`, `resolve`, `path_of`, `list_children`, `walk`, `search`;
 - tree writes: `mkdir`, `mkdirs`, `rename`, `set_channel`;
 - content: `open_read`, `write`, `edit_inline_content`;
-- Telegram imports: `import_message`;
+- Telegram imports: `import_message` for the watcher and
+  `catalog_channel_file` for admitted normalized history metadata;
 - composition: `merge_parts`, ordered part merge, and `split_parts`;
 - mutations: `move`, `copy`, `delete`, `restore`, `purge`.
 
@@ -172,6 +196,9 @@ Important rules:
 - Bot exhaustion emits warnings and either waits or falls back to user accounts
   depending on configuration.
 - PartMissing is a critical integrity failure.
+- Read preparation uses a single non-locking SELECT for metadata, inline content,
+  ordered part references and the containing-folder channel. Download-only DB
+  credentials need no row-lock/write privileges; mutation locks remain unchanged.
 
 ## HTTP And WebDAV
 
@@ -228,14 +255,58 @@ cancellation can leave an in-progress TEMP copy for the next run to retry.
 ## Watcher And Import
 
 The watcher is an optional dedicated bot configured under `telegram.main_bot`.
-It listens only to the master channel while `serve` is running and imports live
-file messages into root through `fs.import_message`.
+It starts only in `serve`, with `receive_updates=True` and an ephemeral token-based
+session outside `telegram.users` and the pools. The operator adds it as an admin
+of `telegram.upload.channel` manually. There is no separate watcher-channel setting.
+
+It listens for new direct posts and forwards in the master channel and imports
+supported Telegram document media into root through `fs.import_message`, using
+an admitted user account for metadata resolution. The facade's import wrapper
+requires root-channel read access and shares the `operations.concurrent` budget.
+Native photos are skipped. Each
+new file references one existing Telegram message; import does not transfer bytes,
+apply the inline threshold, parse/edit captions, or reconstruct multipart files.
+
+Existing channel/message references are returned unchanged, even for soft-deleted
+nodes. A case-insensitive same-name active sibling suppresses the incoming import;
+a returned deleted sibling is reactivated with the same ID and a replacement part.
+The watcher lookup does not prioritize state or restrict siblings to files.
+Watcher and CLI publication share a transaction advisory lock and duplicate
+recheck for each physical channel/message. The CLI supplies its configured plugin
+manager and runs `after_file_import` for newly committed files; the watcher does
+not currently supply a plugin manager.
 
 Files posted while the watcher is down are not automatically recovered.
-`tgshelf import-channel` performs on-demand history reconciliation through a
-user account because bots cannot reliably read channel history.
+`tgshelf import-channel [path]` catalogs the mapped folder's channel using only
+read-authorized user accounts. It specializes the access model with fresh
+admission for every history page and file publication; bots never scan history.
+It shares `operations.concurrent` across scanning/publication and opts history
+metadata attempts into the existing per-account actions/within and FloodWait
+machinery. No Telegram wait holds a database transaction.
 
-Watcher failures are never fatal to `serve`; they are logged and notified.
+Ascending bounded pages use a startup snapshot of the latest message ID.
+Completed pages advance the monotonic folder/channel checkpoint, including
+filtered, unsupported and terminal-error items. Fatal history/DB failures and
+cancellation leave the incomplete page for replay. Normal runs are incremental;
+`--rescan` starts at zero and never reduces the stored checkpoint. `--limit`
+limits examined messages oldest first, with zero meaning unlimited.
+
+Repeatable CSV extension/MIME includes combine with OR; exclusions veto them.
+Every supported document is an independent one-part file (idx=0). Native photos
+are currently unsupported. New nodes use source-message ctime and insertion
+mtime. Global channel/message dedupe includes existing multipart and deleted
+owners; collisions between distinct messages use a message-ID name suffix.
+Short per-message transaction advisory locks are shared with watcher imports.
+A dedicated session advisory lock prevents concurrent runs for the same
+folder/channel pair and requires a direct or session-pooling DB endpoint.
+Per-file reason logs accompany a final summary; file/run errors return nonzero.
+
+Watcher startup failures and unexpected terminal disconnections are logged and
+notified without terminating `serve`. Individual message failures are logged only.
+The health monitor does not recreate the watcher. Live imports are admitted
+per event; the CLI releases its history-page admission before dispatching file
+workers. See [the implementation guide](watcher-import.md) for setup, distinct
+watcher/history collision rules and limitations.
 
 ## Notifier
 

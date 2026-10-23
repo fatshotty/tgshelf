@@ -45,6 +45,21 @@ def _positive_integer(value: str) -> int:
     return int(value)
 
 
+def _import_limit(value: str) -> int:
+    if not value.isdecimal():
+        raise argparse.ArgumentTypeError('must be a non-negative integer')
+    return int(value)
+
+
+def _import_filter(value: str, *, mime: bool = False) -> str:
+    from tgshelf.core.import_filters import parse_filters
+    try:
+        parse_filters(**{'include_mime' if mime else 'include_ext': [value]})
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tgshelf",
@@ -158,10 +173,15 @@ def build_parser() -> argparse.ArgumentParser:
         elif name == "bots":
             _add_bots_subparsers(cmd)
         elif name == "import-channel":
-            cmd.add_argument(
-                "--limit", type=int, default=0,
-                help="scan only the last N messages (0 = whole history, default)",
-            )
+            cmd.add_argument('path', nargs='?', default='/', help='existing destination folder (default: /)')
+            cmd.add_argument('--rescan', action='store_true',
+                             help='reconsider all historical files; already cataloged messages are skipped')
+            cmd.add_argument('--limit', type=_import_limit, default=0,
+                             help='examine at most N messages, oldest first after the checkpoint (0: unlimited)')
+            for flag in ('include-ext', 'exclude-ext', 'include-mime', 'exclude-mime'):
+                converter = (lambda value: _import_filter(value, mime=True)) if flag.endswith('mime') else _import_filter
+                cmd.add_argument('--' + flag, action='append', default=[], type=converter,
+                    metavar='VALUES', help='comma-separated values; repeatable; includes use OR, exclusions win')
     return parser
 
 

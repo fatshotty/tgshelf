@@ -4,8 +4,8 @@ Every raw call goes through `_with_middleware`: a per-client semaphore bounds
 concurrent transmissions, short FloodWaits are slept-and-retried inline, long
 ones surface as FloodCooldown for the pool, transient server errors get a
 bounded exponential backoff, and the rest become typed domain errors. The
-proactive rate limiter is opt-in for Telegram write operations only; reads,
-downloads, and SaveBigFilePart upload chunks must stay unlimited. The raw
+proactive rate limiter is opt-in for Telegram writes and explicit channel-import
+history reads; downloads and SaveBigFilePart upload chunks remain exempt. The raw
 upload/download/forward methods implement the Gateway protocol so engines never
 touch telethon — they are exercised by manual smoke tests (real Telegram).
 """
@@ -16,6 +16,7 @@ import asyncio
 import copy
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 log = logging.getLogger("tgshelf.client")
@@ -37,7 +38,7 @@ from telethon.tl.types import (
 
 from tgshelf.constants import CHUNK_SIZE
 from tgshelf.telegram.errors import FloodCooldown, translate_telethon_error
-from tgshelf.telegram.gateway import DocRef
+from tgshelf.telegram.gateway import DocRef, HistoryEntry, HistoryPage
 
 # transient server-side failures worth a bounded retry (RpcCallFailError is a
 # ServerError subclass, so this covers it too)
@@ -102,14 +103,13 @@ class TgClient:
             transient = 0
             floods = 0
             while True:
-                # Proactive per-account write limit: bench the account before
-                # Telegram floods it (reuses the FloodCooldown failover path).
-                # Read/download calls and SaveBigFilePart upload chunks are not
-                # proactively limited; they still handle real FloodWait errors.
+                # Proactive per-account budget for opted-in writes and import
+                # history metadata. Other reads and upload chunks only respond
+                # to real FloodWait errors.
                 if rate_limit and self._rate_limiter is not None:
                     wait = self._rate_limiter.acquire(self.name)
                     if wait > 0:
-                        log.debug("[ratelimit] '%s' write bucket empty; waiting %.1fs", self.name, wait)
+                        log.debug("[ratelimit] '%s' request bucket empty; waiting %.1fs", self.name, wait)
                         await self._sleep(wait)
                         continue
                 try:
@@ -144,6 +144,53 @@ class TgClient:
                     raise
 
     # -- gateway: reads ----------------------------------------------------
+
+    async def _import_history_request(self, channel_id: int, *, offset_id: int,
+                                      limit: int, add_offset: int):
+        try:
+            peer = await self._with_middleware(
+                lambda: self._client.get_input_entity(channel_id), rate_limit=True)
+        except ValueError as exc:
+            from tgshelf.telegram.errors import ChannelUnavailable
+            raise ChannelUnavailable(
+                f'account {self.name} cannot resolve channel {channel_id}', membership_hint=False) from exc
+        return await self.invoke(functions.messages.GetHistoryRequest(
+            peer=peer, offset_id=offset_id, offset_date=None, add_offset=add_offset,
+            limit=limit, max_id=0, min_id=0, hash=0), rate_limit=True)
+
+    async def latest_history_id(self, channel_id: int) -> int:
+        result = await self._import_history_request(channel_id, offset_id=0, limit=1, add_offset=0)
+        return max((m.id for m in result.messages), default=0)
+
+    async def history_page(self, channel_id: int, *, after_id: int,
+                           through_id: int, limit: int) -> HistoryPage:
+        if after_id < 0 or through_id < after_id or not 1 <= limit <= 100:
+            raise ValueError('History requires 0 <= after_id <= through_id and 1 <= limit <= 100')
+        if after_id == through_id:
+            return HistoryPage((), through_id, True)
+        # Match Telethon's reverse-history offset strategy. Keep min/max bounds
+        # local: Telegram can return empty slices for low server-side bounds.
+        result = await self._import_history_request(
+            channel_id, offset_id=after_id + 1, limit=limit, add_offset=-limit)
+        messages = sorted({m.id: m for m in result.messages if m.id > after_id}.values(), key=lambda m: m.id)
+        exhausted = not messages or any(m.id >= through_id for m in messages)
+        selected = [m for m in messages if m.id <= through_id]
+        entries = []
+        for message in selected:
+            media = getattr(message, 'media', None)
+            doc = getattr(message, 'document', None) or getattr(media, 'document', None)
+            supported = doc is not None and hasattr(doc, 'size')
+            entries.append(HistoryEntry(
+                message_id=message.id,
+                date=getattr(message, 'date', None) or datetime.fromtimestamp(0, timezone.utc),
+                filename=_filename_of(doc) if supported else None,
+                mime=getattr(doc, 'mime_type', None) if supported else None,
+                doc_id=doc.id if supported else None,
+                size=doc.size if supported else 0,
+                media_kind='document' if supported else ('unsupported' if media else 'none'),
+            ))
+        boundary = through_id if exhausted else entries[-1].message_id
+        return HistoryPage(tuple(entries), boundary, exhausted)
 
     async def get_document(self, channel_id: int, message_id: int) -> DocRef | None:
         message = await self._with_middleware(

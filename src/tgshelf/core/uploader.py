@@ -78,12 +78,56 @@ class Uploader:
         caption_template: str = DEFAULT_CAPTION_TEMPLATE,
         node_id: str = "",
         parent_path: str = "",
+        operation_context=None,
     ) -> UploadResult:
-        member = self._pool.lease_one()
+        probe_stream = None
+        if operation_context is not None and operation_context.member is None:
+            # Probe inline bodies before requiring a live account, but only
+            # after the facade has admitted the immutable write snapshot.
+            original_factory = source_factory
+            probe_stream = aiter(source_factory())
+            buffered = bytearray()
+            try:
+                while len(buffered) <= min_size:
+                    try:
+                        buffered.extend(await anext(probe_stream))
+                    except StopAsyncIteration:
+                        if hasattr(probe_stream, "aclose"):
+                            await probe_stream.aclose()
+                        return UploadResult(len(buffered), inline_content=bytes(buffered))
+                from tgshelf.core.operations import recovery_wait
+                while operation_context.member is None:
+                    member = self._pool.replace(allowed_names=operation_context.snapshot.user_accounts)
+                    if member is not None:
+                        self._pool.acquire(member)
+                        operation_context.member = member
+                        break
+                    wait = recovery_wait(self._pool, operation_context.snapshot.user_accounts)
+                    if wait is None:
+                        raise NoUploadAccount("No authorized user account available for upload")
+                    await operation_context.admission.sleep(max(wait, 0))
+            except BaseException:
+                if hasattr(probe_stream, "aclose"):
+                    await probe_stream.aclose()
+                raise
+            first = True
+            def replay_factory():
+                nonlocal first
+                if not first:
+                    return original_factory()
+                first = False
+                async def replay():
+                    yield bytes(buffered)
+                    async for chunk in probe_stream:
+                        yield chunk
+                return replay()
+            source_factory = replay_factory
+        member = operation_context.member if operation_context is not None else self._pool.lease_one()
         if member is None:
             raise NoUploadAccount("no user account available for upload")
 
-        self._pool.acquire(member)
+        if operation_context is None:
+            self._pool.acquire(member)
         try:
             if on_account is not None:
                 await _maybe_await(on_account(member.name))
@@ -139,7 +183,10 @@ class Uploader:
                     parent_path=parent_path,
                 )
         finally:
-            self._pool.release(member)
+            if operation_context is None:
+                self._pool.release(member)
+            if probe_stream is not None and hasattr(probe_stream, "aclose"):
+                await probe_stream.aclose()
 
     async def _refresh_member_caps(self, member: PoolMember) -> bool:
         if self._premium_check is None:

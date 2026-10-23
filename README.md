@@ -14,7 +14,9 @@ aiohttp APIs, HTTP download endpoints, WebDAV/rclone, and a React Web UI.
 - [Stack](#stack)
 - [Performance Notes](#performance-notes)
 - [Telegram Channels Bound To Folders](#telegram-channels-bound-to-folders)
+- [Import Existing Channel Files](#import-existing-channel-files)
 - [Telegram Accounts And Bots](#telegram-accounts-and-bots)
+- [Live Cataloging And Channel History Import](#live-cataloging-and-channel-history-import)
 - [Development Setup](#development-setup)
 - [Docker](#docker)
 - [Developing Plugins](#developing-plugins)
@@ -40,6 +42,8 @@ aiohttp APIs, HTTP download endpoints, WebDAV/rclone, and a React Web UI.
   reorder parts.
 - CLI workflows for accounts/sessions, filesystem operations, sync, download,
   `.strm` generation, and bot membership management.
+- Optional live cataloging of documents posted or forwarded to the master
+  Telegram channel, plus incremental history import into mapped folders.
 - Web UI for browsing, search, metrics, tree management, inline text editing,
   Telegram-backed file-part management, and durable bulk move/soft-delete jobs
   with per-item status and errors.
@@ -96,29 +100,92 @@ Example:
 tgshelf does not create Telegram channels. Channels must already exist and must
 be configured manually in Telegram before they are used by tgshelf.
 
-tgshelf does not currently rebuild a channel's history. If a mapped Telegram
-channel already contains files, those files are not cataloged automatically.
-tgshelf manages only new files uploaded through tgshelf after the channel has
-been configured.
+Files already present in a mapped Telegram channel can be cataloged manually
+with `tgshelf import-channel /path/to/folder`. This does not run automatically.
 
 Changing the channel associated with a folder affects new uploads, but it does
 not automatically move files that were already stored. Existing Telegram file
 parts remain in the channel where they were created.
+
+## Import Existing Channel Files
+
+```sh
+tgshelf import-channel /path/to/folder \
+  --include-mime "video,audio" --exclude-mime "image" --exclude-ext "pdf,txt"
+tgshelf import-channel /path/to/folder --rescan
+```
+
+The destination must be an existing active folder. Its effective channel is
+used, including an inherited mapping; the omitted path defaults to `/`.
+Each supported Telegram document becomes one independent file with one part.
+Names, captions and albums never imply multipart reconstruction. Document-backed
+images, audio and video are supported; native Telegram photos and other unsupported
+media are skipped with a warning. File creation time comes from the Telegram
+message; modification time records insertion into tgshelf.
+
+Filter options accept comma-separated values and can be repeated. Extensions are
+case-insensitive, with or without a leading dot; compound extensions such as
+`tar.gz` are supported. MIME filters accept families (`video` or `video/*`) and
+exact types (`audio/mpeg`). With includes, a matching extension **or** MIME is
+enough. Any exclusion vetoes inclusion. Without includes, every supported file
+is eligible unless excluded. Unknown metadata does not match its filter group.
+
+The first run reads the complete history up to the latest message observed at
+startup. Later runs examine only messages after the stored checkpoint, including
+when filters change. Filtered files and terminal per-file errors are passed over;
+`--rescan` starts again from the beginning and imports previously missing files.
+Already cataloged physical messages are skipped globally, including files moved
+to another folder, soft-deleted files and existing multipart owners. A different
+message with the same name receives a deterministic ` - msg_<id>` suffix.
+
+Progress is committed after complete ascending pages. If a page fails or the
+command is interrupted, the next run replays that page and deduplicates files
+already committed. A rescan never lowers the normal checkpoint; repeat
+`--rescan` explicitly to finish an interrupted rescan. `--limit N` examines at
+most N messages, oldest first after the starting checkpoint; 0 means unlimited.
+This replaces the former newest-N limit behavior so limited imports cannot skip
+older messages.
+
+Only configured user accounts admitted for read or write access to the channel
+can read history; bots are excluded. Every page and file publication gets fresh
+permission admission. Scanner and workers share `operations.concurrent`.
+Import history metadata requests use the per-account `operations.actions/within`
+budget and existing FloodWait thresholds/cooldowns. Other Telegram reads keep
+their current pacing behavior.
+
+Migration `0006` adds `channel_import_progress` with exactly four columns:
+`folder_id`, `channel_id`, `last_scanned_message_id`, `updated_at`. The folder and
+channel form its primary key. Apply migrations before running the command.
+Concurrent runs for the same pair are rejected using a PostgreSQL session
+advisory lock: connect directly or through a session-pooling endpoint, rather
+than a transaction-pooling endpoint. No transaction stays open while waiting
+for Telegram. Different destinations share short message locks to prevent
+duplicate publication, including races with the live watcher.
+
+Progress logs use `[import]` and include the file, channel, message and reason
+for each import, duplicate, filtered item or error. The final summary reports
+counts, checkpoint and completion/limit status. Exit codes are 0 for a successful
+run (including exclusions), 1 for file/run errors, and 2 for invalid arguments.
 
 ## Telegram Accounts And Bots
 
 tgshelf requires at least one Telegram user account. User accounts handle
 read/write operations: uploads, copies, moves, deletes, and maintenance.
 
-Bots are optional. When configured, they are used only for downloads and
-streaming, so they may have read-only access to mapped channels.
+Bots in `telegram.users` are optional download/streaming pool members and may
+have read-only access to mapped channels. The separate `telegram.main_bot` is an
+optional live watcher, and `telegram.notify.bot_token` enables alert delivery
+through the Telegram Bot HTTP API.
 
 Multiple user accounts and multiple bots can be configured at the same time.
 tgshelf rotates them according to the operation type to distribute load and
 reduce the risk of flood waits.
 
-All user accounts must have read/write access to every mapped channel. Bots, if
-present, must be able to read all mapped channels.
+Accounts may have access to different mapped channels. Configure their logical
+read/full-control permissions in the Web UI's Channel access page; selected
+accounts must also possess the corresponding real Telegram access rights.
+Add the dedicated watcher as an administrator of the master channel manually;
+the alert bot must be allowed to post to its configured destination.
 
 Without bots, downloads and streaming can use user accounts by enabling:
 
@@ -126,6 +193,34 @@ Without bots, downloads and streaming can use user accounts by enabling:
 download:
   allow_user_fallback: true
 ```
+
+## Live Cataloging And Channel History Import
+
+When `telegram.main_bot` is configured, `serve` starts a dedicated Telethon bot
+that listens for new messages in `telegram.upload.channel`. Files posted directly
+or forwarded there are cataloged into `/` through `FileSystem.import_message`.
+The watcher uses its own token and an ephemeral session, stays outside the
+download pools, and resolves document metadata through an admitted user account.
+Each live import uses the shared `operations.concurrent` budget and requires
+read access to the root's channel. The bot requires no `accounts setup` entry
+for itself.
+
+Only Telegram document media are currently imported. Native Telegram photos and
+other unsupported media are skipped. Each new file references one existing
+Telegram message; import does not transfer payload bytes, interpret captions,
+reconstruct folders or multipart files, or move small files into DB-inline storage.
+
+Messages received while the watcher is down are not automatically reconciled.
+Run `tgshelf --config config.yaml import-channel` to scan the master channel's
+history incrementally into root. Supply a mapped folder path to import another
+channel, `--rescan` to reconsider older messages, and `--limit N` to examine at
+most N messages oldest first. See [Import Existing Channel Files](#import-existing-channel-files)
+for filters, checkpoints and pacing.
+
+Watcher startup failures and unexpected disconnections are logged and passed to
+the notifier without stopping `serve`. A single-message failure is logged only.
+See [the import guide](docs/watcher-import.md) for setup, duplicate/name collision
+rules, recovery, and current limitations.
 
 ## Development Setup
 
@@ -472,7 +567,8 @@ telegram:
     channel: -1001234567890
 
   # Optional dedicated watcher bot. `serve` starts it with receive_updates=True
-  # and imports new files posted to the master channel. It must be a member/admin.
+  # and imports supported files posted/forwarded to the master into root.
+  # Use a separate bot outside telegram.users; add it as master-channel admin.
   main_bot:
     api_id: 123456      # dummy
     api_hash: "0123456789abcdef0123456789abcdef"  # dummy
@@ -551,9 +647,9 @@ operations:
   # Logical filesystem jobs that may run at once. Management jobs use user
   # accounts; downloads use the download bot/user pool settings above.
   concurrent: 4
-  # Proactive per-account Telegram write budget. 0 actions disables it.
-  # Token-bucket model: each account starts with `actions` write tokens. Every
-  # flood-sensitive Telegram write (send/copy/delete/edit/admin action) consumes
+  # Per-account budget for Telegram writes and import history metadata reads.
+  # 0 actions disables it. Each account starts with `actions` tokens. Every
+  # opted-in request (send/copy/delete/edit/admin/import history) consumes
   # one token; the bucket refills gradually from empty to full over `within`
   # seconds. When an account has no token, tgshelf uses another eligible account;
   # if every account is empty, it waits for the first token to refill.
@@ -604,9 +700,12 @@ selection or status read after the deadline returns it to service, without a
 restart or `tgshelf bots check`. A longer Telegram FloodWait cooldown continues
 to apply independently after quarantine expires.
 
-The `telegram.main_bot` and `telegram.notify` blocks are reserved for future
-work. tgshelf does not yet manage a bot that listens to channel messages and
-catalogs them automatically, and Telegram notifications are not wired yet.
+`telegram.main_bot` enables live master-channel cataloging while `serve` runs;
+omit the block or set it to `null` to disable it. A populated block requires
+`api_id`, `api_hash`, and `bot_token`. `telegram.notify.bot_token` independently
+enables best-effort Telegram alerts; an empty token keeps alerts in local logs.
+An empty notify destination defaults to the master channel. The two features
+are already wired, and enabling one does not enable the other.
 
 The `DB` environment variable overrides the `db` key, which is useful for
 deployment-specific database URLs.
@@ -647,8 +746,13 @@ tgshelf --config config.yaml accounts delete-session bot01
 # session that they may already have loaded.
 tgshelf --config config.yaml accounts add-bot bot01 --force
 
-# Start the HTTP API, Web UI, metrics, and enabled WebDAV surfaces.
+# Start HTTP, Web UI, metrics, and configured WebDAV/watcher components.
 tgshelf --config config.yaml serve
+
+# Incrementally catalog supported master-channel documents into root.
+tgshelf --config config.yaml import-channel
+# Inspect the next 1000 messages, oldest first; text/unsupported media count too.
+tgshelf --config config.yaml import-channel --limit 1000
 
 # Create folders in the virtual filesystem.
 tgshelf --config config.yaml mkdir /folder/sub-folder
@@ -720,6 +824,53 @@ The summary adds `stopped_by_signal=true`. Press `Ctrl+C` again only for an
 emergency forced cancellation; it may leave an in-progress copy as a TEMP node,
 which the next mirror run does not treat as a valid backup copy.
 
+### Telegram account access
+
+Configure account permissions in **Channel access** in the Web UI. Permissions
+are stored in PostgreSQL, not YAML. The grid lists active folders with an explicit
+`channel_id`; folders sharing a channel share the same policy. Inherited folders
+use their nearest mapped ancestor (or the configured master channel).
+
+Missing overrides allow full control for user accounts and reading for bots.
+Choose None, Read, or Full control for users; bots can only read or be denied.
+Full control includes reading. Root/master access is fixed and cannot be changed,
+including through aliases mapped to the master channel. These settings select
+Telegram service accounts: they are not per-Web-UI-login ACLs and do not grant
+actual Telegram membership or administrator rights.
+
+Copy uses accounts that can read the source folder and write the destination;
+move requires write access to both. Upload, rename, delete, restore, purge and
+metadata edits require write access. Download/stream readers (including fallback
+users) require read access. File and part channel IDs do not participate in policy
+selection. Before copying/moving a Telegram-backed file, one authorized account
+must successfully read **every** part and validate its document ID. On access
+denial another eligible account retries the complete preflight. If none can read
+all parts, that file is skipped (`part_access_denied`) without creating a partial
+copy; missing/corrupt parts and transient errors are failures, not access skips.
+
+Policy is read immediately before each file starts. Saved changes affect queued
+files and new streams immediately, but not an already admitted file, its cleanup,
+or an existing stream and its reader replacements. A DB error fails closed.
+Stream/download preparation uses non-locking SELECT queries, so this read path
+works with SELECT-only database credentials, including access to `channel_access`.
+One process-wide `operations.concurrent` budget covers management jobs and uploads;
+download concurrency remains separate. Multiple processes have independent budgets.
+
+Transfers stage complete files before publishing them. Moves preserve node IDs
+and delete original Telegram messages only after the final DB commit. Whole-folder
+moves publish only when every descendant succeeds; otherwise the source tree stays
+intact. Recursive copies can have partial results, reported as failures. WebDAV
+overwrite keeps the old target active until the replacement is complete. Failed
+staging cleanup retains TEMP metadata/message references; failed folder-copy
+staging may retain an unpublished TEMP tree for operator recovery. Original-message
+cleanup failures appear as warnings on successful jobs. There is an unavoidable
+crash window between Telegram accepting a message and recording its ID in the DB;
+there is no cross-system atomic transaction or automatic orphan reconciliation.
+
+Apply Alembic migrations before starting the updated server. Migration `0004`
+adds access overrides; `0005` adds copy jobs and per-item diagnostics. Downgrading
+`0005` refuses while copy-job history exists rather than deleting history.
+
 Example rclone WebDAV remote:
 
 ```sh
@@ -732,6 +883,5 @@ rclone mount tgshelf: /mnt/tgshelf
 
 ## TODO list
 
-- Manage the Telegram bot that listens to channel messages and catalogs them
-  automatically.
-- Wire Telegram notifications.
+- Automatic watcher reconciliation after downtime.
+- Complete notification event coverage and explicit pool-recovery alerts.

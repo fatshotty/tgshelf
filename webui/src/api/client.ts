@@ -18,6 +18,8 @@ import type {
   OperationJobPage,
   OperationJobState,
   OperationKind,
+  AccessGrid,
+  AccessMode,
 } from './types'
 
 export class ApiError extends Error {
@@ -65,6 +67,11 @@ async function request<T>(
 const id = (s: string) => encodeURIComponent(s)
 
 export const api = {
+  getChannelAccess: () => request<AccessGrid>('GET', '/api/v1/channel-access'),
+  setChannelAccess: (channelId: number, accountName: string, mode: AccessMode | null) =>
+    request<AccessGrid>('PUT', `/api/v1/channel-access/${channelId}`, {
+      body: { permissions: [{ account_name: accountName, mode }] },
+    }),
   // -- read / navigate
   getNode: (nodeId: string) => request<FsNode>('GET', `/api/v1/nodes/${id(nodeId)}`),
   listChildren: (nodeId: string, state?: 'ACTIVE' | 'DELETED' | 'TEMP') =>

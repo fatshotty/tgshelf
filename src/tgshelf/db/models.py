@@ -34,7 +34,7 @@ from tgshelf.constants import ROOT_ID
 
 STATES = ("ACTIVE", "TEMP", "DELETED")
 CHANGE_OPS = ("CREATE", "UPDATE", "MOVE", "DELETE")
-JOB_OPERATIONS = ("move", "delete")
+JOB_OPERATIONS = ("move", "copy", "delete")
 JOB_STATES = ("queued", "running", "completed", "failed", "interrupted")
 JOB_ITEM_STATES = ("pending", "running", "succeeded", "failed", "skipped")
 
@@ -124,6 +124,24 @@ class Part(Base):
     )
 
 
+class ChannelAccess(Base):
+    """Policy overrides independent of account/session storage and node lifetime."""
+
+    __tablename__ = "channel_access"
+
+    account_name: Mapped[str] = mapped_column(Text, primary_key=True)
+    channel_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    mode: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("mode IN ('none', 'read', 'write')", name="ck_channel_access_mode"),
+        Index("ix_channel_access_channel_id", "channel_id"),
+    )
+
+
 class TgSession(Base):
     __tablename__ = "tg_sessions"
 
@@ -196,7 +214,7 @@ class OperationJob(Base):
     finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
 
     __table_args__ = (
-        CheckConstraint("operation IN ('move', 'delete')", name="ck_operation_jobs_operation"),
+        CheckConstraint("operation IN ('move', 'copy', 'delete')", name="ck_operation_jobs_operation"),
         CheckConstraint(
             "state IN ('queued', 'running', 'completed', 'failed', 'interrupted')",
             name="ck_operation_jobs_state",
@@ -224,6 +242,9 @@ class OperationJobItem(Base):
     source_path: Mapped[str | None] = mapped_column(Text)
     state: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
     error: Mapped[str | None] = mapped_column(Text)
+    account_name: Mapped[str | None] = mapped_column(Text)
+    error_code: Mapped[str | None] = mapped_column(Text)
+    error_channel_id: Mapped[int | None] = mapped_column(BigInteger)
     started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
 
@@ -233,4 +254,20 @@ class OperationJobItem(Base):
             name="ck_operation_job_items_state",
         ),
         Index("ix_operation_job_items_job_position", "job_id", "position"),
+    )
+
+
+class ChannelImportProgress(Base):
+    """Completed history boundaries, independent from catalog timestamps."""
+
+    __tablename__ = 'channel_import_progress'
+
+    folder_id: Mapped[str] = mapped_column(ForeignKey('nodes.id', ondelete='CASCADE'), primary_key=True)
+    channel_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    last_scanned_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default='0')
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint('last_scanned_message_id >= 0', name='ck_channel_import_progress_nonnegative'),
     )

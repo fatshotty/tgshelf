@@ -388,12 +388,19 @@ async def _db_fs(config: Config):
     """fs with Postgres only (ls / rm)."""
     engine = create_engine(config.db)
     try:
-        async with create_session_factory(engine)() as session:
+        from tgshelf.core.access import ChannelAccessService
+        from tgshelf.core.operations import AccessAdmission, OperationScheduler
+        from tgshelf.telegram.pool import ClientPool
+        sessions = create_session_factory(engine)
+        admission = AccessAdmission(ChannelAccessService(sessions, config.telegram.users,
+            config.telegram.upload.channel), ClientPool([]), OperationScheduler(config.operations.concurrent))
+        async with sessions() as session:
             yield FileSystem(
                 NodeRepo(session),
                 master_channel=config.telegram.upload.channel,
                 min_size=config.telegram.upload.min_size,
                 caption_template=config.caption.template,
+                admission=admission,
             )
     finally:
         await engine.dispose()
@@ -426,6 +433,7 @@ async def _telegram_fs(config: Config):
                 gateway=runtime["write_gateway"],
                 caption_template=config.caption.template,
                 plugin_manager=runtime["plugin_manager"],
+                admission=runtime["admission"],
             )
     finally:
         await engine.dispose()

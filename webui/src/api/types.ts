@@ -64,7 +64,23 @@ export interface AcceptedOp {
   node_id: string
 }
 
-export type OperationKind = 'move' | 'delete'
+export type OperationKind = 'move' | 'copy' | 'delete'
+
+export type AccessMode = 'none' | 'read' | 'write'
+export interface AccessAccount { name: string; kind: 'user' | 'bot' }
+export interface AccessFolder { id: string; path: string; channel_id: number }
+export interface AccessCell {
+  account_name: string
+  channel_id: number
+  mode: AccessMode
+  is_default: boolean
+  is_locked: boolean
+}
+export interface AccessGrid {
+  accounts: AccessAccount[]
+  folders: AccessFolder[]
+  permissions: AccessCell[]
+}
 export type OperationJobState = 'queued' | 'running' | 'completed' | 'failed' | 'interrupted'
 export type OperationJobItemState = 'pending' | 'running' | 'succeeded' | 'failed' | 'skipped'
 
@@ -90,6 +106,9 @@ export interface OperationJobItem {
   source_path: string | null
   state: OperationJobItemState
   error: string | null
+  account_name: string | null
+  error_code: string | null
+  error_channel_id: number | null
   started_at: string | null
   finished_at: string | null
 }

@@ -83,9 +83,13 @@ def _domain_status(exc: Exception) -> int | None:
     from tgshelf.core.download import RangeNotSatisfiable
     from tgshelf.core.fs import InlineTooLarge, NotAFolder, NotAReadableFile
     from tgshelf.db.repo import DuplicateNameError
+    from tgshelf.core.access import NoAuthorizedAccount, LockedChannelAccess
+    from tgshelf.core.transfer import PartAccessDenied, StaleTransfer
     from tgshelf.telegram.errors import ChannelUnavailable, FloodCooldown, PartMissing
 
-    if isinstance(exc, (DuplicateNameError, InlineTooLarge)):
+    if isinstance(exc, LockedChannelAccess):
+        return 403
+    if isinstance(exc, (DuplicateNameError, InlineTooLarge, NoAuthorizedAccount, PartAccessDenied, StaleTransfer)):
         return 409
     if isinstance(exc, NotAReadableFile):
         return 404

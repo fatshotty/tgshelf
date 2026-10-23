@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError
 
 from tgshelf.constants import ROOT_ID
 from tgshelf.core import channels
+from tgshelf.core.access_ops import managed
 from tgshelf.core.captions import (
     DEFAULT_CAPTION_TEMPLATE,
     CaptionRenderContext,
@@ -123,8 +124,15 @@ class FileSystem:
         notifier: Any = None,
         caption_template: str = DEFAULT_CAPTION_TEMPLATE,
         plugin_manager: Any = None,
+        admission: Any = None,
     ):
         self.repo = repo
+        self._admission = admission
+        self._operation_context = None
+        self._prepared_transfer = None
+        self._latest_staged = None
+        self.last_account_name = None
+        self.last_warnings = []
         self._master_channel = master_channel
         self._uploader = uploader
         self._streamer = streamer
@@ -192,6 +200,7 @@ class FileSystem:
 
     # -- tree ops -----------------------------------------------------------
 
+    @managed("mkdir")
     async def mkdir(self, parent_id: str, name: str) -> Node:
         node = await self.repo.create(
             name=name, parent_id=parent_id, is_folder=True, state="ACTIVE"
@@ -212,6 +221,7 @@ class FileSystem:
             current = await self._mkdir_or_reuse(current, segment)
         return await self.repo.get(current)
 
+    @managed("mkdir")
     async def _mkdir_or_reuse(self, parent_id: str, segment: str) -> str:
         match = await self._find_child_folder(parent_id, segment)
         if match is not None:
@@ -249,6 +259,7 @@ class FileSystem:
                 return candidate
         raise DuplicateNameError(f"cannot allocate a unique name for {desired!r}")
 
+    @managed("mutation")
     async def rename(self, node_id: str, new_name: str) -> Node:
         node = await self.repo.get(node_id)
         old_mime = getattr(node, "mime", None) if node is not None else None
@@ -307,6 +318,7 @@ class FileSystem:
         await self.repo.session.commit()
         return await self.repo.get(node_id)
 
+    @managed("mutation")
     async def set_mime(self, node_id: str, mime: str | None) -> Node:
         """Set a file's mime; an empty/None mime is deduced from its filename.
         A non-empty user mime must be structurally valid (type/subtype)."""
@@ -324,6 +336,7 @@ class FileSystem:
         await self._sync_part_captions(node_id, changed_fields={"mime"})
         return await self.repo.get(node_id)
 
+    @managed("mutation")
     async def set_info_notes(self, node_id: str, notes: str) -> Node:
         """Set nodes.info["notes"] and resync captions that render {info}."""
         node = await self.repo.get(node_id)
@@ -342,10 +355,25 @@ class FileSystem:
         await self._sync_part_captions(node_id, changed_fields={"info"})
         return await self.repo.get(node_id)
 
+    @managed("inline")
+    async def update_info(self, node_id: str, patch) -> Node:
+        """Apply trusted plugin metadata through the normal write boundary."""
+        if "notes" in patch:
+            raise ValueError("use set_info_notes() to update info.notes")
+        node = await self.get(node_id)
+        if node is None:
+            raise NotAReadableFile(f"node {node_id} not found")
+        info = {**(node.info or {}), **dict(patch)}
+        await self.repo.set_fields(node_id, info=info)
+        await self.repo.session.commit()
+        return await self.get(node_id)
+
+    @managed("mutation")
     async def resync_caption(self, node_id: str) -> None:
         """Force a Telegram caption render for every part of a Telegram-backed file."""
         await self._sync_part_captions(node_id)
 
+    @managed("delete")
     async def delete(
         self, node_id: str, *, purge: bool = False, deleted_only: bool = False
     ) -> None:
@@ -416,6 +444,7 @@ class FileSystem:
             len(parts),
         )
 
+    @managed("state")
     async def _soft_delete(
         self,
         node_id: str,
@@ -471,6 +500,7 @@ class FileSystem:
                 )
         return True
 
+    @managed("state")
     async def restore(self, node_id: str) -> None:
         try:
             await self.repo.set_state_subtree(node_id, "ACTIVE", from_states=("DELETED",))
@@ -751,6 +781,9 @@ class FileSystem:
         """Move a node to a new parent. A file (or a folder's descendant files)
         whose effective channel changes has its parts physically forwarded to
         the new channel; a same-channel move is just a reparent."""
+        if self._admission is not None:
+            from tgshelf.core.transfer import TransferService
+            return await TransferService().move(self, node_id, new_parent_id)
         node = await self.ensure_move_allowed(node_id, new_parent_id)
         name, is_folder = node.name, node.is_folder  # before any rollback expires node
         hooks_enabled = self._plugins_enabled()
@@ -891,6 +924,8 @@ class FileSystem:
                 existing.name, existing.id, new_parent_id, node.id,
             )
             return existing
+        if self._admission is not None:
+            return await self._copy_file(node, new_parent_id, force_copy=force_copy)
         # single file: also via the executor (solution B) -> account-leased
         results = await self._fan_out([(node_id, new_parent_id, force_copy)], _copy_op)
         new_id = _first_result(results)
@@ -955,6 +990,16 @@ class FileSystem:
         return {child.name.lower(): child for child in children}
 
     async def _stage_file_copy(self, src: Node, dst_parent_id: str, name: str) -> Node:
+        if self._operation_context is not None:
+            from tgshelf.core.transfer import PreparedTransfer, TransferService, TransferTarget
+            target = TransferTarget(dst_parent_id, await self.effective_channel(dst_parent_id),
+                                    await self._path_of_folder(dst_parent_id))
+            prepared = self._prepared_transfer or PreparedTransfer("", ())
+            staged = await TransferService().stage(self, src, target,
+                self._operation_context, prepared, name=name,
+                expected=getattr(self, "_expected_transfer", None))
+            self._latest_staged = staged
+            return await self.repo.get(staged.staging_id)
         dest_channel = await self.effective_channel(dst_parent_id)
         content = await self.repo.content_of(src.id)
         if content is not None:
@@ -1004,6 +1049,7 @@ class FileSystem:
         await self.repo.session.commit()
         return new
 
+    @managed("copy")
     async def _copy_file(
         self,
         src: Node,
@@ -1033,6 +1079,10 @@ class FileSystem:
             )
 
         new = await self._stage_file_copy(src, dst_parent_id, name)
+        if self._latest_staged is not None:
+            from tgshelf.core.transfer import TransferService
+            await TransferService().validate(self, self._latest_staged)
+            await self.repo.set_fields(new.id, info=dict(src.info or {}))
         if planned_dest_root_id is not None:
             if planned_path is None:
                 raise ValueError("mirror copy activation requires a planned path")
@@ -1044,7 +1094,8 @@ class FileSystem:
                 raise NotAReadableFile(
                     f"mirror destination folder for {planned_path} no longer matches the plan"
                 )
-        await self.repo.set_fields(new.id, state="ACTIVE")
+        target_parent = await self.repo.get(dst_parent_id) if self._admission is not None else None
+        await self.repo.set_fields(new.id, state="TEMP" if target_parent is not None and target_parent.state == "TEMP" else "ACTIVE")
         await self.repo.session.commit()
         log.info(
             "[copy] copied file '%s' (%s) -> parent %s as '%s' (%s) force_copy=%s",
@@ -1065,6 +1116,7 @@ class FileSystem:
             )
         return copied
 
+    @managed("copy")
     async def _copy_file_replacing(
         self,
         src: Node,
@@ -1095,6 +1147,11 @@ class FileSystem:
             )
 
         new = await self._stage_file_copy(src, dst_parent_id, src.name)
+        if self._latest_staged is not None:
+            from tgshelf.core.transfer import TransferService
+            await TransferService().validate(self, self._latest_staged)
+            await self.repo.set_fields(new.id, info=dict(src.info or {}))
+            await TransferService()._replace(self, self._replacement_versions, publish=False)
         deleted = await self.repo.set_state_subtree_if_root_matches(
             old_dest_id,
             "DELETED",
@@ -1128,6 +1185,7 @@ class FileSystem:
             )
         return copied
 
+    @managed("mkdir")
     async def _ensure_folder(self, parent_id: str, name: str) -> str:
         """Reuse a same-name folder under parent (merge) or create it; return id."""
         existing = await self.repo.children(parent_id, folders_only=True)
@@ -1135,10 +1193,17 @@ class FileSystem:
         if match is not None:
             return match.id
         created = await self.repo.create(
-            name=name, parent_id=parent_id, is_folder=True, state="ACTIVE"
+            name=name, parent_id=parent_id, is_folder=True,
+            state="TEMP" if self._admission is not None and (await self.repo.get(parent_id)).state == "TEMP" else "ACTIVE"
         )
         await self.repo.session.commit()
         return created.id
+
+    async def transfer_named(self, node_id, parent_id, name, *, copy, replace_id=None):
+        """Publish a named WebDAV transfer without removing its target early."""
+        from tgshelf.core.transfer import TransferService
+        return await TransferService().named(self, node_id, parent_id, name,
+                                             copy_file=copy, replace_id=replace_id)
 
     async def _copy_folder(
         self,
@@ -1146,13 +1211,28 @@ class FileSystem:
         dst_parent_id: str,
         *,
         force_copy: bool = False,
+        staging_root: Node | None = None,
     ) -> Node:
-        mapping = {src.id: await self._ensure_folder(dst_parent_id, src.name)}
+        if self._admission is not None:
+            from tgshelf.core.access import AccessRequirement
+            await self.ensure_move_allowed(src.id, dst_parent_id)
+            reqs = [AccessRequirement(await self.effective_channel(src.id), "read"),
+                    AccessRequirement(await self.effective_channel(dst_parent_id), "write")]
+            await self.repo.session.commit()
+            async with self._admission.start(reqs, telegram_required=False):
+                pass
+        mapping = {src.id: staging_root.id if staging_root else await self._ensure_folder(dst_parent_id, src.name)}
         descendants = await self.repo.subtree(src.id, state="ACTIVE")  # shallow-first
 
         # pass 1: recreate the folder structure (parents before children)
         for node in descendants:
             if node.is_folder:
+                if self._admission is not None:
+                    reqs = [AccessRequirement(await self.effective_channel(node.id), "read"),
+                            AccessRequirement(await self.effective_channel(mapping[node.parent_id]), "write")]
+                    await self.repo.session.commit()
+                    async with self._admission.start(reqs, telegram_required=False):
+                        pass
                 mapping[node.id] = await self._ensure_folder(mapping[node.parent_id], node.name)
 
         # pass 2: copy the files into their mapped folders (fanned out)
@@ -1176,11 +1256,15 @@ class FileSystem:
                 )
                 continue
             pairs.append((node.id, parent_id, force_copy))
-        _log_failures(await self._fan_out(pairs, _copy_op), "copy")
+        results = await self._fan_out(pairs, _copy_op)
+        _log_failures(results, "copy")
+        if self._admission is not None:
+            _raise_first_error(results)
         return await self.repo.get(mapping[src.id])
 
     # -- write --------------------------------------------------------------
 
+    @managed("write")
     async def write(
         self,
         parent_id: str,
@@ -1248,7 +1332,10 @@ class FileSystem:
                 min_size=self._min_size, on_part=persist_part, on_reset=reset_parts,
                 on_account=on_account, caption_template=self._caption_template,
                 node_id=node.id, parent_path=await self._path_of_folder(parent_id),
+                **({"operation_context": self._operation_context} if self._operation_context is not None else {}),
             )
+            if self._operation_context is not None and self._operation_context.member is not None:
+                self._gateway = self._operation_context.gateway
         except BaseException:
             await self.repo.purge(node.id)  # drop TEMP (parts cascade)
             await self.repo.session.commit()
@@ -1260,9 +1347,13 @@ class FileSystem:
         # DELETED before the new becomes ACTIVE, so the partial unique index
         # (uq_nodes_parent_lower_name_active) is always satisfied.
         if overwrite:
-            old = await self.repo.get_child_by_name(parent_id, name, state="ACTIVE")
-            if old is not None and old.id != node.id:
-                await self.repo.set_state_subtree(old.id, "DELETED", from_states=("ACTIVE", "TEMP"))
+            if self._admission is not None:
+                from tgshelf.core.transfer import TransferService
+                await TransferService()._replace(self, self._replacement_versions)
+            else:
+                old = await self.repo.get_child_by_name(parent_id, name, state="ACTIVE")
+                if old is not None and old.id != node.id:
+                    await self.repo.set_state_subtree(old.id, "DELETED", from_states=("ACTIVE", "TEMP"))
         if result.inline_content is not None:
             await self.repo.set_fields(
                 node.id, content=result.inline_content, size=result.size, state="ACTIVE"
@@ -1286,6 +1377,7 @@ class FileSystem:
             )
         return await self.repo.get(node.id)
 
+    @managed("inline")
     async def replace_content(
         self, node_id: str, data: bytes, *, force: bool = False
     ) -> Node:
@@ -1349,7 +1441,10 @@ class FileSystem:
             caption_template=self._caption_template,
             node_id=node_id,
             parent_path=await self._path_of_folder(node.parent_id),
+            **({"operation_context": self._operation_context} if self._operation_context is not None else {}),
         )
+        if self._operation_context is not None and self._operation_context.member is not None:
+            self._gateway = self._operation_context.gateway
         # Drop the inline body now that the parts are durable; size follows the
         # parts. (force-path data is always > min_size, so it never stays inline.)
         await self.repo.set_fields(
@@ -1496,6 +1591,62 @@ class FileSystem:
 
     # -- import / merge -----------------------------------------------------
 
+    async def catalog_channel_file(self, channel_id, entry, *, parent_id, operation_context, run_lease=None):
+        """Publish normalized metadata without another Telegram request."""
+        from tgshelf.core.access import NoAuthorizedAccount
+        from tgshelf.core.import_channel import ImportResult, ImportDestinationChanged
+        if operation_context is None or not any(
+            r.channel_id == channel_id and r.mode in ('read', 'write')
+            for r in operation_context.snapshot.requirements
+        ):
+            raise NoAuthorizedAccount('Import requires an admitted read context')
+        if entry.media_kind != 'document':
+            return ImportResult(None, 'unsupported')
+        source_name = entry.filename or f'file_{entry.message_id}'
+        if source_name in ('.', '..') or '/' in source_name or '\x00' in source_name:
+            raise ValueError('Invalid Telegram filename: expected a single logical path component')
+        await self.repo.lock_import_message(channel_id, entry.message_id)
+        await self.repo.lock_import_destination(parent_id)
+        parent = await self.repo.get(parent_id)
+        if parent is None or not parent.is_folder or parent.state != 'ACTIVE':
+            raise ImportDestinationChanged('Import destination is not an active folder')
+        if await self.effective_channel(parent_id) != channel_id:
+            raise ImportDestinationChanged('Import destination channel changed')
+        already = await self.repo.get_file_by_message(channel_id, entry.message_id)
+        if already is not None:
+            await self.repo.session.commit()
+            return ImportResult(already, 'already_cataloged')
+        dot = source_name.rfind('.')
+        stem, suffix = (source_name[:dot], source_name[dot:]) if dot > 0 else (source_name, '')
+        collision_name = f'{stem} - msg_{entry.message_id}{suffix}'
+        desired = source_name
+        if await self.repo.get_child_by_name(parent_id, desired, state='ACTIVE') is not None:
+            desired = collision_name
+        while True:
+            name = desired if desired == source_name else await self._available_child_name(parent_id, desired)
+            try:
+                node = await self.repo.create(name=name, parent_id=parent_id, is_folder=False,
+                    mime=entry.mime or DEFAULT_MIME, channel_id=channel_id, state='ACTIVE',
+                    size=entry.size, ctime=entry.date)
+                break
+            except DuplicateNameError:
+                # Another distinct message can claim the same sibling name.
+                desired = collision_name
+                continue
+        await self.repo.add_part(node.id, idx=0, channel_id=channel_id, message_id=entry.message_id,
+            doc_id=entry.doc_id, size=entry.size, original_filename=entry.filename)
+        if run_lease is not None:
+            await run_lease.check()
+        await self.repo.session.commit()
+        if self._plugins_enabled():
+            try:
+                await self._run_after_plugin('after_file_import', operation='file_import', node=node,
+                    new_parent_id=parent_id, new_path=await self.path_of(node.id))
+            except Exception:
+                log.exception('[import] file=%r message=%s reason=after_import_hook_failed', name, entry.message_id)
+        return ImportResult(node, 'imported')
+
+    @managed("import")
     async def import_message(
         self,
         channel_id: int,
@@ -1519,6 +1670,13 @@ class FileSystem:
         ref = await self._gateway.get_document(channel_id, message_id)
         if ref is None:
             return None  # not a file
+
+        # Share duplicate protection with normalized history imports and other watchers.
+        await self.repo.lock_import_message(channel_id, message_id)
+        already = await self.repo.get_file_by_message(channel_id, message_id)
+        if already is not None:
+            await self.repo.session.commit()
+            return already
 
         name = name or ref.filename or f"file_{message_id}"
         mime = mime or ref.mime or DEFAULT_MIME
@@ -1589,13 +1747,13 @@ class FileSystem:
 
         total = len(parts)
         parent_path = await self._parent_path(node)
-        for pos, part in enumerate(parts):
+        rendered = [(part.channel_id, part.message_id, self._render_part_caption(
+            node, part, pos, total, parent_path=parent_path)) for pos, part in enumerate(parts)]
+        if self._admission is not None:
+            await self.repo.session.commit()
+        for channel_id, message_id, caption in rendered:
             await self._gateway.edit_message_caption(
-                part.channel_id,
-                part.message_id,
-                self._render_part_caption(
-                    node, part, pos, total, parent_path=parent_path
-                ),
+                channel_id, message_id, caption,
             )
 
     async def _path_of_folder(self, folder_id: str | None) -> str:
@@ -1657,6 +1815,7 @@ class FileSystem:
             ),
         )
 
+    @managed("merge")
     async def merge_parts(
         self,
         target_id: str,
@@ -1714,6 +1873,7 @@ class FileSystem:
         await self._sync_part_captions(target_id)
         return await self.repo.get(target_id)
 
+    @managed("mutation")
     async def split_parts(self, file_id: str, part_indices: Sequence[int]) -> tuple[Node, list[Node]]:
         """Extract selected parts from one file into one-part sibling files.
 
@@ -1776,6 +1936,7 @@ class FileSystem:
             await self._sync_part_captions(node.id)
         return refreshed_source, created_nodes
 
+    @managed("mutation")
     async def reorder_parts(self, file_id: str, order: Sequence[int]) -> Node:
         """Re-sequence the parts of ONE multi-part file: `order` is a permutation
         of the current part indices (e.g. [2,0,1]) giving the new position order.
@@ -1813,9 +1974,48 @@ class FileSystem:
 
     # -- read ---------------------------------------------------------------
 
+    async def prepare_read(self, node_id: str):
+        from tgshelf.core.access import AccessRequirement, NoAuthorizedAccount
+        from tgshelf.core.read import ReadSnapshot
+        from tgshelf.core.transfer import part_record
+        # One statement keeps metadata and payload references consistent without
+        # requiring write privileges or row locks on a download-only instance.
+        representation = await self.repo.read_file(node_id, self._master_channel)
+        if representation is None:
+            raise NotAReadableFile(f"node {node_id} is not a readable file")
+        node, content, channel, file_parts = representation
+        size, name, mime, mtime = node.size, node.name, node.mime, node.mtime
+        parts = tuple(part_record(p) for p in file_parts)
+        await self.repo.session.commit()
+        snapshot = await self._admission.service.snapshot([AccessRequirement(channel, "read")], allow_bots=True)
+        if content is None and self._streamer is not None:
+            if not self._streamer._reader_mask(snapshot) and not (
+                self._streamer._allow_user_fallback and snapshot.user_accounts
+            ):
+                raise NoAuthorizedAccount("No readable account under the configured fallback policy")
+        return ReadSnapshot(node_id, size, channel, parts, content, snapshot, name, mime, mtime)
+
     async def open_read(
-        self, node_id: str, start: int = 0, end: int | None = None
+        self, node_id: str, start: int = 0, end: int | None = None, *, read_snapshot=None,
     ) -> AsyncIterator[bytes]:
+        if self._admission is not None:
+            snapshot = read_snapshot or await self.prepare_read(node_id)
+            if snapshot.node_id != node_id:
+                raise ValueError("Read snapshot belongs to another file")
+            end = snapshot.size - 1 if end is None else end
+            if snapshot.content is not None:
+                if start < 0 or start > end or end >= len(snapshot.content):
+                    raise RangeNotSatisfiable(f"range {start}-{end} of size {snapshot.size}")
+                yield snapshot.content[start:end + 1]
+                return
+            plan = StreamPlan.build([p.size for p in snapshot.parts], start, end)
+            stream = self._streamer.stream(snapshot.parts, plan, snapshot.channel_id, access_snapshot=snapshot.access)
+            try:
+                async for chunk in stream:
+                    yield chunk
+            finally:
+                await stream.aclose()
+            return
         node = await self.repo.get(node_id)
         if node is None or node.is_folder or node.state != "ACTIVE":
             raise NotAReadableFile(f"node {node_id} is not a readable file")

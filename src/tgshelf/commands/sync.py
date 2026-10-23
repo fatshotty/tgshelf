@@ -155,12 +155,14 @@ def _fs(
     gateway,
     caption_template,
     plugin_manager=None,
+    admission=None,
 ) -> FileSystem:
     return FileSystem(
         NodeRepo(session), master_channel=master_channel,
         uploader=uploader, streamer=streamer, gateway=gateway, min_size=min_size,
         caption_template=caption_template,
         plugin_manager=plugin_manager,
+        admission=admission,
     )
 
 
@@ -171,7 +173,7 @@ async def sync(session_factory, uploader, *, master_channel: int, min_size: int,
                overwrite_extensions: frozenset[str] | None = None,
                state: ProgressState | None = None,
                caption_template: str = "fileName: {filename}",
-               plugin_manager=None) -> Stats:
+               plugin_manager=None, admission=None) -> Stats:
     root_dir = Path(local_dir)
     files = scan_local(local_dir)
     stats = Stats()
@@ -181,7 +183,7 @@ async def sync(session_factory, uploader, *, master_channel: int, min_size: int,
         return _fs(session, master_channel=master_channel, min_size=min_size,
                    uploader=uploader, streamer=streamer, gateway=gateway,
                    caption_template=caption_template,
-                   plugin_manager=plugin_manager)
+                   plugin_manager=plugin_manager, admission=admission)
 
     # The reference folder is created WHEN a file is processed, not up front. To
     # stay race-safe when concurrent workers need the same (or a prefix-sharing)
@@ -324,6 +326,9 @@ async def run(config: Config, args) -> int:
             pairs,
             write_limiter=write_limiter,
         )
+        # The explicit CLI width governs the same scheduler used by uploads.
+        from tgshelf.core.operations import OperationScheduler
+        runtime["admission"].scheduler = OperationScheduler(concurrent)
         stats = await sync(
             session_factory, runtime["uploader"],
             master_channel=config.telegram.upload.channel,
@@ -339,6 +344,7 @@ async def run(config: Config, args) -> int:
             state=state,
             caption_template=config.caption.template,
             plugin_manager=runtime["plugin_manager"],
+            admission=runtime["admission"],
         )
     finally:
         stop.set()

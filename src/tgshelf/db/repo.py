@@ -9,6 +9,7 @@ unique index uq_nodes_parent_lower_name_active.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Sequence
 
 from sqlalchemy import Select, bindparam, delete, func, literal, select, text, update
@@ -84,6 +85,7 @@ class NodeRepo:
         content: bytes | None = None,
         info: dict[str, Any] | None = None,
         node_id: str | None = None,
+        ctime: datetime | None = None,
     ) -> Node:
         """Insert a node; generated ids retry on the (astronomically rare) PK
         collision, an ACTIVE same-name sibling raises DuplicateNameError."""
@@ -104,6 +106,8 @@ class NodeRepo:
                 content=content,
                 info=info or {},
             )
+            if ctime is not None:
+                values["ctime"] = ctime
             try:
                 # Core INSERT..RETURNING inside a savepoint: on failure nothing
                 # pending is left in the session, so retrying is clean
@@ -138,6 +142,47 @@ class NodeRepo:
             select(Node.content).where(Node.id == node_id)
         )
         return result.scalar_one_or_none()
+
+    async def read_file(
+        self, node_id: str, master_channel: int,
+    ) -> tuple[Node, bytes | None, int, tuple[Part, ...]] | None:
+        """Materialize one file representation in a single, non-locking SELECT.
+
+        Metadata, inline bytes, ordered parts and the containing-folder channel
+        share one statement snapshot, including on SELECT-only connections.
+        Never use the file's own channel to select its permission policy.
+        """
+        folder = aliased(Node)
+        base = (
+            select(folder.id, folder.parent_id, folder.channel_id, literal(0).label("depth"))
+            .join(Node, Node.parent_id == folder.id)
+            .where(Node.id == node_id)
+            .cte("read_folders", recursive=True)
+        )
+        parent = aliased(Node)
+        ancestors = base.union_all(
+            select(parent.id, parent.parent_id, parent.channel_id, base.c.depth + 1)
+            .join(base, parent.id == base.c.parent_id)
+        )
+        channel = (
+            select(ancestors.c.channel_id)
+            .where(ancestors.c.channel_id.is_not(None))
+            .order_by(ancestors.c.depth)
+            .limit(1)
+            .scalar_subquery()
+        )
+        stmt = (
+            select(Node, Node.content, func.coalesce(channel, master_channel), Part)
+            .outerjoin(Part, (Part.file_id == Node.id) & Node.content.is_(None))
+            .where(Node.id == node_id, Node.is_folder.is_(False), Node.state == "ACTIVE")
+            .order_by(Part.idx)
+            .execution_options(populate_existing=True)
+        )
+        rows = (await self.session.execute(stmt)).all()
+        if not rows:
+            return None
+        node, content, folder_channel, _ = rows[0]
+        return node, content, folder_channel, tuple(row[3] for row in rows if row[3] is not None)
 
     async def contents_of(self, node_ids: Sequence[str]) -> dict[str, bytes | None]:
         if not node_ids:
@@ -183,7 +228,7 @@ class NodeRepo:
 
     async def parts_of(self, file_id: str) -> Sequence[Part]:
         result = await self.session.execute(
-            select(Part).where(Part.file_id == file_id).order_by(Part.idx)
+            select(Part).where(Part.file_id == file_id).order_by(Part.idx).execution_options(populate_existing=True)
         )
         return result.scalars().all()
 
@@ -234,6 +279,13 @@ class NodeRepo:
         result = await self.session.execute(nodes.union(parts))
         return {int(c) for (c,) in result.all() if c is not None}
 
+    async def explicit_channel_folders(self) -> Sequence[Node]:
+        """Only active explicit folder mappings, never file or part channels."""
+        result = await self.session.scalars(select(Node).where(
+            Node.is_folder.is_(True), Node.state == "ACTIVE", Node.channel_id.isnot(None),
+        ).order_by(Node.name, Node.id))
+        return list(result.all())
+
     async def folders_with_channel(self, channel_id: int) -> Sequence[Node]:
         """ACTIVE folders that carry this channel_id as an override — used to label
         a channel by the path(s) of the folder(s) mapped to it (create-bots UX)."""
@@ -247,6 +299,35 @@ class NodeRepo:
             .order_by(Node.name)
         )
         return result.scalars().all()
+
+    async def lock_import_message(self, channel_id: int, message_id: int) -> None:
+        from tgshelf.db.import_progress import import_message_lock
+        await import_message_lock(self.session, channel_id, message_id)
+
+    async def lock_import_destination(self, folder_id: str) -> None:
+        locked = set()
+        while True:
+            ids = {folder_id, *(node.id for node in await self.ancestors(folder_id))}
+            if ids <= locked:
+                return
+            rows = await self.session.scalars(select(Node.id).where(Node.id.in_(ids - locked))
+                .order_by(Node.id).with_for_update(read=True))
+            acquired = set(rows)
+            if folder_id not in locked | acquired:
+                return  # The caller validates a missing/purged destination.
+            locked.update(acquired)
+            # A move can change inheritance between discovering and locking the
+            # chain. Re-read until every current ancestor is protected.
+
+    async def files_by_messages(self, channel_id: int, message_ids: Sequence[int]) -> dict[int, Node]:
+        owners = {}
+        ids = list(set(message_ids))
+        for start in range(0, len(ids), _BULK_QUERY_BATCH_SIZE):
+            rows = await self.session.execute(select(Part.message_id, Node).join(Node, Node.id == Part.file_id)
+                .where(Part.channel_id == channel_id, Part.message_id.in_(ids[start:start + _BULK_QUERY_BATCH_SIZE])))
+            for message_id, node in rows:
+                owners.setdefault(message_id, node)
+        return owners
 
     async def get_file_by_message(self, channel_id: int, message_id: int) -> Node | None:
         """The file that owns a given Telegram message (dedupe for imports)."""
@@ -542,7 +623,7 @@ class NodeRepo:
         if files_only:
             stmt = stmt.where(Node.is_folder.is_(False))
         stmt = stmt.order_by(func.lower(Node.name))
-        return (await self.session.execute(stmt)).scalars().all()
+        return (await self.session.execute(stmt.execution_options(populate_existing=True))).scalars().all()
 
     async def ancestors(self, node_id: str) -> Sequence[Node]:
         """Ancestor chain of a node, root first, excluding the node itself."""
@@ -559,7 +640,7 @@ class NodeRepo:
             )
         )
         stmt = select(Node).join(cte, Node.id == cte.c.id).order_by(cte.c.depth.desc())
-        return (await self.session.execute(stmt)).scalars().all()
+        return (await self.session.execute(stmt.execution_options(populate_existing=True))).scalars().all()
 
     async def subtree(self, root_id: str, *, state: str | None = None) -> Sequence[Node]:
         """All descendants of a node (any depth), shallow first."""
@@ -570,7 +651,7 @@ class NodeRepo:
         )
         if state is not None:
             stmt = stmt.where(Node.state == state)
-        return (await self.session.execute(stmt)).scalars().all()
+        return (await self.session.execute(stmt.execution_options(populate_existing=True))).scalars().all()
 
     async def subtree_size(self, root_id: str, *, state: str = "ACTIVE") -> int:
         """Total byte size of all files in a node's subtree (root excluded),

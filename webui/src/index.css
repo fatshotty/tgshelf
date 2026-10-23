@@ -296,3 +296,7 @@ body {
   background: var(--panel); border: 1px solid var(--border); color: var(--text); max-width: 22rem;
 }
 .toast.error { border-color: #d33; color: #d33; }
+.channel-access-scroll { overflow-x: auto; }
+.channel-access-table { width: 100%; border-collapse: collapse; }
+.channel-access-table th, .channel-access-table td { padding: .75rem; text-align: left; border-bottom: 1px solid var(--border, #555); }
+.channel-access-table select { min-width: 11rem; padding: .4rem; }

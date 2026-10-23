@@ -13,14 +13,15 @@ from tgshelf.db.models import OperationJob, OperationJobItem
 
 log = logging.getLogger("tgshelf.jobs")
 
-OperationKind = Literal["move", "delete"]
+OperationKind = Literal["move", "copy", "delete"]
 
 
 class OperationJobService:
-    def __init__(self, session_factory, fs_factory, *, cleanup_after: timedelta = timedelta(days=30)):
+    def __init__(self, session_factory, fs_factory, *, cleanup_after: timedelta = timedelta(days=30), concurrent=1):
         self._session_factory = session_factory
         self._fs_factory = fs_factory
         self._cleanup_after = cleanup_after
+        self._concurrent = max(1, concurrent)
         self._tasks: dict[str, asyncio.Task] = {}
         self._cleanup_task: asyncio.Task | None = None
 
@@ -31,15 +32,15 @@ class OperationJobService:
     async def create(
         self, operation: OperationKind, node_ids: Sequence[str], parent_id: str | None = None
     ) -> OperationJob:
-        if operation not in ("move", "delete"):
-            raise ValueError("operation must be move or delete")
+        if operation not in ("move", "copy", "delete"):
+            raise ValueError("operation must be move, copy or delete")
         unique_ids = tuple(dict.fromkeys(node_ids))
         if not unique_ids:
             raise ValueError("node_ids must be non-empty")
-        if operation == "move" and not parent_id:
-            raise ValueError("parent_id is required for move")
+        if operation in ("move", "copy") and not parent_id:
+            raise ValueError("parent_id is required for move or copy")
         if operation == "delete" and parent_id is not None:
-            raise ValueError("parent_id is only valid for move")
+            raise ValueError("parent_id is only valid for move or copy")
 
         async with self._session_factory() as session:
             fs = self._fs_factory(session)
@@ -146,9 +147,7 @@ class OperationJobService:
                 items = await repo.items(job_id)
 
             log.info("[job] job_id=%s operation=%s state=started", job_id, job.operation)
-            for item in items:
-                if item.state != "pending":
-                    continue
+            async def process(item):
                 async with self._session_factory() as session:
                     repo = OperationJobRepo(session)
                     await repo.mark_item_running(job_id, item.position)
@@ -160,20 +159,47 @@ class OperationJobService:
                             raise ValueError(f"node {item.node_id} not found")
                         if job.operation == "move":
                             await fs.move(item.node_id, job.parent_id)
+                        elif job.operation == "copy":
+                            await fs.copy(item.node_id, job.parent_id)
                         else:
                             await fs.delete(item.node_id, purge=False)
+                        account_name = getattr(fs, "last_account_name", None)
+                        warnings = getattr(fs, "last_warnings", ())
                     async with self._session_factory() as session:
-                        await OperationJobRepo(session).finish_item(job_id, item.position, "succeeded")
+                        await OperationJobRepo(session).finish_item(job_id, item.position, "succeeded",
+                            "; ".join(warnings) or None, account_name=account_name,
+                            error_code="cleanup_warning" if warnings else None)
                     log.info("[job] job_id=%s node_id=%s item_state=succeeded", job_id, item.node_id)
                 except Exception as exc:  # noqa: BLE001 - one item must not stop the job
+                    from tgshelf.core.transfer import PartAccessDenied
+                    state = "skipped" if isinstance(exc, PartAccessDenied) else "failed"
                     async with self._session_factory() as session:
                         await OperationJobRepo(session).finish_item(
-                            job_id, item.position, "failed", str(exc)
+                            job_id, item.position, state, str(exc),
+                            error_code=getattr(exc, "code", None),
+                            error_channel_id=getattr(exc, "channel_id", None),
                         )
                     log.warning(
-                        "[job] job_id=%s node_id=%s item_state=failed error=%s",
-                        job_id, item.node_id, exc,
+                        "[job] job_id=%s node_id=%s item_state=%s error=%s",
+                        job_id, item.node_id, state, exc,
                     )
+
+            queue = asyncio.Queue()
+            for item in items:
+                if item.state == "pending":
+                    queue.put_nowait(item)
+            async def worker():
+                while not queue.empty():
+                    item = queue.get_nowait()
+                    await process(item)
+            workers = [asyncio.create_task(worker()) for _ in range(min(queue.qsize(), self._concurrent))]
+            try:
+                await asyncio.gather(*workers)
+            finally:
+                for task in workers:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*workers, return_exceptions=True)
 
             async with self._session_factory() as session:
                 repo = OperationJobRepo(session)

@@ -51,8 +51,10 @@ telegram:
     # Master channel, mapped 1:1 to the root folder "/".
     channel: -1001234567890
   # Optional dedicated watcher bot. When configured, `serve` starts it with
-  # receive_updates=True and imports new files posted to the master channel.
-  # It must be a member/admin of the master channel.
+  # receive_updates=True and imports supported documents posted/forwarded to
+  # upload.channel into root. Use a separate bot outside telegram.users and add
+  # it as master-channel admin manually. No stored session is needed for this bot.
+  # Omit/set null to disable. No automatic downtime recovery: run import-channel.
   main_bot:
     api_id: 123456
     api_hash: "0123456789abcdef0123456789abcdef"
@@ -162,9 +164,9 @@ operations:
   # Logical filesystem jobs that may run at once. Management jobs use user
   # accounts; downloads use the download bot/user pool settings above.
   concurrent: 4
-  # Proactive per-account Telegram write budget. 0 actions disables it.
-  # Token-bucket model: each account starts with `actions` write tokens. Every
-  # flood-sensitive Telegram write (send/copy/delete/edit/admin action) consumes
+  # Per-account budget for Telegram writes and import history metadata reads.
+  # 0 actions disables it. Each account starts with `actions` tokens. Every
+  # opted-in request (send/copy/delete/edit/admin/import history) consumes
   # one token; the bucket refills gradually from empty to full over `within`
   # seconds. When an account has no token, tgshelf uses another eligible account;
   # if every account is empty, it waits for the first token to refill.
